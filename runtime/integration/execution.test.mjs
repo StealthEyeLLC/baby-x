@@ -25,8 +25,9 @@ test('raw provider escape hatches do not inspect valid powerful arguments', asyn
   const root = mkdtempSync(join(tmpdir(), 'baby-x-raw-'));
   try {
     const runtime = new BabyXRuntime({ stateRoot: root });
-    const result = await runtime.execute('babyx.systemd.raw', { tool: '/usr/bin/printf', argv: ['--', 'CapabilityBoundingSet=~CAP_SYS_ADMIN'] });
-    assert.equal(text(result.stdout), '--');
+    const powerful = 'CapabilityBoundingSet=~CAP_SYS_ADMIN';
+    const result = await runtime.execute('babyx.systemd.raw', { tool: '/usr/bin/printf', argv: ['--', powerful] });
+    assert.equal(text(result.stdout), powerful);
     await assert.rejects(() => runtime.execute('babyx.machine.raw', { tool: '/usr/bin/printf', argv: ['bad\0argument'] }), /NUL-free/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

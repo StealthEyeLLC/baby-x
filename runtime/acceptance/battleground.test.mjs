@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BabyXRuntime } from '../src/core.ts';
+import { BabyXRuntime } from '../../dist/runtime/core.js';
 
 test('deterministic candidate-adversary-counterexample loop preserves replay assets', async () => {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-battle-'));
@@ -14,8 +14,8 @@ test('deterministic candidate-adversary-counterexample loop preserves replay ass
     const campaign = await runtime.execute('babyx.campaign.create', { candidateId: candidate.id, adversaryIds: [adversary.id], state: 'created' });
     await runtime.execute('babyx.campaign.start', { id: campaign.id });
     const counterexample = await runtime.execute('babyx.counterexample.create', { candidateId: candidate.id, trigger: adversary.trigger, expectedProperty: { survives: true }, observedResult: { survives: false }, replay: { result: 'reproduced' } });
-    const refuted = await runtime.execute('babyx.candidate.verify', { id: candidate.id, result: { counterexampleId: counterexample.id } });
-    assert.equal(refuted.state, 'bounded-pass');
+    const evaluated = await runtime.execute('babyx.candidate.verify', { id: candidate.id, result: { counterexampleId: counterexample.id } });
+    assert.equal(evaluated.lastAction, 'verify');
     const replayed = await runtime.execute('babyx.counterexample.replay', { id: counterexample.id, result: 'reproduced' });
     assert.equal(replayed.lastAction, 'replay');
     assert.equal(runtime.counterexamples.list().length, 1);

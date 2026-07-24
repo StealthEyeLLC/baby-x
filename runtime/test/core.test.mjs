@@ -4,7 +4,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BabyXRuntime, canonicalize, decodeFrame, encodeFrame, operationDefinitions, sha256, verifyCanonical } from '../src/core.ts';
+import { BabyXRuntime, canonicalize, decodeFrame, encodeFrame, operationDefinitions, sha256, verifyCanonical } from '../../dist/runtime/core.js';
 
 test('QRT1 framing is deterministic and binary safe', () => {
   const value = { z: 1, a: { bytes: Buffer.from([0, 1, 255]).toString('base64') } };

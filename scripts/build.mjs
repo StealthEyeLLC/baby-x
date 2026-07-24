@@ -1,16 +1,34 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from 'node:fs';
+import { dirname, extname, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
 
 const root = process.cwd();
-const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', copied: [] };
+const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0 };
 if (process.version !== 'v24.18.0') throw new Error(`Node.js 24.18.0 required, found ${process.version}`);
 rmSync(join(root, 'dist'), { recursive: true, force: true });
-for (const [source, destination] of [['runtime/src', 'dist/runtime'], ['gateway/src', 'dist/gateway']]) {
-  if (existsSync(join(root, source))) { mkdirSync(dirname(join(root, destination)), { recursive: true }); cpSync(join(root, source), join(root, destination), { recursive: true }); report.copied.push(destination); }
+
+function walk(sourceRoot, destinationRoot) {
+  for (const name of readdirSync(sourceRoot)) {
+    const source = join(sourceRoot, name);
+    const destination = join(destinationRoot, name);
+    if (statSync(source).isDirectory()) { mkdirSync(destination, { recursive: true }); walk(source, destination); continue; }
+    mkdirSync(dirname(destination), { recursive: true });
+    if (extname(source) === '.ts') {
+      const output = destination.replace(/\.ts$/u, '.js');
+      const transformed = stripTypeScriptTypes(readFileSync(source, 'utf8'), { mode: 'transform', sourceMap: false })
+        .replaceAll(".ts'", ".js'")
+        .replaceAll('.ts"', '.js"');
+      writeFileSync(output, transformed, { mode: statSync(source).mode });
+      report.transformedTypeScript += 1;
+    } else { copyFileSync(source, destination); report.copiedJavaScript += 1; }
+  }
 }
+walk(join(root, 'runtime/src'), join(root, 'dist/runtime'));
+walk(join(root, 'gateway/src'), join(root, 'dist/gateway'));
+
 const compiler = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v c++'], { encoding: 'utf8' }).stdout.trim();
 const includeCandidates = ['/opt/node-v24.18.0-linux-x64/include/node', '/usr/include/node'];
 const include = includeCandidates.find((candidate) => existsSync(join(candidate, 'node_api.h')));

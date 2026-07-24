@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FileManager, JobManager } from '../src/core.ts';
+import { FileManager, JobManager } from '../../dist/runtime/core.js';
 
 async function waitFor(manager, id, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;

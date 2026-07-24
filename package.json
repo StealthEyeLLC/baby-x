@@ -7,13 +7,13 @@
   "engines": {"node": "24.18.0"},
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test runtime/test/*.test.mjs gateway/test/*.test.mjs runtime/integration/*.test.mjs runtime/acceptance/*.test.mjs",
-    "test:runtime": "node --test runtime/test/*.test.mjs",
-    "test:gateway": "node --test gateway/test/*.test.mjs",
-    "test:integration": "node --test runtime/integration/*.test.mjs",
-    "test:acceptance": "node --test runtime/acceptance/*.test.mjs",
-    "test:god-mode": "node --test runtime/acceptance/god-mode.test.mjs",
-    "test:battleground": "node --test runtime/acceptance/battleground.test.mjs",
+    "test": "npm run build && node --test runtime/test/*.test.mjs gateway/test/*.test.mjs runtime/integration/*.test.mjs runtime/acceptance/*.test.mjs",
+    "test:runtime": "npm run build && node --test runtime/test/*.test.mjs",
+    "test:gateway": "npm run build && node --test gateway/test/*.test.mjs",
+    "test:integration": "npm run build && node --test runtime/integration/*.test.mjs",
+    "test:acceptance": "npm run build && node --test runtime/acceptance/*.test.mjs",
+    "test:god-mode": "npm run build && node --test runtime/acceptance/god-mode.test.mjs",
+    "test:battleground": "npm run build && node --test runtime/acceptance/battleground.test.mjs",
     "lint": "node scripts/lint.mjs",
     "clean": "node scripts/clean.mjs"
   }

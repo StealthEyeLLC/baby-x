@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BabyXRuntime } from '../src/core.ts';
+import { BabyXRuntime } from '../../dist/runtime/core.js';
 
 function text(value) { return Buffer.from(value, 'base64').toString('utf8'); }
 

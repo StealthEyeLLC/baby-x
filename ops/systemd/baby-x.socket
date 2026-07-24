@@ -1,0 +1,14 @@
+[Unit]
+Description=Baby-X private unrestricted control socket
+[Socket]
+ListenStream=/run/horsey/baby-x.sock
+SocketUser=root
+SocketGroup=horsey
+SocketMode=0660
+DirectoryMode=0750
+Accept=no
+RemoveOnStop=yes
+Service=baby-x.service
+Backlog=128
+[Install]
+WantedBy=sockets.target

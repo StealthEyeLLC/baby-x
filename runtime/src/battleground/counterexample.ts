@@ -1,0 +1,1 @@
+export interface Counterexample { id: string; candidateId: string; trigger: Record<string, unknown>; expectedProperty: Record<string, unknown>; observedResult: Record<string, unknown>; replay: Record<string, unknown>; }

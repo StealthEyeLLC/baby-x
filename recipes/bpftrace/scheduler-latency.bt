@@ -1,0 +1,1 @@
+tracepoint:sched:sched_wakeup { @start[args->pid] = nsecs; } tracepoint:sched:sched_switch /@start[args->next_pid]/ { @us = hist((nsecs-@start[args->next_pid])/1000); delete(@start[args->next_pid]); }

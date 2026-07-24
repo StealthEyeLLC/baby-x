@@ -1,0 +1,1 @@
+export interface MachineDefinition { name: string; class: 'persistent-workspace' | 'clean-build' | 'disposable-experiment' | 'adversarial-arena' | 'failure-replay' | 'production-rehearsal' | 'custom'; root: string; imageKind: 'directory' | 'raw'; properties: Record<string, unknown>; }

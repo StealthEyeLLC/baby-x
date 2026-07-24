@@ -1,0 +1,1 @@
+export interface Campaign { id: string; state: 'created' | 'running' | 'paused' | 'cancelled' | 'refuted' | 'bounded-pass'; candidateId?: string; adversaryIds: string[]; counterexampleIds: string[]; }

@@ -1,0 +1,1 @@
+export const BPFTRACE_RECIPES = ['cpu-profile', 'scheduler-latency', 'blocked-tasks', 'syscall-count', 'syscall-latency', 'disk-latency', 'page-faults', 'process-exec', 'file-open', 'tcp-connect', 'tcp-reset', 'tcp-retransmit', 'socket-lifetime', 'memory-allocation'] as const;

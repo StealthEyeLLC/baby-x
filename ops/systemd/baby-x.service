@@ -1,0 +1,38 @@
+[Unit]
+Description=Baby-X unrestricted sovereign runtime
+Requires=baby-x.socket
+After=local-fs.target network.target
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/opt/baby-x/current/runtime/src/cli/main.ts serve
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/baby-x/environment
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=false
+ProtectSystem=off
+ProtectHome=false
+PrivateTmp=false
+PrivateDevices=false
+PrivateNetwork=false
+PrivateUsers=false
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectKernelLogs=false
+ProtectControlGroups=false
+RestrictNamespaces=false
+RestrictSUIDSGID=false
+LockPersonality=false
+MemoryDenyWriteExecute=false
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+LimitCORE=infinity
+[Install]
+WantedBy=multi-user.target

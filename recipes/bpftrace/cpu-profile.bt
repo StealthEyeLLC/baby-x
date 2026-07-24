@@ -1,0 +1,1 @@
+profile:hz:99 { @[ustack] = count(); } interval:s:10 { exit(); }

@@ -1,0 +1,1 @@
+kprobe:tcp_v4_connect { printf("{\"pid\":%d,\"comm\":\"%s\"}\n", pid, comm); }

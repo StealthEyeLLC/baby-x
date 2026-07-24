@@ -1,0 +1,1 @@
+export interface CheckpointCompatibility { executableBuildId?: string; kernelRelease: string; criuVersion: string; architecture: string; machineImage?: string; namespaces: string[]; externalResources: string[]; requiredOptions: string[]; successfulRestores: number; knownFailures: string[]; }

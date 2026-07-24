@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+coverage/
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+.DS_Store
+runtime/native/seccomp-supervisor/target/
+release/

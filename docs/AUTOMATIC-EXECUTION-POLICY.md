@@ -55,7 +55,7 @@ Unknown properties and overflowing values fail closed.
 
 Checkpoint G integrates policy at the existing certification objective entry point. Each certification record and evidence index binds the exact policy decision and digest. Certification still consumes the Disposable Machine Service and existing durable jobs; the policy does not gain execution authority.
 
-Future objective and racing entry points must consume the same pure decision function. Direct low-level job, machine, artifact, and provider operations remain unchanged.
+Checkpoint H candidate racing consumes the same pure decision function and binds the decision to each durable race and evidence index. Future objective entry points must do the same. Direct low-level job, machine, artifact, and provider operations remain unchanged.
 
 ## Evidence and determinism
 

@@ -288,9 +288,9 @@ export class DisposableMachineService {
       lifecycleAuthority: 'disposable-machine-service',
       executionAuthority: 'baby-x-durable-jobs',
       operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy', 'babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics'],
-      checkpoint: 'G',
+      checkpoint: 'H',
       supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'STOPPING', 'STOPPED', 'EXPIRED', 'DESTROYING', 'DESTROYED', 'FAILED', 'DEGRADED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'LOST', 'UNKNOWN'],
-      unavailableUntilLaterCheckpoints: ['race'],
+      unavailableUntilLaterCheckpoints: [],
       limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs, stopGracefulTimeoutMs: this.config.stopGracefulTimeoutMs, stopPollIntervalMs: this.config.stopPollIntervalMs, startupReconcileLimit: this.config.startupReconcileLimit, startupReconcileTimeBudgetMs: this.config.startupReconcileTimeBudgetMs, garbageCollectionLimit: this.config.garbageCollectionLimit, retryBackoffMs: this.config.retryBackoffMs },
       configuredRoots: { sourceSnapshotRoots: [...this.config.sourceSnapshotRoots], cloneDatasetRoots: [...this.config.cloneDatasetRoots], machineRoot: this.config.machineRoot },
     };

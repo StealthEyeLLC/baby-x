@@ -103,6 +103,11 @@ babyx.certification.list
 babyx.certification.cleanup
 babyx.execution.policy.describe
 babyx.execution.policy.decide
+babyx.race.describe
+babyx.race.run
+babyx.race.resume
+babyx.race.get
+babyx.race.list
 babyx.trace.describe
 babyx.trace.probes.list
 babyx.trace.validate

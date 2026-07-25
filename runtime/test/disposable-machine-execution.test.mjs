@@ -361,7 +361,7 @@ test('stale leader process identity blocks machine execution before job submissi
 test('describe exposes the current checkpoint without claiming later lifecycle authority', (t) => {
   const f = fixture(t);
   const described = f.service.describe();
-  assert.equal(described.checkpoint, 'G');
+  assert.equal(described.checkpoint, 'H');
   assert.ok(described.operations.includes('babyx.machine.start'));
   assert.ok(described.operations.includes('babyx.machine.exec'));
   assert.equal(described.unavailableUntilLaterCheckpoints.includes('destroy'), false);
@@ -370,6 +370,7 @@ test('describe exposes the current checkpoint without claiming later lifecycle a
   assert.ok(described.operations.includes('babyx.machine.diagnostics'));
   assert.equal(described.unavailableUntilLaterCheckpoints.includes('certify'), false);
   assert.equal(described.unavailableUntilLaterCheckpoints.includes('policy'), false);
+  assert.equal(described.unavailableUntilLaterCheckpoints.includes('race'), false);
   assert.equal(described.unavailableUntilLaterCheckpoints.includes('start'), false);
 });
 

@@ -367,6 +367,7 @@ export class BabyXRuntime {
   private machineServiceInitializePromise?: Promise<JsonObject>;
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
+  private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -428,6 +429,13 @@ export class BabyXRuntime {
     }
     return this.certificationServiceInstance;
   }
+  private async candidateRaceService(): Promise<import('./racing/service.ts').CandidateRaceService> {
+    if (this.candidateRaceServiceInstance === undefined) {
+      const { CandidateRaceService } = await import('./racing/service.ts');
+      this.candidateRaceServiceInstance = new CandidateRaceService({ stateRoot: this.stateRoot, certification: await this.certificationService(), artifacts: await this.artifactManager() });
+    }
+    return this.candidateRaceServiceInstance;
+  }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
@@ -455,6 +463,14 @@ export class BabyXRuntime {
       if (operation === 'babyx.machine.expire') return service.expire(payload, context);
       if (operation === 'babyx.machine.gc') return service.gc(payload, context);
       return service.diagnostics(payload, context);
+    }
+    if (['babyx.race.describe', 'babyx.race.run', 'babyx.race.resume', 'babyx.race.get', 'babyx.race.list'].includes(operation)) {
+      const service = await this.candidateRaceService();
+      if (operation === 'babyx.race.describe') return service.describe();
+      if (operation === 'babyx.race.run') return service.run(payload, context);
+      if (operation === 'babyx.race.resume') return service.resume(payload, context);
+      if (operation === 'babyx.race.get') return service.get(payload, context);
+      return service.list(payload, context);
     }
     if (['babyx.execution.policy.describe', 'babyx.execution.policy.decide'].includes(operation)) {
       const policy = await import('./policy/execution.ts');

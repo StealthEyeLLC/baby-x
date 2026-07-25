@@ -28,6 +28,7 @@ export interface DisposableMachineRequest {
   root: string;
   machineClass?: MachineDefinition['class'];
   launch?: Omit<MachineLaunchOptions, 'definition'>;
+  ownershipProperties?: Readonly<Record<string, string>>;
 }
 
 export interface DisposableMachineInstance {
@@ -63,7 +64,13 @@ export class DisposableMachineManager {
     const baseSnapshot = zfsName(request.baseSnapshot, 'baseSnapshot');
     const dataset = zfsName(request.dataset, 'dataset');
     const root = absolutePath(request.root, 'root');
-    const clone = await this.executor.run({ argv: ['/usr/sbin/zfs', 'clone', '-o', `mountpoint=${root}`, baseSnapshot, dataset] });
+    const argv = ['/usr/sbin/zfs', 'clone', '-o', `mountpoint=${root}`];
+    for (const [name, value] of Object.entries(request.ownershipProperties ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+      if (!/^com\.stealtheye\.babyx:[a-z-]+$/u.test(name) || !value || value.includes('\0')) throw new Error('ownership properties must be safe Baby-X ZFS properties');
+      argv.push('-o', `${name}=${value}`);
+    }
+    argv.push(baseSnapshot, dataset);
+    const clone = await this.executor.run({ argv });
     if (clone.exitCode !== 0) throw new Error(`zfs clone failed: ${clone.stderr}`);
     return { id, dataset, root, baseSnapshot, state: 'created' };
   }

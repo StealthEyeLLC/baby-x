@@ -292,7 +292,18 @@ function toolAvailability(): JsonObject {
   return Object.fromEntries(names.map((name) => [name, executable(name)]));
 }
 
-export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; }
+export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; }
+
+export interface RuntimeExecutionContext { idempotencyKey?: string; subject?: string; authorityClass?: string; }
+
+interface MachineServiceSurface {
+  describe(): JsonObject;
+  create(payload: unknown, context: RuntimeExecutionContext): Promise<JsonObject>;
+  get(payload: JsonObject, context: RuntimeExecutionContext): JsonObject;
+  list(payload: JsonObject | undefined, context: RuntimeExecutionContext): JsonObject;
+  events(payload: JsonObject, context: RuntimeExecutionContext): JsonObject;
+  status(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+}
 
 export class BabyXRuntime {
   readonly stateRoot: string;
@@ -305,6 +316,7 @@ export class BabyXRuntime {
   readonly adversaries: ObjectStore;
   readonly counterexamples: ObjectStore;
   readonly leases: ObjectStore;
+  private machineServiceInstance?: MachineServiceSurface;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -329,7 +341,14 @@ export class BabyXRuntime {
     };
   }
   health(): JsonObject { return { ok: true, product: 'baby-x', hostname: hostname(), uid: process.getuid?.() ?? null, stateRoot: this.stateRoot, machineIdSha256: machineIdHash(), timestamp: new Date().toISOString() }; }
-  async execute(operation: string, payload: JsonObject = {}): Promise<JsonObject> {
+  private async machineService(): Promise<MachineServiceSurface> {
+    if (this.machineServiceInstance === undefined) {
+      const { DisposableMachineService } = await import('./machines/service.ts');
+      this.machineServiceInstance = new DisposableMachineService({ stateRoot: this.stateRoot, executor: this.executor, config: this.options.machineServiceConfig ?? {} });
+    }
+    return this.machineServiceInstance;
+  }
+  async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
     if (operation === 'babyx.health') return this.health();
@@ -339,6 +358,15 @@ export class BabyXRuntime {
     if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
+    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status'].includes(operation)) {
+      const service = await this.machineService();
+      if (operation === 'babyx.machine.describe') return service.describe();
+      if (operation === 'babyx.machine.create') return service.create(payload, context);
+      if (operation === 'babyx.machine.get') return service.get(payload, context);
+      if (operation === 'babyx.machine.list') return service.list(payload, context);
+      if (operation === 'babyx.machine.events') return service.events(payload, context);
+      return service.status(payload, context);
+    }
     if (operation.startsWith('babyx.file.')) return this.fileOperation(operation, payload);
     if (operation.startsWith('babyx.spec.')) return this.specOperation(operation, payload);
     if (operation.startsWith('babyx.campaign.')) return this.objectOperation(operation, payload, this.campaigns);

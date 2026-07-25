@@ -4,3 +4,6 @@ export * from './machines/errors.ts';
 export * from './machines/schemas.ts';
 export * from './machines/states.ts';
 export * from './machines/store.ts';
+export * from './machines/identity.ts';
+export * from './machines/observe.ts';
+export * from './machines/service.ts';

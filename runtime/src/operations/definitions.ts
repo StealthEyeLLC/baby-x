@@ -64,6 +64,7 @@ babyx.machine.base.update
 babyx.machine.list
 babyx.machine.get
 babyx.machine.create
+babyx.machine.events
 babyx.machine.clone
 babyx.machine.snapshot
 babyx.machine.restore
@@ -203,7 +204,7 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 `.trim().split(/\s+/u);
 
-const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate']);
+const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate']);
 
 function familyOf(operation: string): string {
   const segments = operation.split('.');

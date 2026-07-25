@@ -54,7 +54,7 @@ export function startRuntimeServer(runtime = new BabyXRuntime()): ReturnType<typ
           const age = Math.abs(Date.now() - Date.parse(envelope.timestamp)); if (!Number.isFinite(age) || age > config.requestMaxAgeMs) throw new Error('stale request');
           const seen = nonces.get(envelope.nonce); if (seen && Date.now() - seen < config.nonceRetentionMs) throw new Error('nonce replay'); nonces.set(envelope.nonce, Date.now());
           if (!verifyCanonical(publicKey, unsigned(envelope), envelope.signature)) throw new Error('invalid signature');
-          const result = await runtime.execute(envelope.operation, envelope.payload ?? {});
+          const result = await runtime.execute(envelope.operation, envelope.payload ?? {}, { idempotencyKey: envelope.idempotencyKey, subject: envelope.subject, authorityClass: envelope.authorityClass });
           const proof = runtime.createProof(envelope.requestId, envelope.operation, true, startedAt, result);
           socket.write(encodeFrame({ requestId: envelope.requestId, ok: true, result, proof }));
         } catch (error) {

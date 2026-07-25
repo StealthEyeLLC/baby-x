@@ -41,6 +41,8 @@ class FakeMachineAuthority {
   calls = [];
   jobs = new Map();
   failCommands = new Set();
+  startFailure = false;
+  createState = 'CLONED';
   stopFailure = false;
   destroyFailure = false;
   diagnosticFailure = false;
@@ -50,8 +52,8 @@ class FakeMachineAuthority {
 
   create(payload, operationContext) {
     this.calls.push(['create', structuredClone(payload), structuredClone(operationContext)]);
-    this.machine.state = 'CLONED';
-    this.machine.observedState = 'CLONE_ONLY';
+    this.machine.state = this.createState;
+    this.machine.observedState = this.createState === 'REQUESTED' ? 'ABSENT' : 'CLONE_ONLY';
     return Promise.resolve({ operation: 'babyx.machine.create', machine: machineView(this.machine), replayed: false });
   }
   get(payload, operationContext) {
@@ -69,6 +71,7 @@ class FakeMachineAuthority {
   }
   start(payload, operationContext) {
     this.calls.push(['start', structuredClone(payload), structuredClone(operationContext)]);
+    if (this.startFailure) return Promise.reject(Object.assign(new Error('start failed before clone completion'), { code: 'machine_start_failed' }));
     this.machine.sequence += 1;
     this.machine.state = 'READY';
     this.machine.observedState = 'RUNNING';
@@ -366,4 +369,18 @@ test('certification layer contains no direct provider or alternate execution aut
   assert.match(source, /this\.options\.machine\.exec/u);
   assert.match(source, /this\.options\.machine\.stop/u);
   assert.match(source, /this\.options\.machine\.destroy/u);
+});
+
+test('pre-clone failure skips stop and destroys through normal lifecycle with positive absence', async (t) => {
+  const f = fixture(t);
+  f.machine.createState = 'REQUESTED';
+  f.machine.startFailure = true;
+  const result = await f.service.run(request(), { ...context, idempotencyKey: 'cert-preclone-failure-0001' });
+  assert.equal(result.certification.state, 'FAILED');
+  assert.equal(result.certification.success, false);
+  assert.equal(result.certification.cleanup.stopStatus, 'not-required');
+  assert.equal(result.certification.cleanup.destroyStatus, 'succeeded');
+  assert.equal(result.certification.cleanup.absenceVerified, true);
+  assert.equal(operationNames(f.machine).includes('stop'), false);
+  assert.equal(operationNames(f.machine).includes('destroy'), true);
 });

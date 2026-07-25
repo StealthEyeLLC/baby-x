@@ -750,6 +750,7 @@ export class CertificationService {
     const machineState = stateFrom(machine);
     let stopStatus: CertificationRecord['cleanup']['stopStatus'] = record.cleanup.stopStatus;
     if (machineState === 'DESTROYED') stopStatus = 'succeeded';
+    else if (['REQUESTED', 'CLONING', 'EXPIRED', 'RECOVERY_REQUIRED', 'DESTROYING', 'LOST'].includes(machineState)) stopStatus = 'not-required';
     else if (!['CLONED', 'STOPPED'].includes(machineState)) {
       const stopped = await this.options.machine.stop({ machineId: record.machineId, expectedSequence: sequenceFrom(machine), gracefulTimeoutMs: 30_000, forceAfterTimeout: false, reason: 'certification teardown' }, internalContext(context, record.certificationId, 'machine-stop'));
       machine = machineFrom(stopped);

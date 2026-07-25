@@ -144,7 +144,7 @@ function assertStrings(values: unknown, key: string): string[] {
 
 export function machineWrapped(target: ExecutionTarget, argv: string[], cwd: string, environment: JsonObject): string[] {
   if (target.kind === 'host') return argv;
-  const wrapped = ['/usr/bin/machinectl', '--quiet', '--uid=root'];
+  const wrapped = ['/usr/bin/machinectl', '--quiet', '--pipe', '--uid=root'];
   for (const [key, value] of Object.entries(environment)) wrapped.push(`--setenv=${key}=${String(value)}`);
   wrapped.push('shell', target.machine, '/usr/bin/env', `--chdir=${cwd}`, '--', ...argv);
   return wrapped;

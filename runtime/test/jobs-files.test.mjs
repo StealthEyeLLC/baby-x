@@ -54,7 +54,7 @@ test('machine execution wrapper uses host machinectl without a guest system bus'
     ['/usr/bin/printf', '%s', 'ok'],
     '/workspace',
     { MODE: 'test' },
-  ), ['/usr/bin/machinectl', '--quiet', '--uid=root', '--setenv=MODE=test', 'shell', 'machine-1', '/usr/bin/env', '--chdir=/workspace', '--', '/usr/bin/printf', '%s', 'ok']);
+  ), ['/usr/bin/machinectl', '--quiet', '--pipe', '--uid=root', '--setenv=MODE=test', 'shell', 'machine-1', '/usr/bin/env', '--chdir=/workspace', '--', '/usr/bin/printf', '%s', 'ok']);
 });
 
 test('durable job reconciliation terminalizes absent and reused process identities without fabricating exit zero', async () => {

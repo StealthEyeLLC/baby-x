@@ -80,7 +80,7 @@ class FakeMachineAuthority {
     this.machine.state = 'READY';
     this.machine.observedState = 'RUNNING';
     this.machine.activeJobIds = ['launch-job'];
-    this.jobs.set('launch-job', { id: 'launch-job', status: 'running', exitCode: null, signal: null, argv: ['/usr/bin/systemd-nspawn'], createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z' });
+    this.jobs.set('launch-job', { id: 'launch-job', operation: 'babyx.machine.start', status: 'running', exitCode: null, signal: null, argv: ['/usr/bin/systemd-nspawn'], createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z' });
     return Promise.resolve({ operation: 'babyx.machine.start', machine: machineView(this.machine), jobId: 'launch-job' });
   }
   exec(payload, operationContext) {
@@ -411,6 +411,34 @@ test('source preflight failure retains exact reserved machine linkage and cleans
   assert.equal(result.certification.cleanup.absenceVerified, true);
   assert.equal(operationNames(f.machine).includes('stop'), false);
   assert.equal(operationNames(f.machine).includes('destroy'), true);
+});
+
+test('cleanup waits through a transient launch-job teardown race and requires terminal durable state', async (t) => {
+  const f = fixture(t);
+  const stop = f.machine.stop.bind(f.machine);
+  f.machine.stop = async (...args) => {
+    const result = await stop(...args);
+    const launch = f.machine.jobs.get('launch-job');
+    f.machine.jobs.set('launch-job', { ...launch, status: 'running', exitCode: null, completedAt: undefined });
+    return result;
+  };
+  const reconcile = f.jobs.reconcile.bind(f.jobs);
+  let launchReconciliations = 0;
+  f.jobs.reconcile = (id) => {
+    if (id !== 'launch-job') return reconcile(id);
+    launchReconciliations += 1;
+    const launch = f.machine.jobs.get(id);
+    if (launchReconciliations < 3) return { ...launch, status: 'running' };
+    const terminal = { ...launch, status: 'lost', completedAt: '2026-07-25T16:01:01.000Z', reconciliation: { classification: 'process-absent', observedAt: '2026-07-25T16:01:01.000Z' } };
+    f.machine.jobs.set(id, terminal);
+    return terminal;
+  };
+  const result = await f.service.run(request(), { ...context, idempotencyKey: 'cert-transient-launch-cleanup-0001' });
+  assert.equal(result.certification.state, 'SUCCEEDED');
+  assert.equal(result.certification.success, true);
+  assert.equal(result.certification.cleanup.absenceVerified, true);
+  assert.ok(launchReconciliations >= 3);
+  assert.equal(f.jobs.reconcile('launch-job').status, 'lost');
 });
 
 test('cleanup success is impossible while a related durable job remains running', async (t) => {

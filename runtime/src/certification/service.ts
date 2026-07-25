@@ -747,11 +747,22 @@ export class CertificationService {
     return this.store.update(record.certificationId, (current) => ({ ...current, machineId, machineName: machineNameFrom(machine), machineSequence: sequenceFrom(machine) }));
   }
 
-  private reconcileRelatedJobs(record: CertificationRecord): JobRecord[] {
+  private reconcileRelatedJobs(record: CertificationRecord, allowMachineLaunch = false): JobRecord[] {
     const jobs = record.jobIds.map((jobId) => this.options.jobs.reconcile(jobId));
-    const running = jobs.filter((job) => job.status === 'running').map((job) => job.id);
-    if (running.length > 0) throw new CertificationError('certification_job_active', 'related durable jobs remain active after machine teardown', { jobIds: running });
+    const running = jobs.filter((job) => job.status === 'running' && !(allowMachineLaunch && job.operation === 'babyx.machine.start')).map((job) => job.id);
+    if (running.length > 0) throw new CertificationError('certification_job_active', 'related durable jobs remain active during certification cleanup', { jobIds: running });
     return jobs;
+  }
+
+  private async waitForRelatedJobsTerminal(record: CertificationRecord): Promise<JobRecord[]> {
+    const started = Date.now();
+    for (;;) {
+      const jobs = record.jobIds.map((jobId) => this.options.jobs.reconcile(jobId));
+      const running = jobs.filter((job) => job.status === 'running').map((job) => job.id);
+      if (running.length === 0) return jobs;
+      if (Date.now() - started >= this.machineSettleTimeoutMs) throw new CertificationError('certification_job_active', 'related durable jobs remain active after machine teardown', { jobIds: running });
+      await this.sleep(this.jobPollIntervalMs);
+    }
   }
 
   private async captureDiagnostics(record: CertificationRecord, context: RuntimeExecutionContext): Promise<CertificationRecord> {
@@ -794,7 +805,7 @@ export class CertificationService {
       if (stopStatus !== 'succeeded') throw new CertificationError('certification_stop_failed', 'certification machine did not reach STOPPED');
     }
 
-    this.reconcileRelatedJobs(this.store.get(record.certificationId));
+    this.reconcileRelatedJobs(this.store.get(record.certificationId), true);
     if (stateFrom(machine) !== 'DESTROYED') {
       const destroyed = await this.options.machine.destroy({ machineId: record.machineId, expectedSequence: sequenceFrom(machine), stopIfRunning: true, forceStop: false, stopTimeoutMs: 30_000, reason: 'certification teardown and evidence retention' }, internalContext(context, record.certificationId, 'machine-destroy'));
       machine = machineFrom(destroyed);
@@ -819,7 +830,7 @@ export class CertificationService {
     } else {
       record = this.store.update(record.certificationId, (current) => ({ ...current, machineSequence: sequenceFrom(machine), cleanup: { ...current.cleanup, stopStatus, destroyStatus: 'succeeded', absenceVerified: false, sourcePreserved: true } }));
     }
-    this.reconcileRelatedJobs(this.store.get(record.certificationId));
+    await this.waitForRelatedJobsTerminal(this.store.get(record.certificationId));
     const status = await this.options.machine.status({ machineId: record.machineId, includeJobs: true, includeRecentEvents: true }, context);
     const observed = json(status.observed, 'machine status observed');
     if (observed.state !== 'ABSENT') throw new CertificationError('certification_cleanup_failed', 'post-destroy machine status did not confirm ABSENT', { observedState: observed.state });

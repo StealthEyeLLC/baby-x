@@ -366,6 +366,7 @@ export class BabyXRuntime {
   private machineServiceInstance?: MachineServiceSurface;
   private machineServiceInitializePromise?: Promise<JsonObject>;
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
+  private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -415,6 +416,18 @@ export class BabyXRuntime {
     await this.machineServiceInitializePromise;
     return this.machineServiceInstance;
   }
+  private async certificationService(): Promise<import('./certification/service.ts').CertificationService> {
+    if (this.certificationServiceInstance === undefined) {
+      const { CertificationService } = await import('./certification/service.ts');
+      this.certificationServiceInstance = new CertificationService({
+        stateRoot: this.stateRoot,
+        machine: await this.machineService(),
+        jobs: this.jobs,
+        artifacts: await this.artifactManager(),
+      });
+    }
+    return this.certificationServiceInstance;
+  }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
@@ -442,6 +455,15 @@ export class BabyXRuntime {
       if (operation === 'babyx.machine.expire') return service.expire(payload, context);
       if (operation === 'babyx.machine.gc') return service.gc(payload, context);
       return service.diagnostics(payload, context);
+    }
+    if (['babyx.certification.describe', 'babyx.certification.run', 'babyx.certification.resume', 'babyx.certification.get', 'babyx.certification.list', 'babyx.certification.cleanup'].includes(operation)) {
+      const service = await this.certificationService();
+      if (operation === 'babyx.certification.describe') return service.describe();
+      if (operation === 'babyx.certification.run') return service.run(payload, context);
+      if (operation === 'babyx.certification.resume') return service.resume(payload, context);
+      if (operation === 'babyx.certification.get') return service.get(payload, context);
+      if (operation === 'babyx.certification.list') return service.list(payload, context);
+      return service.cleanup(payload, context);
     }
     if (operation === 'babyx.artifact.create') return (await this.artifactManager()).create(requiredString(payload, 'name'), requiredString(payload, 'sourcePath'), payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata as JsonObject : {});
     if (operation === 'babyx.artifact.get') return (await this.artifactManager()).get(requiredString(payload, 'id'));

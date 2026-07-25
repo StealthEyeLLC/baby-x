@@ -95,6 +95,12 @@ babyx.machine.poweroff
 babyx.machine.reboot
 babyx.machine.remove
 babyx.machine.raw
+babyx.certification.describe
+babyx.certification.run
+babyx.certification.resume
+babyx.certification.get
+babyx.certification.list
+babyx.certification.cleanup
 babyx.trace.describe
 babyx.trace.probes.list
 babyx.trace.validate

@@ -1,6 +1,6 @@
 # Disposable Machine Service Documentation Set
 
-**Status:** Governing design and implementation guidance. Implementation has not started.
+**Status:** Governing design and implementation guidance. Checkpoints A through F are implemented on the authorized build branch; G and H remain pending.
 
 **Top-level authority:** [`../DISPOSABLE-MACHINE-SERVICE-BUILD-MANUAL.md`](../DISPOSABLE-MACHINE-SERVICE-BUILD-MANUAL.md)
 
@@ -25,6 +25,7 @@ Do not redesign or replace that primitive. Build the durable service around it.
 5. [`50-IMPLEMENTATION-CHECKPOINTS.md`](50-IMPLEMENTATION-CHECKPOINTS.md)
 6. [`60-TEST-AND-CERTIFICATION-PLAN.md`](60-TEST-AND-CERTIFICATION-PLAN.md)
 7. [`70-OPERATIONS-AND-BABY-EXECUTION.md`](70-OPERATIONS-AND-BABY-EXECUTION.md)
+8. [Checkpoint F certification service contract](../DISPOSABLE-MACHINE-CERTIFICATION-SERVICE.md)
 
 ## Controlling constraints
 

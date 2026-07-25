@@ -353,10 +353,10 @@ test('zero-exit destroy without dataset absence never records DESTROYED or creat
   assert.equal(f.provider.dataset.dataset, 'pool/runs/machine-1');
 });
 
-test('describe exposes Checkpoint E without claiming certification completion', (t) => {
+test('describe exposes Checkpoint F without claiming certification completion', (t) => {
   const f = fixture(t);
   const described = f.service.describe();
-  assert.equal(described.checkpoint, 'E');
+  assert.equal(described.checkpoint, 'F');
   assert.ok(described.operations.includes('babyx.machine.stop'));
   assert.ok(described.operations.includes('babyx.machine.destroy'));
   assert.equal(described.unavailableUntilLaterCheckpoints.includes('stop'), false);
@@ -364,7 +364,7 @@ test('describe exposes Checkpoint E without claiming certification completion', 
   assert.ok(described.operations.includes('babyx.machine.reconcile'));
   assert.ok(described.operations.includes('babyx.machine.expire'));
   assert.ok(described.operations.includes('babyx.machine.gc'));
-  assert.ok(described.unavailableUntilLaterCheckpoints.includes('certify'));
+  assert.equal(described.unavailableUntilLaterCheckpoints.includes('certify'), false);
 });
 
 

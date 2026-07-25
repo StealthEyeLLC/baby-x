@@ -223,6 +223,8 @@ test('full certification success binds source, machine, jobs, evidence, and veri
   assert.equal(certification.source.commit, '1'.repeat(40));
   assert.equal(certification.source.tree, '2'.repeat(40));
   assert.equal(certification.source.snapshot, 'pool/source@certification');
+  assert.equal(certification.executionPolicy.mode, 'disposable');
+  assert.match(certification.executionPolicy.decisionDigest, /^[a-f0-9]{64}$/u);
   assert.equal(certification.machineId, 'mx_certification01');
   assert.equal(certification.jobIds.length, 7);
   assert.ok(certification.artifactReferences.includes('machine-diagnostic-artifact'));

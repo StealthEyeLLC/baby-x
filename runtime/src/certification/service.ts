@@ -10,6 +10,7 @@ import {
   type RuntimeExecutionContext,
 } from '../core.ts';
 import { canonicalMachineEvidence } from '../machines/schemas.ts';
+import { decideExecutionPolicy, type ExecutionPolicyDecision } from '../policy/execution.ts';
 
 export const CERTIFICATION_SCHEMA_VERSION = '1.0.0' as const;
 
@@ -76,6 +77,7 @@ export interface CertificationRecord extends JsonObject {
   requestDigest: string;
   requestIdempotencyKey: string;
   request: CertificationRequest;
+  executionPolicy: ExecutionPolicyDecision;
   state: CertificationState;
   revision: number;
   createdAt: string;
@@ -368,6 +370,7 @@ function publicRecord(record: CertificationRecord): JsonObject {
     certificationId: record.certificationId,
     ownerPrincipal: record.ownerPrincipal,
     requestDigest: record.requestDigest,
+    executionPolicy: structuredClone(record.executionPolicy),
     state: record.state,
     revision: record.revision,
     createdAt: record.createdAt,
@@ -489,6 +492,12 @@ export class CertificationService {
     const request = normalizeRequest(payload);
     const requestDigest = sha256(canonicalMachineEvidence(request));
     const createdAt = this.now();
+    const executionPolicy = decideExecutionPolicy({
+      schemaVersion: '1.0.0', objectiveType: 'certification', mutationRisk: 'high', dependencyUncertainty: request.profile.steps.some((step) => step.phase === 'dependency') ? 'unknown' : 'known', isolationRequirement: 'required', reversibility: 'reversible',
+      requiredTools: request.profile.steps.flatMap((step) => step.argv.slice(0, 1)), requiredPackages: request.profile.steps.filter((step) => step.phase === 'dependency').map((step) => step.id), sourceSensitivity: 'internal', reproducibilityRequirement: 'required',
+      networkRequirement: (object(request.machine.launch, 'machine.launch').networkMode === 'none' ? 'none' : 'private'), expectedDurationMs: request.profile.steps.reduce((total, step) => total + (step.timeoutMs ?? 3_600_000), 0),
+      resourceProfile: { cpuUnits: 1, memoryMb: 1024, diskMb: 4096 }, explicitConstraint: 'auto', racingEligibility: false, candidateCount: 1, costBounds: { maxMachines: 1, maxDurationMs: 604_800_000, maxDiskMb: 1_048_576 },
+    });
     const record = this.store.createOrReplay(authenticated.idempotencyKey, requestDigest, () => ({
       schemaVersion: CERTIFICATION_SCHEMA_VERSION,
       certificationId: this.certificationIdFactory(),
@@ -496,6 +505,7 @@ export class CertificationService {
       requestDigest,
       requestIdempotencyKey: authenticated.idempotencyKey,
       request,
+      executionPolicy,
       state: 'REQUESTED',
       revision: 1,
       createdAt,
@@ -791,6 +801,7 @@ export class CertificationService {
         ownerPrincipal: record.ownerPrincipal,
         source: record.request.source,
         profile: { id: record.request.profile.id, version: record.request.profile.version, digest: sha256(canonicalize(record.request.profile)) },
+        executionPolicy: record.executionPolicy,
         state: record.state,
         testResult: record.testResult,
         evidence: { diagnosticArtifactReference: record.evidence.diagnosticArtifactReference ?? null },

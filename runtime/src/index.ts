@@ -11,3 +11,4 @@ export * from './machines/execution.ts';
 export * from './machines/destruction.ts';
 export * from './machines/recovery.ts';
 export * from './certification/service.ts';
+export * from './policy/execution.ts';

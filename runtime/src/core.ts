@@ -456,6 +456,10 @@ export class BabyXRuntime {
       if (operation === 'babyx.machine.gc') return service.gc(payload, context);
       return service.diagnostics(payload, context);
     }
+    if (['babyx.execution.policy.describe', 'babyx.execution.policy.decide'].includes(operation)) {
+      const policy = await import('./policy/execution.ts');
+      return operation === 'babyx.execution.policy.describe' ? policy.describeExecutionPolicy() : policy.decideExecutionPolicy(payload);
+    }
     if (['babyx.certification.describe', 'babyx.certification.run', 'babyx.certification.resume', 'babyx.certification.get', 'babyx.certification.list', 'babyx.certification.cleanup'].includes(operation)) {
       const service = await this.certificationService();
       if (operation === 'babyx.certification.describe') return service.describe();

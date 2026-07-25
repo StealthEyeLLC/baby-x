@@ -101,6 +101,8 @@ babyx.certification.resume
 babyx.certification.get
 babyx.certification.list
 babyx.certification.cleanup
+babyx.execution.policy.describe
+babyx.execution.policy.decide
 babyx.trace.describe
 babyx.trace.probes.list
 babyx.trace.validate

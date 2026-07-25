@@ -32,6 +32,8 @@ Command execution remains under the existing durable-job authority. Evidence rem
 
 ## Certification request
 
+Checkpoint G additionally binds the deterministic automatic execution-policy decision and digest to every certification record and evidence index. Certification remains disposable by mandatory policy.
+
 A request binds:
 
 - exact source commit;

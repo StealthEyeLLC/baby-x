@@ -16,6 +16,7 @@ babyx.shell
 babyx.job.get
 babyx.job.list
 babyx.job.wait
+babyx.job.reconcile
 babyx.job.cancel
 babyx.job.stream.read
 babyx.file.stat

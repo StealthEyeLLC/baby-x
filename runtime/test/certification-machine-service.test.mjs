@@ -23,6 +23,7 @@ function machineView(machine) {
     activeJobIds: [...machine.activeJobIds],
     protectedJobIds: [],
     artifactIds: [...machine.artifactIds],
+    ...(machine.parentCertificationId === undefined ? {} : { parentCertificationId: machine.parentCertificationId }),
     cleanup: structuredClone(machine.cleanup),
   });
 }
@@ -41,6 +42,7 @@ class FakeMachineAuthority {
   calls = [];
   jobs = new Map();
   failCommands = new Set();
+  createFailure = null;
   startFailure = false;
   createState = 'CLONED';
   stopFailure = false;
@@ -53,7 +55,9 @@ class FakeMachineAuthority {
   create(payload, operationContext) {
     this.calls.push(['create', structuredClone(payload), structuredClone(operationContext)]);
     this.machine.state = this.createState;
+    this.machine.parentCertificationId = payload.parentCertificationId;
     this.machine.observedState = this.createState === 'REQUESTED' ? 'ABSENT' : 'CLONE_ONLY';
+    if (this.createFailure !== null) return Promise.reject(Object.assign(new Error(this.createFailure.message), { code: this.createFailure.code, details: { ...this.createFailure.details, machineId: this.machine.machineId, machineName: this.machine.machineName, stateSequence: this.machine.sequence } }));
     return Promise.resolve({ operation: 'babyx.machine.create', machine: machineView(this.machine), replayed: false });
   }
   get(payload, operationContext) {
@@ -76,6 +80,7 @@ class FakeMachineAuthority {
     this.machine.state = 'READY';
     this.machine.observedState = 'RUNNING';
     this.machine.activeJobIds = ['launch-job'];
+    this.jobs.set('launch-job', { id: 'launch-job', status: 'running', exitCode: null, signal: null, argv: ['/usr/bin/systemd-nspawn'], createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z' });
     return Promise.resolve({ operation: 'babyx.machine.start', machine: machineView(this.machine), jobId: 'launch-job' });
   }
   exec(payload, operationContext) {
@@ -102,6 +107,8 @@ class FakeMachineAuthority {
     this.machine.state = 'STOPPED';
     this.machine.observedState = 'STOPPED';
     this.machine.activeJobIds = [];
+    const launch = this.jobs.get('launch-job');
+    if (launch?.status === 'running') this.jobs.set('launch-job', { ...launch, status: 'completed', exitCode: 0, completedAt: '2026-07-25T16:01:00.000Z' });
     return Promise.resolve({ operation: 'babyx.machine.stop', machine: machineView(this.machine) });
   }
   destroy(payload, operationContext) {
@@ -135,6 +142,11 @@ class FakeMachineAuthority {
 
 class FakeJobs {
   constructor(machine) { this.machine = machine; }
+  reconcile(id) {
+    const job = this.machine.jobs.get(id);
+    if (job === undefined) throw new Error(`unknown job ${id}`);
+    return structuredClone(job);
+  }
   get(id) {
     const job = this.machine.jobs.get(id);
     if (job === undefined) throw new Error(`unknown job ${id}`);
@@ -383,4 +395,39 @@ test('pre-clone failure skips stop and destroys through normal lifecycle with po
   assert.equal(result.certification.cleanup.absenceVerified, true);
   assert.equal(operationNames(f.machine).includes('stop'), false);
   assert.equal(operationNames(f.machine).includes('destroy'), true);
+});
+
+
+test('source preflight failure retains exact reserved machine linkage and cleans without an invalid stop', async (t) => {
+  const f = fixture(t);
+  f.machine.createState = 'REQUESTED';
+  f.machine.createFailure = { code: 'machine_source_mismatch', message: 'source snapshot GUID differs', details: { expectedGuid: 'stale-guid', actualGuid: 'live-guid' } };
+  const result = await f.service.run(request(), { ...context, idempotencyKey: 'cert-source-mismatch-link-0001' });
+  assert.equal(result.certification.state, 'FAILED');
+  assert.equal(result.certification.machineId, f.machine.machine.machineId);
+  assert.equal(result.certification.machineName, f.machine.machine.machineName);
+  assert.equal(result.certification.cleanup.stopStatus, 'not-required');
+  assert.equal(result.certification.cleanup.destroyStatus, 'succeeded');
+  assert.equal(result.certification.cleanup.absenceVerified, true);
+  assert.equal(operationNames(f.machine).includes('stop'), false);
+  assert.equal(operationNames(f.machine).includes('destroy'), true);
+});
+
+test('cleanup success is impossible while a related durable job remains running', async (t) => {
+  const f = fixture(t);
+  const reconcile = f.jobs.reconcile.bind(f.jobs);
+  f.jobs.reconcile = (id) => id === 'launch-job' ? { ...f.machine.jobs.get(id), status: 'running' } : reconcile(id);
+  const result = await f.service.run(request(), { ...context, idempotencyKey: 'cert-active-job-cleanup-0001' });
+  assert.equal(result.certification.state, 'RECOVERY_REQUIRED');
+  assert.equal(result.certification.success, false);
+  assert.equal(result.certification.cleanup.absenceVerified, false);
+  assert.equal(result.certification.lastError.code, 'certification_job_active');
+});
+
+test('successful certification leaves every related durable job terminal', async (t) => {
+  const f = fixture(t);
+  const result = await f.service.run(request(), { ...context, idempotencyKey: 'cert-terminal-jobs-0001' });
+  assert.equal(result.certification.state, 'SUCCEEDED');
+  assert.ok(result.certification.jobIds.length > 1);
+  for (const jobId of result.certification.jobIds) assert.notEqual(f.jobs.reconcile(jobId).status, 'running');
 });

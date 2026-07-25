@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FileManager, JobManager } from '../../dist/runtime/core.js';
+import { BabyXRuntime, FileManager, JobManager, machineWrapped } from '../../dist/runtime/core.js';
 
 async function waitFor(manager, id, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -44,5 +44,79 @@ test('durable detached jobs stream exact stdout and support process-group cancel
     const sleeping = manager.start('test', { argv: ['/usr/bin/bash', '-lc', 'sleep 30'] });
     manager.cancel(sleeping.id, 'SIGTERM');
     assert.equal(manager.get(sleeping.id).status, 'cancelled');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('machine execution wrapper uses host machinectl without a guest system bus', () => {
+  assert.deepEqual(machineWrapped(
+    { kind: 'machine', machine: 'machine-1' },
+    ['/usr/bin/printf', '%s', 'ok'],
+    '/workspace',
+    { MODE: 'test' },
+  ), ['/usr/bin/machinectl', '--quiet', '--uid=root', '--setenv=MODE=test', 'shell', 'machine-1', '/usr/bin/env', '--chdir=/workspace', '--', '/usr/bin/printf', '%s', 'ok']);
+});
+
+test('durable job reconciliation terminalizes absent and reused process identities without fabricating exit zero', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-job-reconcile-'));
+  try {
+    mkdirSync(join(root, 'streams'), { recursive: true });
+    const base = {
+      id: 'job-stale', operation: 'babyx.machine.start', status: 'running', target: { kind: 'host' }, argv: ['/usr/bin/systemd-nspawn'], cwd: '/',
+      createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z', pid: 4242, pgid: 4242,
+      stdoutPath: join(root, 'streams', 'job-stale.stdout'), stderrPath: join(root, 'streams', 'job-stale.stderr'),
+      processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/bin/systemd-nspawn', bootId: 'boot-1' },
+    };
+    writeFileSync(base.stdoutPath, ''); writeFileSync(base.stderrPath, '');
+    writeFileSync(join(root, 'jobs.json'), JSON.stringify({ jobs: { [base.id]: base } }));
+    const absent = new JobManager(root, { processIdentity: () => { throw new Error('absent'); }, now: () => '2026-07-25T17:00:00.000Z' });
+    const lost = absent.reconcile(base.id);
+    assert.equal(lost.status, 'lost');
+    assert.equal(lost.exitCode, undefined);
+    assert.equal(lost.reconciliation.classification, 'process-absent');
+    assert.equal(absent.reconcile(base.id).completedAt, lost.completedAt);
+
+    const conflictRecord = { ...base, id: 'job-reused', stdoutPath: join(root, 'streams', 'job-reused.stdout'), stderrPath: join(root, 'streams', 'job-reused.stderr') };
+    writeFileSync(conflictRecord.stdoutPath, ''); writeFileSync(conflictRecord.stderrPath, '');
+    writeFileSync(join(root, 'jobs.json'), JSON.stringify({ jobs: { [conflictRecord.id]: conflictRecord } }));
+    const reused = new JobManager(root, { processIdentity: () => ({ pid: 4242, pgid: 4242, processStartTime: '999', executablePath: '/usr/bin/other', bootId: 'boot-1' }), now: () => '2026-07-25T17:01:00.000Z' });
+    const conflicted = reused.reconcile(conflictRecord.id);
+    assert.equal(conflicted.status, 'lost');
+    assert.equal(conflicted.reconciliation.classification, 'identity-conflict');
+    assert.equal(conflicted.exitCode, undefined);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('public job reconcile operation exposes truthful terminal recovery', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-runtime-job-reconcile-'));
+  try {
+    mkdirSync(join(root, 'jobs', 'streams'), { recursive: true });
+    const id = 'job-public-stale';
+    const stdoutPath = join(root, 'jobs', 'streams', id + '.stdout');
+    const stderrPath = join(root, 'jobs', 'streams', id + '.stderr');
+    writeFileSync(stdoutPath, ''); writeFileSync(stderrPath, '');
+    writeFileSync(join(root, 'jobs', 'jobs.json'), JSON.stringify({ jobs: { [id]: { id, operation: 'babyx.machine.start', status: 'running', target: { kind: 'host' }, argv: ['/usr/bin/systemd-nspawn'], cwd: '/', createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z', pid: 999999999, pgid: 999999999, stdoutPath, stderrPath, processIdentity: { pid: 999999999, pgid: 999999999, processStartTime: '1', executablePath: '/usr/bin/systemd-nspawn', bootId: 'old-boot' } } } }));
+    const runtime = new BabyXRuntime({ stateRoot: root });
+    const result = await runtime.execute('babyx.job.reconcile', { jobId: id }, { subject: 'owner:test', authorityClass: 'unrestricted-owner' });
+    assert.equal(result.status, 'lost');
+    assert.equal(result.reconciliation.classification, 'process-absent');
+    assert.ok(runtime.describe().operations.some((definition) => definition.operation === 'babyx.job.reconcile'));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('machine-service startup reconciles dead recorded-running jobs', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-startup-job-reconcile-'));
+  try {
+    mkdirSync(join(root, 'jobs', 'streams'), { recursive: true });
+    const id = 'job-startup-stale';
+    const stdoutPath = join(root, 'jobs', 'streams', id + '.stdout');
+    const stderrPath = join(root, 'jobs', 'streams', id + '.stderr');
+    writeFileSync(stdoutPath, ''); writeFileSync(stderrPath, '');
+    writeFileSync(join(root, 'jobs', 'jobs.json'), JSON.stringify({ jobs: { [id]: { id, operation: 'babyx.machine.start', status: 'running', target: { kind: 'host' }, argv: ['/usr/bin/systemd-nspawn'], cwd: '/', createdAt: '2026-07-25T16:00:00.000Z', startedAt: '2026-07-25T16:00:00.000Z', pid: 999999998, pgid: 999999998, stdoutPath, stderrPath, processIdentity: { pid: 999999998, pgid: 999999998, processStartTime: '1', executablePath: '/usr/bin/systemd-nspawn', bootId: 'old-boot' } } } }));
+    const runtime = new BabyXRuntime({ stateRoot: root });
+    await runtime.execute('babyx.machine.describe');
+    const reconciled = await runtime.execute('babyx.job.get', { jobId: id });
+    assert.equal(reconciled.status, 'lost');
+    assert.equal(reconciled.reconciliation.classification, 'process-absent');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

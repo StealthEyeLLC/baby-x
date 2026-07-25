@@ -411,3 +411,19 @@ test('the real durable JobManager preserves metadata, emits changes, and enforce
   assert.equal(timed.signal, 'SIGTERM');
   assert.equal(timed.timeoutMs, 20);
 });
+
+
+test('stale expected source GUID remains durable and startup reconciliation cannot create a clone', async (t) => {
+  const f = fixture(t);
+  const request = machineRequest(f.machineRoot);
+  request.source.expectedGuid = 'stale-guid';
+  await assert.rejects(() => f.service.create(request, { ...createContext, idempotencyKey: 'create-stale-source-guid' }), machineError('machine_source_mismatch'));
+  const record = f.service.store.get('mx_machine00000001');
+  assert.equal(record.lifecycle.persistedState, 'REQUESTED');
+  assert.equal(record.source.expectedSnapshotGuid, 'stale-guid');
+  assert.equal(f.provider.dataset, null);
+  const reconciled = await f.service.reconcile({ machineId: record.machineId, reason: 'restart after source mismatch' }, { idempotencyKey: 'reconcile-stale-source-guid', subject: 'owner:test', authorityClass: 'unrestricted-owner' });
+  assert.equal(reconciled.results[0].classification, 'lost');
+  assert.equal(f.service.store.get(record.machineId).lifecycle.persistedState, 'LOST');
+  assert.equal(f.provider.dataset, null);
+});

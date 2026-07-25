@@ -188,7 +188,7 @@ function initialRecord(
     ...(request.parentCandidateId === undefined ? {} : { parentCandidateId: request.parentCandidateId }),
     creationIdempotencyKey: idempotencyKey,
     creationRequestDigest: requestDigest,
-    source: { kind: 'zfs-snapshot', snapshot: request.source.snapshot, dataset: request.source.dataset, observedAt: now },
+    source: { kind: 'zfs-snapshot', snapshot: request.source.snapshot, dataset: request.source.dataset, ...(request.source.expectedGuid === undefined ? {} : { expectedSnapshotGuid: request.source.expectedGuid }), observedAt: now },
     clone: {
       dataset: request.clone.dataset,
       mountpoint: request.clone.mountpoint,
@@ -321,7 +321,7 @@ export class DisposableMachineService {
       const source = this.observer.requireProviderObservation(await this.observer.source(record.source.snapshot), 'source snapshot');
       if (source.status === 'absent') throw new MachineServiceError('machine_source_not_found', 'source snapshot does not exist', { snapshot: record.source.snapshot });
       if (source.guid === undefined || source.creationTxg === undefined) throw new MachineServiceError('machine_readback_mismatch', 'source snapshot identity readback is incomplete', { snapshot: record.source.snapshot });
-      if (request.source.expectedGuid !== undefined && request.source.expectedGuid !== source.guid) throw new MachineServiceError('machine_source_mismatch', 'source snapshot GUID differs from the requested identity', { expectedGuid: request.source.expectedGuid, actualGuid: source.guid });
+      if (record.source.expectedSnapshotGuid !== undefined && record.source.expectedSnapshotGuid !== source.guid) throw new MachineServiceError('machine_source_mismatch', 'source snapshot GUID differs from the requested identity', { expectedGuid: record.source.expectedSnapshotGuid, actualGuid: source.guid });
 
       let current = record;
       if (current.lifecycle.persistedState === 'REQUESTED') {
@@ -374,6 +374,9 @@ export class DisposableMachineService {
         host: { ...current.host, lastObservedBootId: this.host.bootId },
       });
       return { operation: 'babyx.machine.create', machine: publicRecord(completed), replayed, providerEvidence: { source: commandEvidence(source.command), clone: commandEvidence(after.command) } };
+    } catch (error) {
+      if (error instanceof MachineServiceError) throw new MachineServiceError(error.code, error.message, { ...error.details, machineId: record.machineId, machineName: record.machineName, stateSequence: this.store.get(record.machineId).lifecycle.stateSequence });
+      throw error;
     } finally {
       this.store.releaseLease(record.machineId, leaseId);
     }

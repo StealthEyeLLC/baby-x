@@ -128,6 +128,7 @@ export interface CertificationMachineAuthority {
 
 export interface CertificationJobAuthority {
   get(id: string): JobRecord;
+  reconcile(id: string): JobRecord;
 }
 
 export interface CertificationArtifactAuthority {
@@ -563,6 +564,7 @@ export class CertificationService {
     const id = certificationId(payload.certificationId);
     let record = this.store.get(id);
     this.authorize(record, context);
+    if (record.machineId === undefined) record = this.recoverMachineLink(record, context);
     if (record.machineId === undefined) throw new CertificationError('certification_cleanup_unavailable', 'certification has no durable machine identity');
     const expiresAt = record.request.retention.expiresAt;
     if (expiresAt !== undefined && Date.parse(expiresAt) > Date.parse(this.now())) throw new CertificationError('certification_retention_active', 'certification retention has not expired', { expiresAt });
@@ -708,6 +710,7 @@ export class CertificationService {
       return { operation, certification: publicRecord(final), replayed: false };
     } catch (error) {
       record = this.store.update(id, (current) => ({ ...current, lastError: errorEvidence(error, 'certification_failed'), testResult: current.testResult.status === 'pending' ? { status: 'failed' } : current.testResult }));
+      if (record.machineId === undefined) record = this.recoverMachineLink(record, context, error);
       if (record.machineId !== undefined && !record.request.retention.preserveOnFailure) {
         try {
           record = this.store.update(id, (current) => ({ ...current, state: 'CLEANING', cleanup: { ...current.cleanup, required: true } }));
@@ -724,6 +727,31 @@ export class CertificationService {
       const failed = this.store.update(id, (current) => ({ ...current, state: current.cleanup.absenceVerified ? 'FAILED' : 'RECOVERY_REQUIRED' }));
       return { operation, certification: publicRecord(failed), replayed: false };
     }
+  }
+
+  private recoverMachineLink(record: CertificationRecord, context: RuntimeExecutionContext, error?: unknown): CertificationRecord {
+    let machineId: string | undefined;
+    if (error instanceof Error && 'details' in error) {
+      const details = (error as Error & { details?: unknown }).details;
+      if (details !== null && typeof details === 'object' && !Array.isArray(details) && typeof (details as JsonObject).machineId === 'string') machineId = String((details as JsonObject).machineId);
+    }
+    if (machineId === undefined) {
+      const listed = this.options.machine.list({ parentCertificationId: record.certificationId, offset: 0, limit: 2 }, context);
+      const machines = Array.isArray(listed.machines) ? listed.machines : [];
+      if (machines.length === 0) return record;
+      if (machines.length !== 1 || typeof (machines[0] as JsonObject).machineId !== 'string') throw new CertificationError('certification_machine_link_ambiguous', 'certification parent identity resolves to multiple machines', { certificationId: record.certificationId, count: machines.length });
+      machineId = String((machines[0] as JsonObject).machineId);
+    }
+    const machine = this.machineRecord(machineId, context);
+    if (machine.parentCertificationId !== record.certificationId) throw new CertificationError('certification_machine_link_ambiguous', 'machine parent certification identity does not match', { certificationId: record.certificationId, machineId });
+    return this.store.update(record.certificationId, (current) => ({ ...current, machineId, machineName: machineNameFrom(machine), machineSequence: sequenceFrom(machine) }));
+  }
+
+  private reconcileRelatedJobs(record: CertificationRecord): JobRecord[] {
+    const jobs = record.jobIds.map((jobId) => this.options.jobs.reconcile(jobId));
+    const running = jobs.filter((job) => job.status === 'running').map((job) => job.id);
+    if (running.length > 0) throw new CertificationError('certification_job_active', 'related durable jobs remain active after machine teardown', { jobIds: running });
+    return jobs;
   }
 
   private async captureDiagnostics(record: CertificationRecord, context: RuntimeExecutionContext): Promise<CertificationRecord> {
@@ -747,18 +775,26 @@ export class CertificationService {
   private async cleanupMachine(record: CertificationRecord, context: RuntimeExecutionContext): Promise<CertificationRecord> {
     if (record.machineId === undefined) return record;
     let machine = this.machineRecord(record.machineId, context);
-    const machineState = stateFrom(machine);
+    let machineState = stateFrom(machine);
+    if (machineState === 'RECOVERY_REQUIRED') {
+      await this.options.machine.reconcile({ machineId: record.machineId, reason: 'certification cleanup classification' }, internalContext(context, record.certificationId, 'cleanup-reconcile'));
+      machine = this.machineRecord(record.machineId, context);
+      machineState = stateFrom(machine);
+    }
+    if (['LOST', 'AMBIGUOUS', 'UNKNOWN'].includes(machineState)) throw new CertificationError('certification_cleanup_ambiguous', 'machine state blocks ordinary certification cleanup', { machineId: record.machineId, state: machineState });
+
     let stopStatus: CertificationRecord['cleanup']['stopStatus'] = record.cleanup.stopStatus;
     if (machineState === 'DESTROYED') stopStatus = 'succeeded';
-    else if (['REQUESTED', 'CLONING', 'EXPIRED', 'RECOVERY_REQUIRED', 'DESTROYING', 'LOST'].includes(machineState)) stopStatus = 'not-required';
-    else if (!['CLONED', 'STOPPED'].includes(machineState)) {
+    else if (['REQUESTED', 'CLONING', 'CLONED', 'STOPPED', 'DESTROYING'].includes(machineState)) stopStatus = 'not-required';
+    else {
       const stopped = await this.options.machine.stop({ machineId: record.machineId, expectedSequence: sequenceFrom(machine), gracefulTimeoutMs: 30_000, forceAfterTimeout: false, reason: 'certification teardown' }, internalContext(context, record.certificationId, 'machine-stop'));
       machine = machineFrom(stopped);
       stopStatus = stateFrom(machine) === 'STOPPED' ? 'succeeded' : 'failed';
       record = this.store.update(record.certificationId, (current) => ({ ...current, machineSequence: sequenceFrom(machine), cleanup: { ...current.cleanup, stopStatus } }));
       if (stopStatus !== 'succeeded') throw new CertificationError('certification_stop_failed', 'certification machine did not reach STOPPED');
-    } else stopStatus = 'succeeded';
+    }
 
+    this.reconcileRelatedJobs(this.store.get(record.certificationId));
     if (stateFrom(machine) !== 'DESTROYED') {
       const destroyed = await this.options.machine.destroy({ machineId: record.machineId, expectedSequence: sequenceFrom(machine), stopIfRunning: true, forceStop: false, stopTimeoutMs: 30_000, reason: 'certification teardown and evidence retention' }, internalContext(context, record.certificationId, 'machine-destroy'));
       machine = machineFrom(destroyed);
@@ -783,6 +819,7 @@ export class CertificationService {
     } else {
       record = this.store.update(record.certificationId, (current) => ({ ...current, machineSequence: sequenceFrom(machine), cleanup: { ...current.cleanup, stopStatus, destroyStatus: 'succeeded', absenceVerified: false, sourcePreserved: true } }));
     }
+    this.reconcileRelatedJobs(this.store.get(record.certificationId));
     const status = await this.options.machine.status({ machineId: record.machineId, includeJobs: true, includeRecentEvents: true }, context);
     const observed = json(status.observed, 'machine status observed');
     if (observed.state !== 'ABSENT') throw new CertificationError('certification_cleanup_failed', 'post-destroy machine status did not confirm ABSENT', { observedState: observed.state });

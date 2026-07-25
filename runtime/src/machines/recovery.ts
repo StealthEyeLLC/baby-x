@@ -246,7 +246,9 @@ export class MachineRecoveryController {
       }, { observations: observed.observations, lastError: { code: 'machine_identity_ambiguous', message: observed.discrepancies.join('; ') || 'identity conflict', phase: 'classification', retryable: false, destructiveRecoveryAllowed: false, artifactReferences: [], occurredAt: this.options.now() } });
       return { machineId: record.machineId, beforeState, afterState: dryRun ? beforeState : this.options.store.get(record.machineId).lifecycle.persistedState, classification: 'ambiguous', action: 'block-automatic-recovery', changed: !dryRun && beforeState !== 'AMBIGUOUS', dryRun };
     }
-    if (observed.source.status !== 'present' || (record.source.snapshotGuid !== undefined && observed.source.guid !== record.source.snapshotGuid)) {
+    if (observed.source.status !== 'present'
+      || (record.source.expectedSnapshotGuid !== undefined && observed.source.guid !== record.source.expectedSnapshotGuid)
+      || (record.source.snapshotGuid !== undefined && observed.source.guid !== record.source.snapshotGuid)) {
       if (!dryRun && record.lifecycle.persistedState !== 'LOST') record = this.options.store.transition(record.machineId, record.lifecycle.stateSequence, 'LOST', record.lifecycle.desiredState, {
         operation: 'babyx.machine.reconcile', phase: 'classification', kind: 'machine.reconcile-lost', message: 'immutable source snapshot is absent or changed',
         requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),

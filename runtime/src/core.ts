@@ -142,11 +142,11 @@ function assertStrings(values: unknown, key: string): string[] {
   return values as string[];
 }
 
-function machineWrapped(target: ExecutionTarget, argv: string[], cwd: string, environment: JsonObject): string[] {
+export function machineWrapped(target: ExecutionTarget, argv: string[], cwd: string, environment: JsonObject): string[] {
   if (target.kind === 'host') return argv;
-  const wrapped = ['/usr/bin/systemd-run', `--machine=${target.machine}`, '--wait', '--pipe', '--collect', '--quiet', `--working-directory=${cwd}`];
+  const wrapped = ['/usr/bin/machinectl', '--quiet', '--uid=root'];
   for (const [key, value] of Object.entries(environment)) wrapped.push(`--setenv=${key}=${String(value)}`);
-  wrapped.push('--', ...argv);
+  wrapped.push('shell', target.machine, '/usr/bin/env', `--chdir=${cwd}`, '--', ...argv);
   return wrapped;
 }
 
@@ -210,6 +210,16 @@ export interface JobRecord extends JsonObject {
   metadata?: JsonObject;
   processIdentity?: ProcessIdentity;
   timeoutMs?: number;
+  reconciliation?: {
+    classification: 'running-exact' | 'process-absent' | 'identity-conflict' | 'identity-incomplete';
+    observedAt: string;
+    actualIdentity?: ProcessIdentity;
+  };
+}
+
+export interface JobManagerOptions {
+  processIdentity?: (pid: number) => ProcessIdentity;
+  now?: () => string;
 }
 
 export type JobChangeListener = (record: JobRecord) => void | Promise<void>;
@@ -217,9 +227,13 @@ export type JobChangeListener = (record: JobRecord) => void | Promise<void>;
 export class JobManager {
   private readonly listeners = new Set<JobChangeListener>();
   private readonly store: AtomicStore<{ jobs: Record<string, JobRecord> }>;
-  constructor(private readonly root: string) {
+  private readonly processIdentity: (pid: number) => ProcessIdentity;
+  private readonly now: () => string;
+  constructor(private readonly root: string, options: JobManagerOptions = {}) {
     mkdirSync(join(root, 'streams'), { recursive: true, mode: 0o700 });
     this.store = new AtomicStore(join(root, 'jobs.json'), { jobs: {} });
+    this.processIdentity = options.processIdentity ?? readProcessIdentity;
+    this.now = options.now ?? (() => new Date().toISOString());
   }
   list(): JobRecord[] { return Object.values(this.store.read().jobs); }
   get(id: string): JobRecord { const record = this.store.read().jobs[id]; if (!record) throw new Error('job not found'); return record; }
@@ -275,6 +289,35 @@ export class JobManager {
       if (completed !== undefined) this.notify(completed);
     });
     return record;
+  }
+  reconcile(id: string): JobRecord {
+    const record = this.get(id);
+    if (record.status !== 'running') return record;
+    const observedAt = this.now();
+    const expected = record.processIdentity;
+    let classification: NonNullable<JobRecord['reconciliation']>['classification'];
+    let actual: ProcessIdentity | undefined;
+    if (record.pid === undefined || expected === undefined || expected.processStartTime === undefined || expected.executablePath === undefined || expected.bootId === undefined) classification = 'identity-incomplete';
+    else {
+      try { actual = this.processIdentity(record.pid); } catch { classification = 'process-absent'; }
+      if (actual !== undefined) {
+        classification = actual.pid === expected.pid
+          && actual.processStartTime === expected.processStartTime
+          && actual.executablePath === expected.executablePath
+          && actual.bootId === expected.bootId
+          && (expected.pgid === undefined || actual.pgid === expected.pgid)
+          ? 'running-exact' : 'identity-conflict';
+      }
+    }
+    if (classification === 'running-exact') return { ...record, reconciliation: { classification, observedAt, ...(actual === undefined ? {} : { actualIdentity: actual }) } };
+    const next: JobRecord = { ...record, status: 'lost', completedAt: observedAt, reconciliation: { classification, observedAt, ...(actual === undefined ? {} : { actualIdentity: actual }) } };
+    this.store.update((current) => ({ jobs: { ...current.jobs, [id]: next } }));
+    this.notify(next);
+    return next;
+  }
+  reconcileRunning(limit = 1_000): JobRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('job reconcile limit must be between 1 and 10000');
+    return this.list().filter((record) => record.status === 'running').sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit).map((record) => this.reconcile(record.id));
   }
   cancel(id: string, signal = 'SIGTERM'): JobRecord {
     const record = this.get(id);
@@ -409,6 +452,8 @@ export class BabyXRuntime {
         artifacts: await this.artifactManager(),
         config: this.options.machineServiceConfig ?? {},
       });
+      this.jobs.reconcileRunning();
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
       this.machineServiceInitializePromise = this.machineServiceInstance.initialize().catch((error: unknown) => ({
         operation: 'babyx.machine.reconcile', startup: true, processed: 0, deferred: true,
         error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'machine_startup_reconcile_failed') : 'machine_startup_reconcile_failed', message: error instanceof Error ? error.message : 'startup reconciliation failed' },
@@ -444,6 +489,7 @@ export class BabyXRuntime {
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;
     if (operation === 'babyx.job.list') return { jobs: this.jobs.list() };
     if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
+    if (operation === 'babyx.job.reconcile') return this.jobs.reconcile(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
     if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy', 'babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics'].includes(operation)) {

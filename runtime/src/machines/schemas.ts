@@ -125,6 +125,7 @@ export interface DisposableMachineRecordV1 {
     kind: 'zfs-snapshot';
     snapshot: string;
     dataset: string;
+    expectedSnapshotGuid?: string;
     snapshotGuid?: string;
     creationTxg?: string;
     observedAt: string;
@@ -416,6 +417,7 @@ export function assertDisposableMachineRecord(value: unknown): DisposableMachine
   if (snapshotSeparator <= 0 || snapshotSeparator !== snapshot.lastIndexOf('@') || snapshotSeparator === snapshot.length - 1) invalid('source.snapshot must contain exactly one non-empty snapshot separator');
   const sourceDataset = zfsName(source.dataset, 'source.dataset');
   if (snapshot.slice(0, snapshot.indexOf('@')) !== sourceDataset) invalid('source.dataset must exactly match the dataset portion of source.snapshot');
+  optionalString(source.expectedSnapshotGuid, 'source.expectedSnapshotGuid');
   optionalString(source.snapshotGuid, 'source.snapshotGuid');
   optionalString(source.creationTxg, 'source.creationTxg');
   isoTimestamp(source.observedAt, 'source.observedAt');

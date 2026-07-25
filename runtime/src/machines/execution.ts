@@ -140,6 +140,12 @@ function sameProcessIdentity(left: DisposableMachineRecordV1['processIdentity'],
     && left.bootId === right.bootId;
 }
 
+function expectedMachineLeaderExecutable(record: DisposableMachineRecordV1): string | undefined {
+  if (record.launch.boot) return '/usr/lib/systemd/systemd';
+  const command = record.launch.command?.[0];
+  return command !== undefined && isAbsolute(command) ? command : undefined;
+}
+
 function resultDigest(value: unknown): string {
   return sha256(canonicalize(value));
 }
@@ -194,6 +200,7 @@ export class MachineExecutionController {
 
   private async waitReady(record: DisposableMachineRecordV1, timeoutMs: number, launchJobId?: string): Promise<{ observation: MachineStatusObservation; identity: DisposableMachineRecordV1['processIdentity'] }> {
     const attempts = Math.max(1, Math.ceil(timeoutMs / this.options.config.readinessPollIntervalMs) + 1);
+    const expectedExecutable = expectedMachineLeaderExecutable(record);
     let last: MachineStatusObservation | undefined;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (launchJobId !== undefined) {
@@ -202,10 +209,16 @@ export class MachineExecutionController {
       }
       last = await this.options.observer.status(record);
       if (last.observedState === 'CONFLICT') throw new MachineServiceError('machine_process_conflict', 'machine identity conflicted during readiness', { discrepancies: last.discrepancies });
-      if (last.observedState === 'RUNNING') return this.exactRunningIdentity(record, last);
+      if (last.observedState === 'RUNNING') {
+        const running = await this.exactRunningIdentity(record, last);
+        if (expectedExecutable === undefined || running.identity?.executablePath === expectedExecutable) return running;
+        if (running.identity?.executablePath !== '/usr/bin/systemd-nspawn') {
+          throw new MachineServiceError('machine_process_conflict', 'machine leader executable differs from the requested launch executable', { expectedExecutable, actualExecutable: running.identity?.executablePath });
+        }
+      }
       if (attempt + 1 < attempts) await this.sleep(this.options.config.readinessPollIntervalMs);
     }
-    throw new MachineServiceError('machine_readiness_failed', 'machine did not become ready within the bounded readiness window', { timeoutMs, observedState: last?.observedState ?? 'UNKNOWN' });
+    throw new MachineServiceError('machine_readiness_failed', 'machine did not become ready within the bounded readiness window', { timeoutMs, observedState: last?.observedState ?? 'UNKNOWN', expectedExecutable });
   }
 
   private acquireLease(record: DisposableMachineRecordV1, operation: string, principal: string, requestDigest: string): string {

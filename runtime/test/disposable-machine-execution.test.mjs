@@ -168,6 +168,10 @@ function fixture(t, overrides = {}) {
   const artifacts = new FakeArtifacts();
   let tick = 0;
   let processStartTime = '100';
+  let processExecutable = overrides.processExecutable ?? '/usr/lib/systemd/systemd';
+  const processExecutables = [...(overrides.processExecutables ?? [])];
+  let processIdentityCalls = 0;
+  let sleepCalls = 0;
   const options = {
     stateRoot: root,
     executor: provider,
@@ -180,13 +184,20 @@ function fixture(t, overrides = {}) {
     now: () => `2026-07-25T14:00:${String(tick++).padStart(2, '0')}.000Z`,
     machineIdFactory: () => 'mx_machine00000001',
     hostIdentity: { hostname: 'test-host', machineIdSha256: '1'.repeat(64), bootId: 'boot-1' },
-    sleep: async () => {},
-    processIdentity: (pid) => ({ pid, pgid: pid, processStartTime, executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' }),
+    sleep: async () => { sleepCalls += 1; },
+    processIdentity: (pid) => {
+      const executablePath = processExecutables.length === 0 ? processExecutable : processExecutables[Math.min(processIdentityCalls, processExecutables.length - 1)];
+      processIdentityCalls += 1;
+      return { pid, pgid: pid, processStartTime, executablePath, bootId: 'boot-1' };
+    },
   };
   const service = new DisposableMachineService(options);
   return {
     root, machineRoot, provider, jobs, artifacts, service, options,
     setProcessStartTime: (value) => { processStartTime = value; },
+    setProcessExecutable: (value) => { processExecutable = value; },
+    processIdentityCalls: () => processIdentityCalls,
+    sleepCalls: () => sleepCalls,
   };
 }
 
@@ -240,6 +251,36 @@ test('start uses the existing durable job authority, verifies identity, and repl
   );
   assert.equal(healthyNoOp.noOp, true);
   assert.equal(f.jobs.count('babyx.machine.start'), 1);
+});
+
+test('start waits for the exact requested leader after the nspawn launcher exec transition', async (t) => {
+  const f = fixture(t, { processExecutables: ['/usr/bin/systemd-nspawn', '/usr/lib/systemd/systemd'] });
+  const request = machineRequest(f.machineRoot);
+  request.launch = { ...request.launch, boot: false, command: ['/usr/lib/systemd/systemd', '--unit=basic.target'] };
+  const created = await f.service.create(request, { ...createContext, idempotencyKey: 'create-machine-launcher-transition' });
+  const started = await f.service.start(
+    { machineId: created.machine.machineId, expectedSequence: created.machine.lifecycle.stateSequence, readinessTimeoutMs: 3, reason: 'wait for launcher exec' },
+    { ...startContext, idempotencyKey: 'start-machine-launcher-transition' },
+  );
+  assert.equal(started.machine.lifecycle.persistedState, 'READY');
+  assert.equal(started.machine.processIdentity.executablePath, '/usr/lib/systemd/systemd');
+  assert.equal(f.processIdentityCalls(), 2);
+  assert.equal(f.sleepCalls(), 1);
+});
+
+test('start rejects a non-launcher executable that differs from the requested leader', async (t) => {
+  const f = fixture(t, { processExecutable: '/usr/bin/sleep' });
+  const request = machineRequest(f.machineRoot);
+  request.launch = { ...request.launch, boot: false, command: ['/usr/lib/systemd/systemd', '--unit=basic.target'] };
+  const created = await f.service.create(request, { ...createContext, idempotencyKey: 'create-machine-wrong-leader' });
+  await assert.rejects(
+    () => f.service.start(
+      { machineId: created.machine.machineId, expectedSequence: created.machine.lifecycle.stateSequence, readinessTimeoutMs: 3 },
+      { ...startContext, idempotencyKey: 'start-machine-wrong-leader' },
+    ),
+    machineError('machine_process_conflict'),
+  );
+  assert.equal(f.service.store.get(created.machine.machineId).lifecycle.persistedState, 'AMBIGUOUS');
 });
 
 test('start rejects stale sequence and conflicting pre-existing machine identity without launching', async (t) => {

@@ -150,6 +150,20 @@ function exactMachineLeaderExecutable(path: string): boolean {
   return /\/(?:systemd|systemd-nspawn)$/u.test(path);
 }
 
+function expectedMachineLeaderExecutable(record: DisposableMachineRecordV1): string | undefined {
+  if (record.launch.boot) return '/usr/lib/systemd/systemd';
+  const command = record.launch.command?.[0];
+  return command !== undefined && command.startsWith('/') ? command : undefined;
+}
+
+function sameProcessInstance(expected: DisposableMachineRecordV1['processIdentity'], actual: ProcessIdentity): boolean {
+  return expected !== undefined
+    && expected.pid === actual.pid
+    && expected.processStartTime === actual.processStartTime
+    && expected.bootId === actual.bootId
+    && (expected.pgid === undefined || expected.pgid === actual.pgid);
+}
+
 function exactClone(record: DisposableMachineRecordV1, observation: MachineStatusObservation): boolean {
   if (observation.clone.status !== 'present') return false;
   const expected = ownershipProperties(record.machineId, record.creationRequestDigest, record.ownerPrincipal);
@@ -254,6 +268,44 @@ export class MachineRecoveryController {
         requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
       }, { observations: observed.observations });
       return { machineId: record.machineId, beforeState, afterState: dryRun ? beforeState : this.options.store.get(record.machineId).lifecycle.persistedState, classification: 'lost', action: 'mark-lost', changed: !dryRun && beforeState !== 'LOST', dryRun };
+    }
+
+    if (observed.observedState === 'RUNNING' && record.processIdentity !== undefined && record.lifecycle.persistedState === 'AMBIGUOUS') {
+      let actual: ProcessIdentity | undefined;
+      const leader = Number(observed.machine.properties.Leader);
+      try { actual = Number.isSafeInteger(leader) && leader > 0 ? this.options.processIdentity(leader) : undefined; } catch {}
+      const expectedExecutable = expectedMachineLeaderExecutable(record);
+      const exactLauncherTransition = record.lifecycle.desiredState === 'READY'
+        && record.activeJobIds.length === 0
+        && exactClone(record, observed)
+        && record.processIdentity.executablePath === '/usr/bin/systemd-nspawn'
+        && expectedExecutable !== undefined
+        && actual !== undefined
+        && sameProcessInstance(record.processIdentity, actual)
+        && actual.pid === leader
+        && actual.bootId === this.options.hostBootId
+        && actual.executablePath === expectedExecutable;
+      if (exactLauncherTransition && actual !== undefined && actual.processStartTime !== undefined && actual.executablePath !== undefined && actual.bootId !== undefined) {
+        if (dryRun) return { machineId: record.machineId, beforeState, afterState: beforeState, classification: 'recoverable', action: 'repair-process-identity', changed: false, dryRun };
+        const repairedIdentity = {
+          pid: actual.pid,
+          ...(actual.pgid === undefined ? {} : { pgid: actual.pgid }),
+          processStartTime: actual.processStartTime,
+          executablePath: actual.executablePath,
+          bootId: actual.bootId,
+        };
+        record = this.options.store.transition(record.machineId, record.lifecycle.stateSequence, 'RECOVERY_REQUIRED', 'READY', {
+          operation: 'babyx.machine.reconcile', phase: 'process-identity-repair-intent', kind: 'machine.process-identity-repairing', message: 'exact same-process launcher transition verified before identity repair', requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
+        }, { processIdentity: repairedIdentity, observations: observed.observations, lifecycle: { ...record.lifecycle, observedState: 'RUNNING' }, host: { ...record.host, lastObservedBootId: this.options.hostBootId } });
+        record = this.options.store.transition(record.machineId, record.lifecycle.stateSequence, 'READY', 'READY', {
+          operation: 'babyx.machine.reconcile', phase: 'process-identity-repair', kind: 'machine.process-identity-repaired', message: 'durable machine identity repaired after exact nspawn launcher exec transition', requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
+        }, { processIdentity: repairedIdentity, observations: observed.observations, lastError: undefined, lifecycle: { ...record.lifecycle, observedState: 'RUNNING' }, host: { ...record.host, lastObservedBootId: this.options.hostBootId } });
+        return { machineId: record.machineId, beforeState, afterState: 'READY', classification: 'recoverable', action: 'repair-process-identity', changed: true, dryRun };
+      }
+      if (!dryRun) record = this.options.store.update(record.machineId, record.lifecycle.stateSequence, {
+        operation: 'babyx.machine.reconcile', phase: 'process-identity', kind: 'machine.reconcile-ambiguous', message: 'ambiguous process identity did not satisfy exact same-process launcher repair rules', requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
+      }, { observations: { ...observed.observations, process: 'present-conflict' }, lastError: { code: 'machine_process_conflict', message: 'PID, start time, executable, boot identity, or requested leader executable differs from the durable binding', phase: 'process-identity', retryable: false, destructiveRecoveryAllowed: false, artifactReferences: [], occurredAt: this.options.now() } });
+      return { machineId: record.machineId, beforeState, afterState: 'AMBIGUOUS', classification: 'ambiguous', action: 'block-stale-process-adoption', changed: !dryRun, dryRun };
     }
 
     if (observed.observedState === 'RUNNING' && record.processIdentity !== undefined && ['READY', 'EXECUTING', 'STOPPING'].includes(record.lifecycle.persistedState)) {

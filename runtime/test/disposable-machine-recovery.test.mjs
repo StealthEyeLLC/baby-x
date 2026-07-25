@@ -422,6 +422,43 @@ test('provider and machinectl unavailability defer without fabricated absence or
   assert.equal(gc.orphanProcesses[0].classification, 'unknown');
 });
 
+test('reconcile repairs only an exact same-process nspawn launcher exec transition', async (t) => {
+  const persisted = { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/bin/systemd-nspawn', bootId: 'boot-2' };
+  const f = fixture(t, {}, { processIdentity: (pid) => ({ pid, pgid: pid, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-2' }) });
+  const ambiguous = seededRecord(f.root, 'AMBIGUOUS', { machineId: 'mx_execshift001', machineName: 'exec-shift', processIdentity: persisted, desiredState: 'READY', observedState: 'RUNNING' });
+  ambiguous.launch = { ...ambiguous.launch, boot: false, command: ['/usr/lib/systemd/systemd', '--unit=basic.target'] };
+  const record = addRecord(f, ambiguous);
+  f.observer.set(record.machineId, statusFor(record, 'RUNNING'));
+  const result = await f.controller.reconcile({ machineId: record.machineId, reason: 'repair exact launcher exec' }, { ...ownerContext, idempotencyKey: 'repair-exact-launcher-exec' });
+  assert.equal(result.results[0].classification, 'recoverable');
+  assert.equal(result.results[0].action, 'repair-process-identity');
+  const repaired = f.store.get(record.machineId);
+  assert.equal(repaired.lifecycle.persistedState, 'READY');
+  assert.equal(repaired.processIdentity.executablePath, '/usr/lib/systemd/systemd');
+  assert.equal(repaired.processIdentity.processStartTime, '100');
+  const kinds = f.store.events(record.machineId, 0, 100).map((event) => event.kind);
+  assert.ok(kinds.includes('machine.process-identity-repairing'));
+  assert.ok(kinds.includes('machine.process-identity-repaired'));
+});
+
+test('reconcile blocks launcher repair when the kernel process identity or requested executable differs', async (t) => {
+  const persisted = { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/bin/systemd-nspawn', bootId: 'boot-2' };
+  for (const [suffix, actual] of [
+    ['start-time', { pid: 4242, pgid: 4242, processStartTime: '101', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-2' }],
+    ['executable', { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/bin/sleep', bootId: 'boot-2' }],
+  ]) {
+    const f = fixture(t, {}, { processIdentity: () => actual });
+    const ambiguous = seededRecord(f.root, 'AMBIGUOUS', { machineId: `mx_block${suffix.replace('-', '')}`, machineName: `block-${suffix}`, processIdentity: persisted, desiredState: 'READY', observedState: 'RUNNING' });
+    ambiguous.launch = { ...ambiguous.launch, boot: false, command: ['/usr/lib/systemd/systemd', '--unit=basic.target'] };
+    const record = addRecord(f, ambiguous);
+    f.observer.set(record.machineId, statusFor(record, 'RUNNING'));
+    const result = await f.controller.reconcile({ machineId: record.machineId, reason: `block ${suffix}` }, { ...ownerContext, idempotencyKey: `block-launcher-repair-${suffix}` });
+    assert.equal(result.results[0].classification, 'ambiguous');
+    assert.equal(result.results[0].action, 'block-stale-process-adoption');
+    assert.equal(f.store.get(record.machineId).lifecycle.persistedState, 'AMBIGUOUS');
+  }
+});
+
 test('stale PID, host boot, start time, and executable identity block adoption', async (t) => {
   const persisted = { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-2' };
   const f = fixture(t, {}, { processIdentity: (pid) => ({ pid, pgid: pid, processStartTime: '101', executablePath: '/usr/bin/sleep', bootId: 'boot-old' }) });

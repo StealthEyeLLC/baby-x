@@ -182,7 +182,7 @@ export function machineWrapped(target: ExecutionTarget, argv: string[], cwd: str
     return wrapped;
   }
   const pid = String(target.processIdentity.pid);
-  const wrapped = ['/usr/bin/nsenter', '--target', pid, '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', `--root=/proc/${pid}/root`, '--wdns', cwd, '--', '/usr/bin/env'];
+  const wrapped = ['/usr/bin/nsenter', '--target', pid, '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', `--root=/proc/${pid}/root`, `--wdns=${cwd}`, '--', '/usr/bin/env'];
   for (const [key, value] of Object.entries(environment)) wrapped.push(`${key}=${String(value)}`);
   wrapped.push(...argv);
   return wrapped;

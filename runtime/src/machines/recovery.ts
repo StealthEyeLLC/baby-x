@@ -355,10 +355,19 @@ export class MachineRecoveryController {
       return { machineId: record.machineId, beforeState, afterState: dryRun ? beforeState : 'DEGRADED', classification: 'recoverable', action: 'mark-degraded', changed: !dryRun, dryRun };
     }
 
+    const repairSourceIdentity = record.source.snapshotGuid === undefined;
+    if (repairSourceIdentity && (observed.source.guid === undefined || observed.source.creationTxg === undefined || !exactClone(record, observed))) {
+      throw new MachineServiceError('machine_identity_ambiguous', 'missing durable source identity cannot be repaired without an exact owned clone and complete source readback');
+    }
     if (!dryRun) record = this.options.store.update(record.machineId, record.lifecycle.stateSequence, {
-      operation: 'babyx.machine.reconcile', phase: 'consistent-readback', kind: 'machine.reconciled', message: 'persisted and observed machine state classified as consistent', requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
-    }, { observations: observed.observations, lifecycle: { ...record.lifecycle, observedState: observed.observedState }, host: { ...record.host, lastObservedBootId: this.options.hostBootId } });
-    return { machineId: record.machineId, beforeState, afterState: record.lifecycle.persistedState, classification: 'consistent', action: 'refresh-observation', changed: !dryRun, dryRun };
+      operation: 'babyx.machine.reconcile', phase: repairSourceIdentity ? 'source-identity-repair' : 'consistent-readback', kind: repairSourceIdentity ? 'machine.source-identity-repaired' : 'machine.reconciled', message: repairSourceIdentity ? 'missing legacy source identity repaired from exact source and clone ownership readback' : 'persisted and observed machine state classified as consistent', requestDigest: digest, idempotencyKey: key, observationDigest: observed.observations.observationDigest, occurredAt: this.options.now(),
+    }, {
+      ...(repairSourceIdentity ? { source: { ...record.source, snapshotGuid: observed.source.guid, creationTxg: observed.source.creationTxg, observedAt: observed.source.observedAt } } : {}),
+      observations: observed.observations,
+      lifecycle: { ...record.lifecycle, observedState: observed.observedState },
+      host: { ...record.host, lastObservedBootId: this.options.hostBootId },
+    });
+    return { machineId: record.machineId, beforeState, afterState: record.lifecycle.persistedState, classification: 'consistent', action: repairSourceIdentity ? 'repair-source-identity' : 'refresh-observation', changed: !dryRun, dryRun };
   }
 
   expire(payload: JsonObject, context: MachineOperationContext): JsonObject {

@@ -519,3 +519,45 @@ test('owner-scoped GC never enumerates global orphan datasets or machine names',
   assert.equal(f.provider.listCalls.length, 0);
   assert.equal(f.observer.machineListCalls, 0);
 });
+
+test('legacy clone with missing source identity is repaired only from exact ownership readback', async (t) => {
+  const f = fixture(t);
+  const legacy = seededRecord(f.root, 'CLONED', { machineId: 'mx_legacyexact1', machineName: 'legacy-exact' });
+  legacy.source = { ...legacy.source, snapshotGuid: undefined, creationTxg: undefined };
+  addRecord(f, legacy);
+  f.observer.set(legacy.machineId, statusFor(legacy, 'CLONE_ONLY', {
+    source: {
+      status: 'present', snapshot: legacy.source.snapshot, dataset: legacy.source.dataset,
+      guid: '111222333', creationTxg: '444555', observedAt: '2026-07-25T16:00:00.000Z',
+      command: commandResult(['/usr/sbin/zfs', 'get']),
+    },
+  }));
+  const result = await f.controller.reconcile(
+    { machineId: legacy.machineId, reason: 'repair exact legacy source identity' },
+    { ...ownerContext, idempotencyKey: 'repair-legacy-source-exact' },
+  );
+  assert.equal(result.results[0].classification, 'consistent');
+  assert.equal(result.results[0].action, 'repair-source-identity');
+  const repaired = f.store.get(legacy.machineId);
+  assert.equal(repaired.source.snapshotGuid, '111222333');
+  assert.equal(repaired.source.creationTxg, '444555');
+
+  const conflict = seededRecord(f.root, 'CLONED', { machineId: 'mx_legacyconflict1', machineName: 'legacy-conflict' });
+  conflict.source = { ...conflict.source, snapshotGuid: undefined, creationTxg: undefined };
+  addRecord(f, conflict);
+  const conflicting = statusFor(conflict, 'CLONE_ONLY', {
+    source: {
+      status: 'present', snapshot: conflict.source.snapshot, dataset: conflict.source.dataset,
+      guid: '111222333', creationTxg: '444555', observedAt: '2026-07-25T16:00:00.000Z',
+      command: commandResult(['/usr/sbin/zfs', 'get']),
+    },
+  });
+  conflicting.clone.properties = {};
+  f.observer.set(conflict.machineId, conflicting);
+  const blocked = await f.controller.reconcile(
+    { machineId: conflict.machineId, reason: 'block non-exact legacy source repair' },
+    { ...ownerContext, idempotencyKey: 'repair-legacy-source-conflict' },
+  );
+  assert.equal(blocked.results[0].classification, 'ambiguous');
+  assert.equal(f.store.get(conflict.machineId).source.snapshotGuid, undefined);
+});

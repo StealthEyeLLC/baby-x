@@ -54,7 +54,7 @@ test('managed machine execution wrapper enters the exact leader namespaces', () 
     ['/usr/bin/printf', '%s', 'ok'],
     '/workspace',
     { MODE: 'test' },
-  ), ['/usr/bin/nsenter', '--target', '4242', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root', '/proc/4242/root', '--wdns', '/workspace', '--', '/usr/bin/env', 'MODE=test', '/usr/bin/printf', '%s', 'ok']);
+  ), ['/usr/bin/nsenter', '--target', '4242', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root=/proc/4242/root', '--wdns', '/workspace', '--', '/usr/bin/env', 'MODE=test', '/usr/bin/printf', '%s', 'ok']);
 });
 
 test('durable job reconciliation terminalizes absent and reused process identities without fabricating exit zero', async () => {

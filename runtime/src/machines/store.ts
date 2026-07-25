@@ -18,7 +18,7 @@ import {
   type MachineState,
   type MachineTombstoneV1,
 } from './schemas.ts';
-import { assertMachineTransition, isTerminalMachineState } from './states.ts';
+import { assertExpectedMachineSequence, assertMachineTransition, isTerminalMachineState } from './states.ts';
 
 interface MachineIndexes extends JsonObject {
   byName: Record<string, string>;
@@ -282,6 +282,41 @@ export class DisposableMachineStore {
         terminal: isTerminalMachineState(nextState),
         updatedAt: occurredAt,
         ...(nextState === 'DESTROYED' ? { destroyedAt: occurredAt } : {}),
+      },
+    });
+    const allEvents = this.readAllEvents(machineId);
+    const priorEvent = allEvents.at(-1);
+    const event = this.eventFrom(candidate, current.lifecycle.persistedState, allEvents.length, { ...details, occurredAt }, priorEvent?.eventDigest);
+    this.appendEvent(event);
+    this.writeRecord(candidate);
+    this.reserveIndexes(candidate);
+    return candidate;
+  }
+
+  update(machineId: string, expectedSequence: number, details: MachineEventDetails, patch: Partial<DisposableMachineRecordV1> = {}): DisposableMachineRecordV1 {
+    const current = this.get(machineId);
+    assertExpectedMachineSequence(current.lifecycle.stateSequence, expectedSequence);
+    const occurredAt = details.occurredAt ?? new Date().toISOString();
+    const candidate = assertDisposableMachineRecord({
+      ...current,
+      ...patch,
+      machineId: current.machineId,
+      machineName: current.machineName,
+      providerId: current.providerId,
+      creationIdempotencyKey: current.creationIdempotencyKey,
+      creationRequestDigest: current.creationRequestDigest,
+      source: { ...current.source, ...(patch.source ?? {}) },
+      clone: { ...current.clone, ...(patch.clone ?? {}) },
+      launch: { ...current.launch, ...(patch.launch ?? {}) },
+      host: { ...current.host, ...(patch.host ?? {}) },
+      observations: { ...current.observations, ...(patch.observations ?? {}) },
+      cleanup: { ...current.cleanup, ...(patch.cleanup ?? {}) },
+      lifecycle: {
+        ...current.lifecycle,
+        ...(patch.lifecycle ?? {}),
+        stateSequence: current.lifecycle.stateSequence + 1,
+        terminal: isTerminalMachineState(current.lifecycle.persistedState),
+        updatedAt: occurredAt,
       },
     });
     const allEvents = this.readAllEvents(machineId);

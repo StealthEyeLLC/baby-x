@@ -3,6 +3,7 @@ import { createHash, randomUUID, sign as cryptoSign, verify as cryptoVerify } fr
 import { constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync, readdirSync, copyFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { processIdentity as readProcessIdentity } from './process/identity.ts';
 import { OPERATION_DEFINITIONS, OPERATION_NAMES, type OperationDefinition } from './operations/definitions.ts';
 
 export type ExecutionTarget = { kind: 'host' } | { kind: 'machine'; machine: string };
@@ -190,7 +191,7 @@ export class Executor {
   }
 }
 
-interface JobRecord extends JsonObject {
+export interface JobRecord extends JsonObject {
   id: string;
   operation: string;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'lost';
@@ -206,9 +207,15 @@ interface JobRecord extends JsonObject {
   signal?: string | null;
   stdoutPath: string;
   stderrPath: string;
+  metadata?: JsonObject;
+  processIdentity?: ProcessIdentity;
+  timeoutMs?: number;
 }
 
+export type JobChangeListener = (record: JobRecord) => void | Promise<void>;
+
 export class JobManager {
+  private readonly listeners = new Set<JobChangeListener>();
   private readonly store: AtomicStore<{ jobs: Record<string, JobRecord> }>;
   constructor(private readonly root: string) {
     mkdirSync(join(root, 'streams'), { recursive: true, mode: 0o700 });
@@ -216,12 +223,19 @@ export class JobManager {
   }
   list(): JobRecord[] { return Object.values(this.store.read().jobs); }
   get(id: string): JobRecord { const record = this.store.read().jobs[id]; if (!record) throw new Error('job not found'); return record; }
+  onChange(listener: JobChangeListener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  private notify(record: JobRecord): void {
+    for (const listener of this.listeners) queueMicrotask(() => { void Promise.resolve(listener(structuredClone(record))).catch(() => undefined); });
+  }
   start(operation: string, payload: JsonObject): JobRecord {
     const id = randomUUID();
     const target = optionalTarget(payload);
     const argv = assertStrings(payload.argv, 'argv');
     const cwd = typeof payload.cwd === 'string' ? payload.cwd : '/';
     const env = payload.env && typeof payload.env === 'object' ? payload.env as JsonObject : {};
+    const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? structuredClone(payload.metadata as JsonObject) : undefined;
+    const timeoutMs = payload.timeoutMs === undefined ? undefined : Number(payload.timeoutMs);
+    if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)) throw new Error('timeoutMs must be a positive safe integer');
     const effective = machineWrapped(target, argv, cwd, env);
     const executable = effective[0];
     if (!executable) throw new Error('empty executable');
@@ -231,13 +245,35 @@ export class JobManager {
     const stderrFd = openSync(stderrPath, 'a', 0o600);
     const child = spawn(executable, effective.slice(1), { cwd: target.kind === 'host' ? cwd : '/', env: { ...process.env, ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])) }, detached: true, stdio: ['ignore', stdoutFd, stderrFd] });
     child.unref(); closeSync(stdoutFd); closeSync(stderrFd);
-    const record: JobRecord = { id, operation, status: 'running', target, argv, cwd, createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), pid: child.pid, pgid: child.pid, stdoutPath, stderrPath };
+    let identity: ProcessIdentity | undefined;
+    if (child.pid !== undefined) {
+      try { identity = readProcessIdentity(child.pid); } catch { identity = { pid: child.pid, pgid: child.pid }; }
+    }
+    const record: JobRecord = {
+      id, operation, status: 'running', target, argv, cwd, createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+      pid: child.pid, pgid: child.pid, stdoutPath, stderrPath,
+      ...(metadata === undefined ? {} : { metadata }),
+      ...(identity === undefined ? {} : { processIdentity: identity }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    };
     this.store.update((current) => ({ jobs: { ...current.jobs, [id]: record } }));
-    child.on('exit', (code, signal) => this.store.update((current) => {
-      const existing = current.jobs[id];
-      if (!existing) return current;
-      return { jobs: { ...current.jobs, [id]: { ...existing, status: signal ? 'failed' : code === 0 ? 'completed' : 'failed', exitCode: code, signal, completedAt: new Date().toISOString() } } };
-    }));
+    this.notify(record);
+    let timeout: NodeJS.Timeout | undefined;
+    if (timeoutMs !== undefined) {
+      timeout = setTimeout(() => { try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGTERM'); } catch {} }, timeoutMs);
+      timeout.unref();
+    }
+    child.on('exit', (code, signal) => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      let completed: JobRecord | undefined;
+      this.store.update((current) => {
+        const existing = current.jobs[id];
+        if (!existing) return current;
+        completed = { ...existing, status: signal ? 'failed' : code === 0 ? 'completed' : 'failed', exitCode: code, signal, completedAt: new Date().toISOString() };
+        return { jobs: { ...current.jobs, [id]: completed } };
+      });
+      if (completed !== undefined) this.notify(completed);
+    });
     return record;
   }
   cancel(id: string, signal = 'SIGTERM'): JobRecord {
@@ -245,6 +281,7 @@ export class JobManager {
     if (record.pgid) process.kill(-record.pgid, signal as NodeJS.Signals);
     const next = { ...record, status: 'cancelled' as const, signal, completedAt: new Date().toISOString() };
     this.store.update((current) => ({ jobs: { ...current.jobs, [id]: next } }));
+    this.notify(next);
     return next;
   }
   read(id: string, stream: 'stdout' | 'stderr', offset = 0, limit = 65_536): JsonObject {
@@ -303,6 +340,9 @@ interface MachineServiceSurface {
   list(payload: JsonObject | undefined, context: RuntimeExecutionContext): JsonObject;
   events(payload: JsonObject, context: RuntimeExecutionContext): JsonObject;
   status(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  start(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  exec(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  shell(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
 }
 
 export class BabyXRuntime {
@@ -317,6 +357,7 @@ export class BabyXRuntime {
   readonly counterexamples: ObjectStore;
   readonly leases: ObjectStore;
   private machineServiceInstance?: MachineServiceSurface;
+  private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -341,10 +382,23 @@ export class BabyXRuntime {
     };
   }
   health(): JsonObject { return { ok: true, product: 'baby-x', hostname: hostname(), uid: process.getuid?.() ?? null, stateRoot: this.stateRoot, machineIdSha256: machineIdHash(), timestamp: new Date().toISOString() }; }
+  private async artifactManager(): Promise<import('./artifacts/manager.ts').ArtifactManager> {
+    if (this.artifactManagerInstance === undefined) {
+      const { ArtifactManager } = await import('./artifacts/manager.ts');
+      this.artifactManagerInstance = new ArtifactManager(join(this.stateRoot, 'artifacts'));
+    }
+    return this.artifactManagerInstance;
+  }
   private async machineService(): Promise<MachineServiceSurface> {
     if (this.machineServiceInstance === undefined) {
       const { DisposableMachineService } = await import('./machines/service.ts');
-      this.machineServiceInstance = new DisposableMachineService({ stateRoot: this.stateRoot, executor: this.executor, config: this.options.machineServiceConfig ?? {} });
+      this.machineServiceInstance = new DisposableMachineService({
+        stateRoot: this.stateRoot,
+        executor: this.executor,
+        jobs: this.jobs,
+        artifacts: await this.artifactManager(),
+        config: this.options.machineServiceConfig ?? {},
+      });
     }
     return this.machineServiceInstance;
   }
@@ -358,15 +412,22 @@ export class BabyXRuntime {
     if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
-    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status'].includes(operation)) {
+    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell'].includes(operation)) {
       const service = await this.machineService();
       if (operation === 'babyx.machine.describe') return service.describe();
       if (operation === 'babyx.machine.create') return service.create(payload, context);
       if (operation === 'babyx.machine.get') return service.get(payload, context);
       if (operation === 'babyx.machine.list') return service.list(payload, context);
       if (operation === 'babyx.machine.events') return service.events(payload, context);
-      return service.status(payload, context);
+      if (operation === 'babyx.machine.status') return service.status(payload, context);
+      if (operation === 'babyx.machine.start') return service.start(payload, context);
+      if (operation === 'babyx.machine.exec') return service.exec(payload, context);
+      return service.shell(payload, context);
     }
+    if (operation === 'babyx.artifact.create') return (await this.artifactManager()).create(requiredString(payload, 'name'), requiredString(payload, 'sourcePath'), payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata as JsonObject : {});
+    if (operation === 'babyx.artifact.get') return (await this.artifactManager()).get(requiredString(payload, 'id'));
+    if (operation === 'babyx.artifact.list') return { artifacts: (await this.artifactManager()).list() };
+    if (operation === 'babyx.artifact.verify') return (await this.artifactManager()).verify(requiredString(payload, 'id'));
     if (operation.startsWith('babyx.file.')) return this.fileOperation(operation, payload);
     if (operation.startsWith('babyx.spec.')) return this.specOperation(operation, payload);
     if (operation.startsWith('babyx.campaign.')) return this.objectOperation(operation, payload, this.campaigns);

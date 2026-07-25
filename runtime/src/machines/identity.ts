@@ -19,6 +19,8 @@ export interface MachineServiceConfig {
   maximumListLimit: number;
   maximumEventLimit: number;
   leaseDurationMs: number;
+  readinessTimeoutMs: number;
+  readinessPollIntervalMs: number;
 }
 
 export interface MachineCreateRequestV1 {
@@ -242,8 +244,11 @@ export function normalizeMachineServiceConfig(value: Partial<MachineServiceConfi
   const maximumListLimit = positiveInteger(value.maximumListLimit ?? 200, 'maximumListLimit');
   const maximumEventLimit = positiveInteger(value.maximumEventLimit ?? 200, 'maximumEventLimit');
   const leaseDurationMs = positiveInteger(value.leaseDurationMs ?? 300_000, 'leaseDurationMs');
+  const readinessTimeoutMs = positiveInteger(value.readinessTimeoutMs ?? 30_000, 'readinessTimeoutMs');
+  const readinessPollIntervalMs = positiveInteger(value.readinessPollIntervalMs ?? 250, 'readinessPollIntervalMs');
   if (defaultListLimit > maximumListLimit) invalid('defaultListLimit must not exceed maximumListLimit');
-  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs };
+  if (readinessPollIntervalMs > readinessTimeoutMs) invalid('readinessPollIntervalMs must not exceed readinessTimeoutMs');
+  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs, readinessTimeoutMs, readinessPollIntervalMs };
 }
 
 export function normalizeMachineCreateRequest(value: unknown, authenticatedPrincipal: string, configValue: Partial<MachineServiceConfig> = {}): NormalizedMachineCreateRequestV1 {

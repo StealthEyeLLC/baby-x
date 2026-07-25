@@ -65,7 +65,7 @@ export class MachineManager {
     return this.executor.run({ argv: ['/usr/bin/machinectl', '--no-pager', 'status', machineName(name)] });
   }
 
-  async launch(options: MachineLaunchOptions): Promise<CommandResult> {
+  launchArgv(options: MachineLaunchOptions): string[] {
     const definition = options.definition;
     const argv = ['/usr/bin/systemd-nspawn', '--quiet', `--machine=${machineName(definition.name)}`];
     const root = absolutePath(definition.root, 'definition.root');
@@ -89,7 +89,11 @@ export class MachineManager {
       argv.push(`--property=${property}`);
     }
     argv.push(...exactArgv(options.extraArgs ?? ['--']));
-    return this.executor.run({ argv, timeoutMs: options.timeoutMs ?? 0 });
+    return argv;
+  }
+
+  async launch(options: MachineLaunchOptions): Promise<CommandResult> {
+    return this.executor.run({ argv: this.launchArgv(options), timeoutMs: options.timeoutMs ?? 0 });
   }
 
   async shell(name: string, argv: readonly string[], timeoutMs = 0): Promise<CommandResult> {

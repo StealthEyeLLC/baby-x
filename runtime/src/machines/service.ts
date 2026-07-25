@@ -1,8 +1,12 @@
 import { hostname } from 'node:os';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { Executor, canonicalize, sha256, type JsonObject } from '../core.ts';
+import { Executor, JobManager, canonicalize, sha256, type JsonObject, type ProcessIdentity } from '../core.ts';
+import { ArtifactManager } from '../artifacts/manager.ts';
+import { processIdentity as readProcessIdentity } from '../process/identity.ts';
 import { DisposableMachineManager } from './disposable.ts';
+import { MachineExecutionController, type MachineArtifactAuthority, type MachineJobAuthority } from './execution.ts';
+import { MachineManager } from './manager.ts';
 import { MachineServiceError } from './errors.ts';
 import {
   assertMachineId,
@@ -42,6 +46,10 @@ export interface DisposableMachineServiceOptions {
   now?: () => string;
   machineIdFactory?: () => string;
   hostIdentity?: { hostname: string; machineIdSha256: string; bootId: string };
+  jobs?: MachineJobAuthority;
+  artifacts?: MachineArtifactAuthority;
+  sleep?: (milliseconds: number) => Promise<void>;
+  processIdentity?: (pid: number) => ProcessIdentity;
 }
 
 interface MachineListRequest {
@@ -209,6 +217,7 @@ export class DisposableMachineService {
   private readonly now: () => string;
   private readonly machineIdFactory: () => string;
   private readonly host: { hostname: string; machineIdSha256: string; bootId: string };
+  private readonly execution: MachineExecutionController;
 
   constructor(options: DisposableMachineServiceOptions) {
     this.config = normalizeMachineServiceConfig(options.config);
@@ -219,6 +228,20 @@ export class DisposableMachineService {
     this.now = options.now ?? (() => new Date().toISOString());
     this.machineIdFactory = options.machineIdFactory ?? newMachineId;
     this.host = options.hostIdentity ?? hostIdentity();
+    const jobs = options.jobs ?? new JobManager(join(options.stateRoot, 'jobs'));
+    const artifacts = options.artifacts ?? new ArtifactManager(join(options.stateRoot, 'artifacts'));
+    this.execution = new MachineExecutionController({
+      store: this.store,
+      observer: this.observer,
+      manager: new MachineManager(this.executor),
+      jobs,
+      artifacts,
+      config: this.config,
+      now: this.now,
+      sleep: options.sleep,
+      processIdentity: options.processIdentity ?? readProcessIdentity,
+      hostBootId: this.host.bootId,
+    });
   }
 
   describe(): JsonObject {
@@ -229,11 +252,11 @@ export class DisposableMachineService {
       providerId: MACHINE_PROVIDER_ID,
       lifecycleAuthority: 'disposable-machine-service',
       executionAuthority: 'baby-x-durable-jobs',
-      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status'],
-      checkpoint: 'B',
-      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED'],
-      unavailableUntilLaterCheckpoints: ['start', 'exec', 'stop', 'destroy', 'reconcile', 'gc', 'certify', 'policy', 'race'],
-      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit },
+      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell'],
+      checkpoint: 'C',
+      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'FAILED', 'DEGRADED', 'AMBIGUOUS'],
+      unavailableUntilLaterCheckpoints: ['stop', 'destroy', 'reconcile', 'gc', 'certify', 'policy', 'race'],
+      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs },
       configuredRoots: { sourceSnapshotRoots: [...this.config.sourceSnapshotRoots], cloneDatasetRoots: [...this.config.cloneDatasetRoots], machineRoot: this.config.machineRoot },
     };
   }
@@ -385,6 +408,18 @@ export class DisposableMachineService {
     const limit = positiveBound(payload.limit, 'limit', Math.min(100, this.config.maximumEventLimit), this.config.maximumEventLimit);
     const events = this.store.events(machineId, offset, limit).map(publicEvent);
     return { operation: 'babyx.machine.events', machineId, events, offset, limit, nextOffset: events.length === limit ? offset + events.length : null };
+  }
+
+  start(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.execution.start(payload, context);
+  }
+
+  exec(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.execution.exec(payload, context);
+  }
+
+  shell(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.execution.shell(payload, context);
   }
 
   async status(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {

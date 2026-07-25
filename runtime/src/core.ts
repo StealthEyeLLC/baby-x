@@ -343,6 +343,8 @@ interface MachineServiceSurface {
   start(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
   exec(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
   shell(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  stop(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  destroy(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
 }
 
 export class BabyXRuntime {
@@ -412,7 +414,7 @@ export class BabyXRuntime {
     if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
-    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell'].includes(operation)) {
+    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy'].includes(operation)) {
       const service = await this.machineService();
       if (operation === 'babyx.machine.describe') return service.describe();
       if (operation === 'babyx.machine.create') return service.create(payload, context);
@@ -422,7 +424,9 @@ export class BabyXRuntime {
       if (operation === 'babyx.machine.status') return service.status(payload, context);
       if (operation === 'babyx.machine.start') return service.start(payload, context);
       if (operation === 'babyx.machine.exec') return service.exec(payload, context);
-      return service.shell(payload, context);
+      if (operation === 'babyx.machine.shell') return service.shell(payload, context);
+      if (operation === 'babyx.machine.stop') return service.stop(payload, context);
+      return service.destroy(payload, context);
     }
     if (operation === 'babyx.artifact.create') return (await this.artifactManager()).create(requiredString(payload, 'name'), requiredString(payload, 'sourcePath'), payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata as JsonObject : {});
     if (operation === 'babyx.artifact.get') return (await this.artifactManager()).get(requiredString(payload, 'id'));

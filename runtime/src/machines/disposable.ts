@@ -100,21 +100,44 @@ export class DisposableMachineManager {
     const id = token(instance.id, 'id');
     const dataset = zfsName(instance.dataset, 'dataset');
     const root = absolutePath(instance.root, 'root');
-    const terminate = await this.machines.lifecycle('terminate', id);
+    if (dataset.includes('@')) throw new Error('clone dataset must not be a snapshot');
+    const terminate = await this.executor.run({ argv: ['/usr/bin/machinectl', 'terminate', id] });
     const unmount = await this.executor.run({ argv: ['/usr/bin/umount', '-l', root] });
-    const destroy = await this.executor.run({ argv: ['/usr/sbin/zfs', 'destroy', '-r', dataset] });
-    const datasetCheck = await this.executor.run({ argv: ['/usr/sbin/zfs', 'list', '-H', '-o', 'name', dataset] });
-    const mountCheck = await this.executor.run({ argv: ['/usr/bin/mountpoint', '-q', root] });
-    const clean = datasetCheck.exitCode !== 0 && mountCheck.exitCode !== 0;
-    if (!clean) throw new Error('disposable machine cleanup verification failed');
+    const destroy = await this.executor.run({ argv: ['/usr/sbin/zfs', 'destroy', dataset] });
+    const datasetReadback = await this.executor.run({ argv: ['/usr/sbin/zfs', 'list', '-H', '-o', 'name', dataset] });
+    const mountReadback = await this.executor.run({ argv: ['/usr/bin/mountpoint', '-q', root] });
     return {
       id,
       dataset,
       root,
-      clean,
+      clean: destroy.exitCode === 0 && datasetReadback.exitCode !== 0 && mountReadback.exitCode !== 0,
       terminateExitCode: terminate.exitCode,
       unmountExitCode: unmount.exitCode,
       destroyExitCode: destroy.exitCode,
+      datasetAbsentVerified: datasetReadback.exitCode !== 0,
+      rootUnmountedVerified: mountReadback.exitCode !== 0,
     };
   }
+
+  async mountpoint(rootValue: string): Promise<CommandResult> {
+    const root = absolutePath(rootValue, 'root');
+    return this.executor.run({ argv: ['/usr/bin/mountpoint', '-q', root] });
+  }
+
+  async unmount(rootValue: string): Promise<CommandResult> {
+    const root = absolutePath(rootValue, 'root');
+    return this.executor.run({ argv: ['/usr/bin/umount', root] });
+  }
+
+  async listDescendants(datasetValue: string): Promise<CommandResult> {
+    const dataset = zfsName(datasetValue, 'dataset');
+    return this.executor.run({ argv: ['/usr/sbin/zfs', 'list', '-H', '-o', 'name', '-r', '-t', 'all', dataset] });
+  }
+
+  async destroyClone(datasetValue: string): Promise<CommandResult> {
+    const dataset = zfsName(datasetValue, 'dataset');
+    if (dataset.includes('@')) throw new Error('clone dataset must not be a snapshot');
+    return this.executor.run({ argv: ['/usr/sbin/zfs', 'destroy', dataset] });
+  }
+
 }

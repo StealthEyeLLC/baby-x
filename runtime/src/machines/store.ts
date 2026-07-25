@@ -53,6 +53,10 @@ export interface MachineEventDetails {
   occurredAt?: string;
 }
 
+function withoutUndefined<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 export interface MachineLeaseObservation {
   currentBootId: string;
   existingOwnerAlive?: boolean;
@@ -259,7 +263,7 @@ export class DisposableMachineStore {
     const current = this.get(machineId);
     const nextSequence = assertMachineTransition(current.lifecycle.persistedState, nextState, current.lifecycle.stateSequence, expectedSequence);
     const occurredAt = details.occurredAt ?? new Date().toISOString();
-    const candidate = assertDisposableMachineRecord({
+    const candidate = assertDisposableMachineRecord(withoutUndefined({
       ...current,
       ...patch,
       machineId: current.machineId,
@@ -283,7 +287,7 @@ export class DisposableMachineStore {
         updatedAt: occurredAt,
         ...(nextState === 'DESTROYED' ? { destroyedAt: occurredAt } : {}),
       },
-    });
+    }));
     const allEvents = this.readAllEvents(machineId);
     const priorEvent = allEvents.at(-1);
     const event = this.eventFrom(candidate, current.lifecycle.persistedState, allEvents.length, { ...details, occurredAt }, priorEvent?.eventDigest);
@@ -297,7 +301,7 @@ export class DisposableMachineStore {
     const current = this.get(machineId);
     assertExpectedMachineSequence(current.lifecycle.stateSequence, expectedSequence);
     const occurredAt = details.occurredAt ?? new Date().toISOString();
-    const candidate = assertDisposableMachineRecord({
+    const candidate = assertDisposableMachineRecord(withoutUndefined({
       ...current,
       ...patch,
       machineId: current.machineId,
@@ -318,7 +322,7 @@ export class DisposableMachineStore {
         terminal: isTerminalMachineState(current.lifecycle.persistedState),
         updatedAt: occurredAt,
       },
-    });
+    }));
     const allEvents = this.readAllEvents(machineId);
     const priorEvent = allEvents.at(-1);
     const event = this.eventFrom(candidate, current.lifecycle.persistedState, allEvents.length, { ...details, occurredAt }, priorEvent?.eventDigest);

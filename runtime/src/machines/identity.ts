@@ -21,6 +21,8 @@ export interface MachineServiceConfig {
   leaseDurationMs: number;
   readinessTimeoutMs: number;
   readinessPollIntervalMs: number;
+  stopGracefulTimeoutMs: number;
+  stopPollIntervalMs: number;
 }
 
 export interface MachineCreateRequestV1 {
@@ -246,9 +248,12 @@ export function normalizeMachineServiceConfig(value: Partial<MachineServiceConfi
   const leaseDurationMs = positiveInteger(value.leaseDurationMs ?? 300_000, 'leaseDurationMs');
   const readinessTimeoutMs = positiveInteger(value.readinessTimeoutMs ?? 30_000, 'readinessTimeoutMs');
   const readinessPollIntervalMs = positiveInteger(value.readinessPollIntervalMs ?? 250, 'readinessPollIntervalMs');
+  const stopGracefulTimeoutMs = positiveInteger(value.stopGracefulTimeoutMs ?? 30_000, 'stopGracefulTimeoutMs');
+  const stopPollIntervalMs = positiveInteger(value.stopPollIntervalMs ?? 250, 'stopPollIntervalMs');
   if (defaultListLimit > maximumListLimit) invalid('defaultListLimit must not exceed maximumListLimit');
   if (readinessPollIntervalMs > readinessTimeoutMs) invalid('readinessPollIntervalMs must not exceed readinessTimeoutMs');
-  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs, readinessTimeoutMs, readinessPollIntervalMs };
+  if (stopPollIntervalMs > stopGracefulTimeoutMs) invalid('stopPollIntervalMs must not exceed stopGracefulTimeoutMs');
+  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs, readinessTimeoutMs, readinessPollIntervalMs, stopGracefulTimeoutMs, stopPollIntervalMs };
 }
 
 export function normalizeMachineCreateRequest(value: unknown, authenticatedPrincipal: string, configValue: Partial<MachineServiceConfig> = {}): NormalizedMachineCreateRequestV1 {

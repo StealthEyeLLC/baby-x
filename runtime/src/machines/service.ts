@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Executor, JobManager, canonicalize, sha256, type JsonObject, type ProcessIdentity } from '../core.ts';
 import { ArtifactManager } from '../artifacts/manager.ts';
 import { processIdentity as readProcessIdentity } from '../process/identity.ts';
+import { MachineDestructionController } from './destruction.ts';
 import { DisposableMachineManager } from './disposable.ts';
 import { MachineExecutionController, type MachineArtifactAuthority, type MachineJobAuthority } from './execution.ts';
 import { MachineManager } from './manager.ts';
@@ -50,6 +51,7 @@ export interface DisposableMachineServiceOptions {
   artifacts?: MachineArtifactAuthority;
   sleep?: (milliseconds: number) => Promise<void>;
   processIdentity?: (pid: number) => ProcessIdentity;
+  killProcessGroup?: (pgid: number) => void;
 }
 
 interface MachineListRequest {
@@ -218,6 +220,7 @@ export class DisposableMachineService {
   private readonly machineIdFactory: () => string;
   private readonly host: { hostname: string; machineIdSha256: string; bootId: string };
   private readonly execution: MachineExecutionController;
+  private readonly destruction: MachineDestructionController;
 
   constructor(options: DisposableMachineServiceOptions) {
     this.config = normalizeMachineServiceConfig(options.config);
@@ -230,17 +233,33 @@ export class DisposableMachineService {
     this.host = options.hostIdentity ?? hostIdentity();
     const jobs = options.jobs ?? new JobManager(join(options.stateRoot, 'jobs'));
     const artifacts = options.artifacts ?? new ArtifactManager(join(options.stateRoot, 'artifacts'));
+    const manager = new MachineManager(this.executor);
+    const processIdentity = options.processIdentity ?? readProcessIdentity;
     this.execution = new MachineExecutionController({
       store: this.store,
       observer: this.observer,
-      manager: new MachineManager(this.executor),
+      manager,
       jobs,
       artifacts,
       config: this.config,
       now: this.now,
       sleep: options.sleep,
-      processIdentity: options.processIdentity ?? readProcessIdentity,
+      processIdentity,
       hostBootId: this.host.bootId,
+    });
+    this.destruction = new MachineDestructionController({
+      store: this.store,
+      observer: this.observer,
+      provider: this.provider,
+      manager,
+      artifacts,
+      config: this.config,
+      now: this.now,
+      sleep: options.sleep,
+      processIdentity,
+      killProcessGroup: options.killProcessGroup,
+      hostBootId: this.host.bootId,
+      evidenceRoot: join(options.stateRoot, 'machine-service', 'evidence'),
     });
   }
 
@@ -252,11 +271,11 @@ export class DisposableMachineService {
       providerId: MACHINE_PROVIDER_ID,
       lifecycleAuthority: 'disposable-machine-service',
       executionAuthority: 'baby-x-durable-jobs',
-      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell'],
-      checkpoint: 'C',
-      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'FAILED', 'DEGRADED', 'AMBIGUOUS'],
-      unavailableUntilLaterCheckpoints: ['stop', 'destroy', 'reconcile', 'gc', 'certify', 'policy', 'race'],
-      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs },
+      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy'],
+      checkpoint: 'D',
+      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'STOPPING', 'STOPPED', 'DESTROYING', 'DESTROYED', 'FAILED', 'DEGRADED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+      unavailableUntilLaterCheckpoints: ['reconcile', 'gc', 'certify', 'policy', 'race'],
+      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs, stopGracefulTimeoutMs: this.config.stopGracefulTimeoutMs, stopPollIntervalMs: this.config.stopPollIntervalMs },
       configuredRoots: { sourceSnapshotRoots: [...this.config.sourceSnapshotRoots], cloneDatasetRoots: [...this.config.cloneDatasetRoots], machineRoot: this.config.machineRoot },
     };
   }
@@ -420,6 +439,14 @@ export class DisposableMachineService {
 
   shell(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
     return this.execution.shell(payload, context);
+  }
+
+  stop(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.destruction.stop(payload, context);
+  }
+
+  destroy(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.destruction.destroy(payload, context);
   }
 
   async status(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {

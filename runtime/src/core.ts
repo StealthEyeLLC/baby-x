@@ -6,7 +6,6 @@ import { dirname, join, resolve } from 'node:path';
 import { processIdentity as readProcessIdentity } from './process/identity.ts';
 import { OPERATION_DEFINITIONS, OPERATION_NAMES, type OperationDefinition } from './operations/definitions.ts';
 
-export type ExecutionTarget = { kind: 'host' } | { kind: 'machine'; machine: string };
 export type JsonObject = Record<string, unknown>;
 
 export interface ProcessIdentity {
@@ -16,6 +15,9 @@ export interface ProcessIdentity {
   pgid?: number;
   bootId?: string;
 }
+
+export type CompleteProcessIdentity = ProcessIdentity & { processStartTime: string; executablePath: string; bootId: string };
+export type ExecutionTarget = { kind: 'host' } | { kind: 'machine'; machine: string } | { kind: 'machine-process'; machine: string; processIdentity: CompleteProcessIdentity };
 
 export interface CommandResult {
   argv: string[];
@@ -127,6 +129,34 @@ function requiredString(payload: JsonObject, key: string): string {
   return value;
 }
 
+function completeExecutionIdentity(value: unknown): CompleteProcessIdentity {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('machine process target requires processIdentity');
+  const identity = value as JsonObject;
+  const pid = Number(identity.pid);
+  const pgid = identity.pgid === undefined ? undefined : Number(identity.pgid);
+  const processStartTime = requiredString(identity, 'processStartTime');
+  const executablePath = requiredString(identity, 'executablePath');
+  const bootId = requiredString(identity, 'bootId');
+  if (!Number.isSafeInteger(pid) || pid < 1 || (pgid !== undefined && (!Number.isSafeInteger(pgid) || pgid < 1))) throw new Error('machine process target identity has invalid pid or pgid');
+  return { pid, ...(pgid === undefined ? {} : { pgid }), processStartTime, executablePath, bootId };
+}
+
+function sameCompleteIdentity(expected: CompleteProcessIdentity, actual: ProcessIdentity): boolean {
+  return expected.pid === actual.pid
+    && expected.processStartTime === actual.processStartTime
+    && expected.executablePath === actual.executablePath
+    && expected.bootId === actual.bootId
+    && (expected.pgid === undefined || expected.pgid === actual.pgid);
+}
+
+function assertMachineProcessTarget(target: ExecutionTarget, resolver: (pid: number) => ProcessIdentity): void {
+  if (target.kind !== 'machine-process') return;
+  let actual: ProcessIdentity;
+  try { actual = resolver(target.processIdentity.pid); }
+  catch { throw new Error('machine target process is absent before execution'); }
+  if (!sameCompleteIdentity(target.processIdentity, actual)) throw new Error('machine target process identity changed before execution');
+}
+
 function optionalTarget(payload: JsonObject): ExecutionTarget {
   const candidate = payload.target;
   if (candidate === undefined) return { kind: 'host' };
@@ -134,7 +164,8 @@ function optionalTarget(payload: JsonObject): ExecutionTarget {
   const target = candidate as JsonObject;
   if (target.kind === 'host') return { kind: 'host' };
   if (target.kind === 'machine') return { kind: 'machine', machine: requiredString(target, 'machine') };
-  throw new Error('target kind must be host or machine');
+  if (target.kind === 'machine-process') return { kind: 'machine-process', machine: requiredString(target, 'machine'), processIdentity: completeExecutionIdentity(target.processIdentity) };
+  throw new Error('target kind must be host, machine, or machine-process');
 }
 
 function assertStrings(values: unknown, key: string): string[] {
@@ -144,9 +175,16 @@ function assertStrings(values: unknown, key: string): string[] {
 
 export function machineWrapped(target: ExecutionTarget, argv: string[], cwd: string, environment: JsonObject): string[] {
   if (target.kind === 'host') return argv;
-  const wrapped = ['/usr/bin/machinectl', '--quiet', '--pipe', '--uid=root'];
-  for (const [key, value] of Object.entries(environment)) wrapped.push(`--setenv=${key}=${String(value)}`);
-  wrapped.push('shell', target.machine, '/usr/bin/env', `--chdir=${cwd}`, '--', ...argv);
+  if (target.kind === 'machine') {
+    const wrapped = ['/usr/bin/machinectl', '--quiet', '--uid=root'];
+    for (const [key, value] of Object.entries(environment)) wrapped.push(`--setenv=${key}=${String(value)}`);
+    wrapped.push('shell', target.machine, '/usr/bin/env', `--chdir=${cwd}`, '--', ...argv);
+    return wrapped;
+  }
+  const pid = String(target.processIdentity.pid);
+  const wrapped = ['/usr/bin/nsenter', '--target', pid, '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root', `/proc/${pid}/root`, '--wdns', cwd, '--', '/usr/bin/env'];
+  for (const [key, value] of Object.entries(environment)) wrapped.push(`${key}=${String(value)}`);
+  wrapped.push(...argv);
   return wrapped;
 }
 
@@ -158,6 +196,7 @@ export class Executor {
     const argv = assertStrings(payload.argv, 'argv');
     const cwd = typeof payload.cwd === 'string' ? payload.cwd : '/';
     const environment = payload.env && typeof payload.env === 'object' ? payload.env as JsonObject : {};
+    assertMachineProcessTarget(target, readProcessIdentity);
     const effective = machineWrapped(target, argv, cwd, environment);
     const started = Date.now();
     const startedAt = new Date(started).toISOString();
@@ -249,6 +288,7 @@ export class JobManager {
     const env = payload.env && typeof payload.env === 'object' ? payload.env as JsonObject : {};
     const metadata = payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? structuredClone(payload.metadata as JsonObject) : undefined;
     const timeoutMs = payload.timeoutMs === undefined ? undefined : Number(payload.timeoutMs);
+    assertMachineProcessTarget(target, this.processIdentity);
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)) throw new Error('timeoutMs must be a positive safe integer');
     const effective = machineWrapped(target, argv, cwd, env);
     const executable = effective[0];

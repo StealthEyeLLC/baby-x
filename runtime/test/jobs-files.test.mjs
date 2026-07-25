@@ -48,13 +48,13 @@ test('durable detached jobs stream exact stdout and support process-group cancel
 });
 
 
-test('machine execution wrapper uses host machinectl without a guest system bus', () => {
+test('managed machine execution wrapper enters the exact leader namespaces', () => {
   assert.deepEqual(machineWrapped(
-    { kind: 'machine', machine: 'machine-1' },
+    { kind: 'machine-process', machine: 'machine-1', processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' } },
     ['/usr/bin/printf', '%s', 'ok'],
     '/workspace',
     { MODE: 'test' },
-  ), ['/usr/bin/machinectl', '--quiet', '--pipe', '--uid=root', '--setenv=MODE=test', 'shell', 'machine-1', '/usr/bin/env', '--chdir=/workspace', '--', '/usr/bin/printf', '%s', 'ok']);
+  ), ['/usr/bin/nsenter', '--target', '4242', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root', '/proc/4242/root', '--wdns', '/workspace', '--', '/usr/bin/env', 'MODE=test', '/usr/bin/printf', '%s', 'ok']);
 });
 
 test('durable job reconciliation terminalizes absent and reused process identities without fabricating exit zero', async () => {
@@ -118,5 +118,17 @@ test('machine-service startup reconciles dead recorded-running jobs', async () =
     const reconciled = await runtime.execute('babyx.job.get', { jobId: id });
     assert.equal(reconciled.status, 'lost');
     assert.equal(reconciled.reconciliation.classification, 'process-absent');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('durable job authority rejects a reused machine leader PID before namespace entry', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-job-target-identity-'));
+  try {
+    const manager = new JobManager(root, { processIdentity: () => ({ pid: 4242, pgid: 4242, processStartTime: '999', executablePath: '/usr/bin/foreign', bootId: 'boot-1' }) });
+    assert.throws(() => manager.start('test', {
+      argv: ['/usr/bin/true'],
+      target: { kind: 'machine-process', machine: 'machine-1', processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' } },
+    }), /identity changed before execution/u);
+    assert.equal(manager.list().length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

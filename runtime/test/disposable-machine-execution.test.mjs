@@ -305,7 +305,7 @@ test('exec and shell target the exact machine through existing jobs, support con
   const first = await f.service.exec(firstPayload, firstContext);
   assert.equal(first.machine.lifecycle.persistedState, 'EXECUTING');
   const firstJob = f.jobs.get(first.jobId);
-  assert.deepEqual(firstJob.target, { kind: 'machine', machine: 'machine-1' });
+  assert.deepEqual(firstJob.target, { kind: 'machine-process', machine: 'machine-1', processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' } });
   assert.deepEqual(firstJob.argv, ['/usr/bin/printf', '%s', 'alpha']);
   assert.equal(firstJob.cwd, '/work');
   assert.equal(firstJob.timeoutMs, 1000);
@@ -318,7 +318,7 @@ test('exec and shell target the exact machine through existing jobs, support con
     { idempotencyKey: 'shell-machine-second', subject: 'owner:test', authorityClass: 'unrestricted-owner' },
   );
   const secondJob = f.jobs.get(second.jobId);
-  assert.deepEqual(secondJob.target, { kind: 'machine', machine: 'machine-1' });
+  assert.deepEqual(secondJob.target, { kind: 'machine-process', machine: 'machine-1', processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' } });
   assert.deepEqual(secondJob.argv, ['/usr/bin/bash', '-lc', 'printf beta']);
   assert.equal(f.service.store.get(machineId).activeJobIds.length, 2);
 

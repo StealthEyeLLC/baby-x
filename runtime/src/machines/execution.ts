@@ -362,7 +362,7 @@ export class MachineExecutionController {
     if (!sameProcessIdentity(record.processIdentity, running.identity)) throw new MachineServiceError('machine_process_conflict', 'machine leader process identity differs from the durable record');
 
     const job = this.options.jobs.start(operation, {
-      argv, cwd, env, target: { kind: 'machine', machine: record.machineName },
+      argv, cwd, env, target: { kind: 'machine-process', machine: record.machineName, processIdentity: running.identity },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       metadata: {
         machineService: true, kind: 'exec', machineId: record.machineId, machineName: record.machineName,

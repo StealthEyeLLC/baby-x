@@ -482,6 +482,8 @@ test('public runtime registry routes recovery operations through one startup pro
     expire: (payload, context) => { calls.push(['expire', payload, context]); return { operation: 'babyx.machine.expire' }; },
     gc: async (payload, context) => { calls.push(['gc', payload, context]); return { operation: 'babyx.machine.gc' }; },
     diagnostics: async (payload, context) => { calls.push(['diagnostics', payload, context]); return { operation: 'babyx.machine.diagnostics' }; },
+    stop: async (payload, context) => { calls.push(['stop', payload, context]); return { operation: 'babyx.machine.stop' }; },
+    destroy: async (payload, context) => { calls.push(['destroy', payload, context]); return { operation: 'babyx.machine.destroy' }; },
   };
   let releaseStartup;
   runtime.machineServiceInstance = fake;
@@ -497,9 +499,11 @@ test('public runtime registry routes recovery operations through one startup pro
   await pending;
   await runtime.execute('babyx.machine.expire', { machineId: 'mx_publicroute1' }, context);
   await runtime.execute('babyx.machine.diagnostics', { machineId: 'mx_publicroute1' }, context);
-  assert.deepEqual(calls.map(([name]) => name), ['reconcile', 'gc', 'expire', 'diagnostics']);
+  await runtime.execute('babyx.machine.stop', { machineId: 'mx_publicroute1', expectedSequence: 1 }, context);
+  await runtime.execute('babyx.machine.destroy', { machineId: 'mx_publicroute1', expectedSequence: 2 }, context);
+  assert.deepEqual(calls.map(([name]) => name), ['reconcile', 'gc', 'expire', 'diagnostics', 'stop', 'destroy']);
   const names = new Set(runtime.describe().operations.map((definition) => definition.operation));
-  for (const name of ['babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics']) assert.ok(names.has(name));
+  for (const name of ['babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics', 'babyx.machine.stop', 'babyx.machine.destroy']) assert.ok(names.has(name));
 });
 
 test('owner-scoped GC never enumerates global orphan datasets or machine names', async (t) => {

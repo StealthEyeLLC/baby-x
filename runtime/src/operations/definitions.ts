@@ -91,6 +91,7 @@ babyx.machine.network.set
 babyx.machine.freeze
 babyx.machine.thaw
 babyx.machine.stop
+babyx.machine.destroy
 babyx.machine.terminate
 babyx.machine.poweroff
 babyx.machine.reboot

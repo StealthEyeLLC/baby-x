@@ -23,6 +23,10 @@ export interface MachineServiceConfig {
   readinessPollIntervalMs: number;
   stopGracefulTimeoutMs: number;
   stopPollIntervalMs: number;
+  startupReconcileLimit: number;
+  startupReconcileTimeBudgetMs: number;
+  garbageCollectionLimit: number;
+  retryBackoffMs: number;
 }
 
 export interface MachineCreateRequestV1 {
@@ -250,10 +254,16 @@ export function normalizeMachineServiceConfig(value: Partial<MachineServiceConfi
   const readinessPollIntervalMs = positiveInteger(value.readinessPollIntervalMs ?? 250, 'readinessPollIntervalMs');
   const stopGracefulTimeoutMs = positiveInteger(value.stopGracefulTimeoutMs ?? 30_000, 'stopGracefulTimeoutMs');
   const stopPollIntervalMs = positiveInteger(value.stopPollIntervalMs ?? 250, 'stopPollIntervalMs');
+  const startupReconcileLimit = positiveInteger(value.startupReconcileLimit ?? 100, 'startupReconcileLimit');
+  const startupReconcileTimeBudgetMs = positiveInteger(value.startupReconcileTimeBudgetMs ?? 30_000, 'startupReconcileTimeBudgetMs');
+  const garbageCollectionLimit = positiveInteger(value.garbageCollectionLimit ?? 100, 'garbageCollectionLimit');
+  const retryBackoffMs = positiveInteger(value.retryBackoffMs ?? 1_000, 'retryBackoffMs');
+  if (startupReconcileLimit > 1_000 || garbageCollectionLimit > 1_000) invalid('reconciliation and garbage-collection limits must not exceed 1000');
+  if (startupReconcileTimeBudgetMs > 300_000) invalid('startupReconcileTimeBudgetMs must not exceed 300000');
   if (defaultListLimit > maximumListLimit) invalid('defaultListLimit must not exceed maximumListLimit');
   if (readinessPollIntervalMs > readinessTimeoutMs) invalid('readinessPollIntervalMs must not exceed readinessTimeoutMs');
   if (stopPollIntervalMs > stopGracefulTimeoutMs) invalid('stopPollIntervalMs must not exceed stopGracefulTimeoutMs');
-  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs, readinessTimeoutMs, readinessPollIntervalMs, stopGracefulTimeoutMs, stopPollIntervalMs };
+  return { sourceSnapshotRoots, cloneDatasetRoots, machineRoot, allowedNetworkModes: [...allowedNetworkModes], defaultListLimit, maximumListLimit, maximumEventLimit, leaseDurationMs, readinessTimeoutMs, readinessPollIntervalMs, stopGracefulTimeoutMs, stopPollIntervalMs, startupReconcileLimit, startupReconcileTimeBudgetMs, garbageCollectionLimit, retryBackoffMs };
 }
 
 export function normalizeMachineCreateRequest(value: unknown, authenticatedPrincipal: string, configValue: Partial<MachineServiceConfig> = {}): NormalizedMachineCreateRequestV1 {

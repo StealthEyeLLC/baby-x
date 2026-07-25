@@ -76,6 +76,10 @@ babyx.machine.boot
 babyx.machine.exec
 babyx.machine.shell
 babyx.machine.status
+babyx.machine.reconcile
+babyx.machine.expire
+babyx.machine.gc
+babyx.machine.diagnostics
 babyx.machine.inspect
 babyx.machine.logs
 babyx.machine.copy.to

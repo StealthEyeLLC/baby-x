@@ -71,6 +71,13 @@ export interface MachineStoreVerification {
   indexesMatch: boolean;
 }
 
+export interface MachineRecordScan {
+  records: DisposableMachineRecordV1[];
+  errors: JsonObject[];
+  total: number;
+  truncated: boolean;
+}
+
 function emptyIndexes(): MachineIndexes {
   return { byName: {}, byDataset: {}, byRoot: {}, byState: {} };
 }
@@ -229,6 +236,32 @@ export class DisposableMachineStore {
 
   list(): DisposableMachineRecordV1[] {
     return readdirSync(this.recordsRoot).filter((name: string) => name.endsWith('.json')).sort().map((name: string) => this.get(name.slice(0, -5)));
+  }
+
+  scan(limit = 1_000): MachineRecordScan {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new MachineServiceError('machine_invalid_request', 'record scan limit is out of bounds');
+    const names = readdirSync(this.recordsRoot).filter((name: string) => name.endsWith('.json')).sort();
+    const records: DisposableMachineRecordV1[] = [];
+    const errors: JsonObject[] = [];
+    for (const name of names.slice(0, limit)) {
+      const machineId = name.slice(0, -5);
+      try {
+        const record = this.get(machineId);
+        const events = this.readAllEvents(machineId);
+        const finalEvent = events.at(-1);
+        if (finalEvent === undefined || finalEvent.stateSequence !== record.lifecycle.stateSequence || finalEvent.nextState !== record.lifecycle.persistedState) {
+          throw new MachineServiceError('machine_event_corrupt', 'machine record does not match its final event', { machineId });
+        }
+        records.push(record);
+      } catch (error) {
+        errors.push({
+          machineId,
+          code: error instanceof MachineServiceError ? error.code : 'machine_record_corrupt',
+          message: error instanceof Error ? error.message : 'machine record could not be validated',
+        });
+      }
+    }
+    return { records, errors, total: names.length, truncated: names.length > limit };
   }
 
   private readAllEvents(machineId: string): MachineEventV1[] {
@@ -404,6 +437,15 @@ export class DisposableMachineStore {
     }
     if (write) this.indexes.write(rebuilt);
     return rebuilt;
+  }
+
+  verifyAndRepairIndexes(): MachineStoreVerification & { repairedIndexes: boolean } {
+    try { return { ...this.verify(), repairedIndexes: false }; }
+    catch (error) {
+      if (!(error instanceof MachineServiceError) || error.code !== 'machine_index_corrupt' || error.message !== 'machine indexes do not match validated records') throw error;
+      this.rebuildIndexes(true);
+      return { ...this.verify(), repairedIndexes: true };
+    }
   }
 
   verify(): MachineStoreVerification {

@@ -345,6 +345,11 @@ interface MachineServiceSurface {
   shell(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
   stop(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
   destroy(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  initialize(): Promise<JsonObject>;
+  reconcile(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  expire(payload: JsonObject, context: RuntimeExecutionContext): JsonObject;
+  gc(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
+  diagnostics(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject>;
 }
 
 export class BabyXRuntime {
@@ -359,6 +364,7 @@ export class BabyXRuntime {
   readonly counterexamples: ObjectStore;
   readonly leases: ObjectStore;
   private machineServiceInstance?: MachineServiceSurface;
+  private machineServiceInitializePromise?: Promise<JsonObject>;
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
@@ -401,7 +407,12 @@ export class BabyXRuntime {
         artifacts: await this.artifactManager(),
         config: this.options.machineServiceConfig ?? {},
       });
+      this.machineServiceInitializePromise = this.machineServiceInstance.initialize().catch((error: unknown) => ({
+        operation: 'babyx.machine.reconcile', startup: true, processed: 0, deferred: true,
+        error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'machine_startup_reconcile_failed') : 'machine_startup_reconcile_failed', message: error instanceof Error ? error.message : 'startup reconciliation failed' },
+      }));
     }
+    await this.machineServiceInitializePromise;
     return this.machineServiceInstance;
   }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
@@ -414,7 +425,7 @@ export class BabyXRuntime {
     if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
-    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy'].includes(operation)) {
+    if (['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy', 'babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics'].includes(operation)) {
       const service = await this.machineService();
       if (operation === 'babyx.machine.describe') return service.describe();
       if (operation === 'babyx.machine.create') return service.create(payload, context);
@@ -426,7 +437,11 @@ export class BabyXRuntime {
       if (operation === 'babyx.machine.exec') return service.exec(payload, context);
       if (operation === 'babyx.machine.shell') return service.shell(payload, context);
       if (operation === 'babyx.machine.stop') return service.stop(payload, context);
-      return service.destroy(payload, context);
+      if (operation === 'babyx.machine.destroy') return service.destroy(payload, context);
+      if (operation === 'babyx.machine.reconcile') return service.reconcile(payload, context);
+      if (operation === 'babyx.machine.expire') return service.expire(payload, context);
+      if (operation === 'babyx.machine.gc') return service.gc(payload, context);
+      return service.diagnostics(payload, context);
     }
     if (operation === 'babyx.artifact.create') return (await this.artifactManager()).create(requiredString(payload, 'name'), requiredString(payload, 'sourcePath'), payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata as JsonObject : {});
     if (operation === 'babyx.artifact.get') return (await this.artifactManager()).get(requiredString(payload, 'id'));

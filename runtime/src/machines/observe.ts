@@ -31,6 +31,13 @@ export interface MachineRuntimeObservation {
   command: CommandResult;
 }
 
+export interface MachineListObservation {
+  status: 'available' | 'unknown';
+  machineNames: string[];
+  observedAt: string;
+  command: CommandResult;
+}
+
 export interface MachineStatusObservation {
   observations: MachineObservationSetV1;
   observedState: MachineObservedState;
@@ -132,6 +139,14 @@ export class DisposableMachineObserver {
       ...(properties.origin === undefined ? {} : { origin: properties.origin }),
       ...(properties.mountpoint === undefined ? {} : { mountpoint: properties.mountpoint }),
     };
+  }
+
+  async listMachines(limit = 1_000): Promise<MachineListObservation> {
+    const result = await this.executor.run({ argv: ['/usr/bin/machinectl', '--no-pager', '--no-legend', 'list'] });
+    const observedAt = new Date().toISOString();
+    if (result.exitCode !== 0) return { status: 'unknown', machineNames: [], observedAt, command: result };
+    const machineNames = output(result).split('\n').map((line) => line.trim().split(/\s+/u)[0]).filter((name): name is string => typeof name === 'string' && name.length > 0).slice(0, limit);
+    return { status: 'available', machineNames, observedAt, command: result };
   }
 
   async machine(machineName: string): Promise<MachineRuntimeObservation> {

@@ -9,3 +9,4 @@ export * from './machines/observe.ts';
 export * from './machines/service.ts';
 export * from './machines/execution.ts';
 export * from './machines/destruction.ts';
+export * from './machines/recovery.ts';

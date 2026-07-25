@@ -8,6 +8,7 @@ import { MachineDestructionController } from './destruction.ts';
 import { DisposableMachineManager } from './disposable.ts';
 import { MachineExecutionController, type MachineArtifactAuthority, type MachineJobAuthority } from './execution.ts';
 import { MachineManager } from './manager.ts';
+import { MachineRecoveryController } from './recovery.ts';
 import { MachineServiceError } from './errors.ts';
 import {
   assertMachineId,
@@ -52,6 +53,7 @@ export interface DisposableMachineServiceOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   processIdentity?: (pid: number) => ProcessIdentity;
   killProcessGroup?: (pgid: number) => void;
+  monotonicNow?: () => number;
 }
 
 interface MachineListRequest {
@@ -221,6 +223,7 @@ export class DisposableMachineService {
   private readonly host: { hostname: string; machineIdSha256: string; bootId: string };
   private readonly execution: MachineExecutionController;
   private readonly destruction: MachineDestructionController;
+  private readonly recovery: MachineRecoveryController;
 
   constructor(options: DisposableMachineServiceOptions) {
     this.config = normalizeMachineServiceConfig(options.config);
@@ -261,6 +264,19 @@ export class DisposableMachineService {
       hostBootId: this.host.bootId,
       evidenceRoot: join(options.stateRoot, 'machine-service', 'evidence'),
     });
+    this.recovery = new MachineRecoveryController({
+      store: this.store,
+      observer: this.observer,
+      provider: this.provider,
+      destruction: this.destruction,
+      config: this.config,
+      now: this.now,
+      processIdentity,
+      hostBootId: this.host.bootId,
+      artifacts,
+      evidenceRoot: join(options.stateRoot, 'machine-service', 'evidence'),
+      monotonicNow: options.monotonicNow,
+    });
   }
 
   describe(): JsonObject {
@@ -271,11 +287,11 @@ export class DisposableMachineService {
       providerId: MACHINE_PROVIDER_ID,
       lifecycleAuthority: 'disposable-machine-service',
       executionAuthority: 'baby-x-durable-jobs',
-      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy'],
-      checkpoint: 'D',
-      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'STOPPING', 'STOPPED', 'DESTROYING', 'DESTROYED', 'FAILED', 'DEGRADED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
-      unavailableUntilLaterCheckpoints: ['reconcile', 'gc', 'certify', 'policy', 'race'],
-      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs, stopGracefulTimeoutMs: this.config.stopGracefulTimeoutMs, stopPollIntervalMs: this.config.stopPollIntervalMs },
+      operations: ['babyx.machine.describe', 'babyx.machine.create', 'babyx.machine.get', 'babyx.machine.list', 'babyx.machine.events', 'babyx.machine.status', 'babyx.machine.start', 'babyx.machine.exec', 'babyx.machine.shell', 'babyx.machine.stop', 'babyx.machine.destroy', 'babyx.machine.reconcile', 'babyx.machine.expire', 'babyx.machine.gc', 'babyx.machine.diagnostics'],
+      checkpoint: 'E',
+      supportedLifecycle: ['REQUESTED', 'CLONING', 'CLONED', 'STARTING', 'READY', 'EXECUTING', 'STOPPING', 'STOPPED', 'EXPIRED', 'DESTROYING', 'DESTROYED', 'FAILED', 'DEGRADED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'LOST', 'UNKNOWN'],
+      unavailableUntilLaterCheckpoints: ['certify', 'policy', 'race'],
+      limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs, stopGracefulTimeoutMs: this.config.stopGracefulTimeoutMs, stopPollIntervalMs: this.config.stopPollIntervalMs, startupReconcileLimit: this.config.startupReconcileLimit, startupReconcileTimeBudgetMs: this.config.startupReconcileTimeBudgetMs, garbageCollectionLimit: this.config.garbageCollectionLimit, retryBackoffMs: this.config.retryBackoffMs },
       configuredRoots: { sourceSnapshotRoots: [...this.config.sourceSnapshotRoots], cloneDatasetRoots: [...this.config.cloneDatasetRoots], machineRoot: this.config.machineRoot },
     };
   }
@@ -439,6 +455,26 @@ export class DisposableMachineService {
 
   shell(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
     return this.execution.shell(payload, context);
+  }
+
+  initialize(): Promise<JsonObject> {
+    return this.recovery.initialize({ idempotencyKey: `startup-reconcile:${this.host.bootId}`, subject: 'baby-x-runtime', authorityClass: 'unrestricted-owner' });
+  }
+
+  reconcile(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.recovery.reconcile(payload, context);
+  }
+
+  expire(payload: JsonObject, context: MachineOperationContext): JsonObject {
+    return this.recovery.expire(payload, context);
+  }
+
+  gc(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.recovery.gc(payload, context);
+  }
+
+  diagnostics(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    return this.recovery.diagnostics(payload, context);
   }
 
   stop(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {

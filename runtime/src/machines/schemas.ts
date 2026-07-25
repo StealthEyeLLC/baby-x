@@ -14,6 +14,7 @@ export const MACHINE_STATES = [
   'EXECUTING',
   'STOPPING',
   'STOPPED',
+  'EXPIRED',
   'DESTROYING',
   'DESTROYED',
   'DEGRADED',

@@ -203,7 +203,7 @@ export class MachineDestructionController {
     }
     if (!(replay !== undefined && record.lifecycle.persistedState === 'STOPPING')) assertExpectedMachineSequence(record.lifecycle.stateSequence, expectedSequence);
     this.assertJobsPermitTeardown(record);
-    if (!['READY', 'EXECUTING', 'DEGRADED', 'FAILED', 'STARTING', 'STOPPING'].includes(record.lifecycle.persistedState)) throw new MachineServiceError('machine_state_conflict', 'machine is not in a stop-compatible state', { state: record.lifecycle.persistedState });
+    if (!['READY', 'EXECUTING', 'DEGRADED', 'FAILED', 'STARTING', 'STOPPING', 'EXPIRED', 'RECOVERY_REQUIRED'].includes(record.lifecycle.persistedState)) throw new MachineServiceError('machine_state_conflict', 'machine is not in a stop-compatible state', { state: record.lifecycle.persistedState });
 
     const leaseId = this.acquireLease(record, 'babyx.machine.stop', authenticated.subject, requestDigest);
     try {
@@ -382,7 +382,7 @@ export class MachineDestructionController {
     }
     this.assertJobsPermitTeardown(record);
     if (!this.processAbsent(record)) throw new MachineServiceError('machine_process_conflict', 'exact process is still present before destruction');
-    if (!['CLONED', 'STOPPED', 'FAILED', 'DEGRADED', 'DESTROYING'].includes(record.lifecycle.persistedState)) throw new MachineServiceError('machine_state_conflict', 'machine is not in a destroy-compatible state', { state: record.lifecycle.persistedState });
+    if (!['CLONED', 'STOPPED', 'EXPIRED', 'FAILED', 'DEGRADED', 'RECOVERY_REQUIRED', 'DESTROYING'].includes(record.lifecycle.persistedState)) throw new MachineServiceError('machine_state_conflict', 'machine is not in a destroy-compatible state', { state: record.lifecycle.persistedState });
 
     const leaseId = this.acquireLease(record, 'babyx.machine.destroy', authenticated.subject, requestDigest);
     try {

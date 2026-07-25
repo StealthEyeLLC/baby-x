@@ -1,0 +1,7 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { CriuManager } from '../../dist/runtime/checkpoint/criu.js';
+class Recorder { calls=[]; async run(p){this.calls.push(p); return { ...p, exitCode:0, signal:null, stdout:'', stderr:'', cwd:'/', startedAt:'', completedAt:'', durationMs:0, stdoutSha256:'', stderrSha256:'' };} }
+test('criu dump uses exact argv and flags',async()=>{const e=new Recorder(); await new CriuManager(e).dump({pid:99,imagesDir:'/tmp/images',workDir:'/tmp/work',tcpEstablished:true,leaveRunning:true}); assert.deepEqual(e.calls[0].argv,['/usr/sbin/criu','dump','--tree','99','--images-dir','/tmp/images','--work-dir','/tmp/work','--tcp-established','--leave-running']);});
+test('criu restore supports detached pidfile and machine target',async()=>{const e=new Recorder(); await new CriuManager(e).restore({imagesDir:'/tmp/images',restoreDetached:true,pidfile:'/tmp/restore.pid',target:{kind:'machine',machine:'arena-1'}}); assert.ok(e.calls[0].argv.includes('--restore-detached')); assert.deepEqual(e.calls[0].target,{kind:'machine',machine:'arena-1'});});
+test('criu validates positive pid and absolute paths',async()=>{const m=new CriuManager(new Recorder()); await assert.rejects(()=>m.dump({pid:0,imagesDir:'/tmp/x'}),/positive/); await assert.rejects(()=>m.dump({pid:1,imagesDir:'relative'}),/absolute/); await assert.rejects(()=>m.restore({imagesDir:'/tmp/x',pidfile:'relative'}),/absolute/);});

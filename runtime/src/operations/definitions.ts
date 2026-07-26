@@ -221,9 +221,12 @@ babyx.counterexample.list
 babyx.counterexample.export
 babyx.counterexample.replay
 babyx.counterexample.remove
+babyx.release.describe
+babyx.release.capabilities
 `.trim().split(/\s+/u);
 
-const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate']);
+const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate']);
+const strictReadOperations = new Set(['babyx.release.describe', 'babyx.release.capabilities']);
 
 function familyOf(operation: string): string {
   const segments = operation.split('.');
@@ -238,7 +241,9 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
     mutation: !readSuffixes.has(suffix),
-    input: { type: 'object', additionalProperties: true },
+    input: strictReadOperations.has(operation)
+      ? { type: 'object', additionalProperties: false }
+      : { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };
 });

@@ -13,3 +13,5 @@ export * from './machines/recovery.ts';
 export * from './certification/service.ts';
 export * from './policy/execution.ts';
 export * from './racing/service.ts';
+export * from './release/schemas.ts';
+export * from './release/compatibility.ts';

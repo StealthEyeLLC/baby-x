@@ -525,6 +525,12 @@ export class BabyXRuntime {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
     if (operation === 'babyx.health') return this.health();
+    if (operation === 'babyx.release.describe' || operation === 'babyx.release.capabilities') {
+      const release = await import('./release/compatibility.ts');
+      return operation === 'babyx.release.describe'
+        ? release.describeReleaseAppliance(payload)
+        : release.releaseApplianceCapabilities(payload);
+    }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;
     if (operation === 'babyx.job.list') return { jobs: this.jobs.list() };

@@ -13,3 +13,6 @@ release/
 *.pcapng
 *.core
 *.img
+# Checkpointed release-appliance source, not generated release artifacts.
+!runtime/src/release/
+!runtime/src/release/*.ts

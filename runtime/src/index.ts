@@ -15,3 +15,4 @@ export * from './policy/execution.ts';
 export * from './racing/service.ts';
 export * from './release/schemas.ts';
 export * from './release/compatibility.ts';
+export * from './release/store.ts';

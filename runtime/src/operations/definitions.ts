@@ -223,6 +223,11 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 babyx.release.describe
 babyx.release.capabilities
+babyx.release.certification.describe
+babyx.release.certification.certify
+babyx.release.certification.resume
+babyx.release.certification.get
+babyx.release.certification.list
 `.trim().split(/\s+/u);
 
 const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate']);

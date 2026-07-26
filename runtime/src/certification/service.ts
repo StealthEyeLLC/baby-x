@@ -25,7 +25,7 @@ export type CertificationState =
   | 'PRESERVED'
   | 'RECOVERY_REQUIRED';
 
-export type CertificationStepPhase = 'dependency' | 'build' | 'lint' | 'unit' | 'integration' | 'acceptance';
+export type CertificationStepPhase = 'dependency' | 'build' | 'lint' | 'unit' | 'integration' | 'acceptance' | 'artifact' | 'manifest' | 'runtime' | 'startup' | 'readiness' | 'smoke' | 'migration' | 'worker' | 'security' | 'resource' | 'streams' | 'shutdown';
 export type CertificationStepState = 'pending' | 'running' | 'passed' | 'failed';
 
 export interface CertificationStepRequest extends JsonObject {
@@ -284,7 +284,7 @@ function normalizeRequest(value: unknown): CertificationRequest {
     if (!/^[a-z0-9][a-z0-9_.-]{0,95}$/u.test(id) || stepIds.has(id)) throw new CertificationError('certification_invalid_request', 'profile step IDs must be unique safe identifiers', { id });
     stepIds.add(id);
     const phase = text(step.phase, `profile.steps[${index}].phase`, 32) as CertificationStepPhase;
-    if (!['dependency', 'build', 'lint', 'unit', 'integration', 'acceptance'].includes(phase)) throw new CertificationError('certification_invalid_request', 'profile step phase is invalid', { phase });
+    if (!['dependency', 'build', 'lint', 'unit', 'integration', 'acceptance', 'artifact', 'manifest', 'runtime', 'startup', 'readiness', 'smoke', 'migration', 'worker', 'security', 'resource', 'streams', 'shutdown'].includes(phase)) throw new CertificationError('certification_invalid_request', 'profile step phase is invalid', { phase });
     if (step.required !== undefined && typeof step.required !== 'boolean') throw new CertificationError('certification_invalid_request', `profile.steps[${index}].required must be boolean`);
     return {
       id,
@@ -482,7 +482,7 @@ export class CertificationService {
       executionAuthority: 'baby-x-durable-jobs',
       artifactAuthority: 'baby-x-artifacts',
       operations: ['babyx.certification.describe', 'babyx.certification.run', 'babyx.certification.resume', 'babyx.certification.get', 'babyx.certification.list', 'babyx.certification.cleanup'],
-      phases: ['dependency', 'build', 'lint', 'unit', 'integration', 'acceptance'],
+      phases: ['dependency', 'build', 'lint', 'unit', 'integration', 'acceptance', 'artifact', 'manifest', 'runtime', 'startup', 'readiness', 'smoke', 'migration', 'worker', 'security', 'resource', 'streams', 'shutdown'],
       maximumSteps: 50,
       successRequires: ['tests-passed', 'evidence-complete', 'stop-succeeded', 'destroy-succeeded', 'positive-absence-verification', 'source-preserved'],
     };

@@ -450,6 +450,8 @@ export class BabyXRuntime {
   private machineServiceInitializePromise?: Promise<JsonObject>;
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
+  private releaseCertificationServiceInstance?: import('./release/certification.ts').ReleaseCertificationService;
+  private releaseStoreInstance?: import('./release/store.ts').ReleaseApplianceStore;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
@@ -514,6 +516,27 @@ export class BabyXRuntime {
     }
     return this.certificationServiceInstance;
   }
+  private async releaseStore(): Promise<import('./release/store.ts').ReleaseApplianceStore> {
+    if (this.releaseStoreInstance === undefined) {
+      const { ReleaseApplianceStore } = await import('./release/store.ts');
+      this.releaseStoreInstance = new ReleaseApplianceStore(join(this.stateRoot, 'release-appliance'));
+      this.releaseStoreInstance.startupScan();
+    }
+    return this.releaseStoreInstance;
+  }
+  private async releaseCertificationService(): Promise<import('./release/certification.ts').ReleaseCertificationService> {
+    if (this.releaseCertificationServiceInstance === undefined) {
+      const { ReleaseCertificationService } = await import('./release/certification.ts');
+      this.releaseCertificationServiceInstance = new ReleaseCertificationService({
+        stateRoot: this.stateRoot,
+        store: await this.releaseStore(),
+        artifacts: await this.artifactManager(),
+        certification: await this.certificationService(),
+        jobs: this.jobs,
+      });
+    }
+    return this.releaseCertificationServiceInstance;
+  }
   private async candidateRaceService(): Promise<import('./racing/service.ts').CandidateRaceService> {
     if (this.candidateRaceServiceInstance === undefined) {
       const { CandidateRaceService } = await import('./racing/service.ts');
@@ -530,6 +553,14 @@ export class BabyXRuntime {
       return operation === 'babyx.release.describe'
         ? release.describeReleaseAppliance(payload)
         : release.releaseApplianceCapabilities(payload);
+    }
+    if (['babyx.release.certification.describe', 'babyx.release.certification.certify', 'babyx.release.certification.resume', 'babyx.release.certification.get', 'babyx.release.certification.list'].includes(operation)) {
+      const service = await this.releaseCertificationService();
+      if (operation === 'babyx.release.certification.describe') return service.describe();
+      if (operation === 'babyx.release.certification.certify') return service.certify(payload, context);
+      if (operation === 'babyx.release.certification.resume') return service.resume(payload, context);
+      if (operation === 'babyx.release.certification.get') return service.get(payload, context);
+      return service.list(payload, context);
     }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;

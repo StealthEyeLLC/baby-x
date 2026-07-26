@@ -98,6 +98,13 @@ test('illegal state transitions and direct EXECUTING-to-COMMITTED transitions ar
   assert.doesNotThrow(() => assertTransactionTransition('REQUESTED', 'CHECKPOINTING'));
 });
 
+test('RECOVERY_REQUIRED has one public rollback entry without enabling unrelated transitions', () => {
+  assert.doesNotThrow(() => assertTransactionTransition('RECOVERY_REQUIRED', 'ROLLBACK_REQUESTED'));
+  assert.doesNotThrow(() => assertTransactionTransition('RECOVERY_REQUIRED', 'ROLLING_BACK'));
+  assert.throws(() => assertTransactionTransition('RECOVERY_REQUIRED', 'COMMITTED'), /illegal transaction transition/u);
+  assert.throws(() => assertTransactionTransition('RECOVERY_REQUIRED', 'VALIDATING'), /illegal transaction transition/u);
+});
+
 test('COMMITTED requires candidate tree, validation, terminal jobs, cleanup, and complete evidence', () => {
   const valid = committedRecord();
   assert.doesNotThrow(() => assertTransactionRecord(valid));

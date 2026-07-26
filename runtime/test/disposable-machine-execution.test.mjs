@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { JobManager } from '../../dist/runtime/core.js';
 import { DisposableMachineService } from '../../dist/runtime/machines/service.js';
 import { MachineServiceError } from '../../dist/runtime/machines/errors.js';
+import { codeTransactionMachineExecutionRequest } from '../../dist/runtime/transactions/code-driver.js';
+import { makeRecord } from './_transaction-fixture.mjs';
 
 function commandResult(argv, exitCode = 0, stdout = '', stderr = '') {
   return {
@@ -467,4 +469,56 @@ test('stale expected source GUID remains durable and startup reconciliation cann
   assert.equal(reconciled.results[0].classification, 'lost');
   assert.equal(f.service.store.get(record.machineId).lifecycle.persistedState, 'LOST');
   assert.equal(f.provider.dataset, null);
+});
+
+test('transaction adapter emits the strict machine execution contract and unknown fields remain rejected', async (t) => {
+  const f = fixture(t);
+  const { started } = await createReady(f);
+  const record = makeRecord();
+  const request = codeTransactionMachineExecutionRequest(
+    record,
+    started.machine,
+    'mutation',
+    'mutation-action-0',
+    ['/usr/bin/printf', '%s', 'adapter-ok'],
+    '/work',
+    1_234,
+  );
+
+  assert.deepEqual(Object.keys(request).sort(), [
+    'argv', 'artifactPolicy', 'cwd', 'env', 'expectedSequence', 'machineId', 'outputLimitBytes', 'reason', 'timeoutMs',
+  ]);
+  assert.equal('transactionBinding' in request, false);
+  assert.equal(request.machineId, started.machine.machineId);
+  assert.equal(request.expectedSequence, started.machine.lifecycle.stateSequence);
+  assert.deepEqual(request.argv, ['/usr/bin/printf', '%s', 'adapter-ok']);
+  assert.equal(request.cwd, '/work');
+  assert.deepEqual(request.env, {});
+  assert.equal(request.timeoutMs, 1_234);
+  assert.equal(request.outputLimitBytes, record.code.mutationPlan.resourceBounds.outputLimitBytes);
+  assert.deepEqual(request.artifactPolicy, { captureStreams: true });
+  assert.match(request.reason, new RegExp(`${record.transactionId} mutation mutation-action-0`, 'u'));
+
+  const accepted = await f.service.exec(request, {
+    idempotencyKey: 'transaction-adapter-machine-exec-0001',
+    subject: 'owner:test',
+    authorityClass: 'unrestricted-owner',
+  });
+  assert.equal(typeof accepted.jobId, 'string');
+  assert.equal(f.jobs.count('babyx.machine.exec'), 1);
+  const job = f.jobs.get(accepted.jobId);
+  assert.deepEqual(job.argv, request.argv);
+  assert.equal(job.cwd, request.cwd);
+  assert.equal(job.timeoutMs, request.timeoutMs);
+  assert.equal(job.metadata.outputLimitBytes, request.outputLimitBytes);
+
+  await assert.rejects(
+    () => f.service.exec(
+      { ...request, transactionBinding: { transactionId: record.transactionId } },
+      { idempotencyKey: 'transaction-adapter-machine-exec-0002', subject: 'owner:test', authorityClass: 'unrestricted-owner' },
+    ),
+    (error) => error instanceof MachineServiceError
+      && error.code === 'machine_invalid_request'
+      && error.details.properties.includes('transactionBinding'),
+  );
 });

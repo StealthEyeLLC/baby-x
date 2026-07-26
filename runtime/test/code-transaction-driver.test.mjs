@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   assertChangedPathsAllowed,
   assertPatchTextSafe,
@@ -114,4 +115,17 @@ test('execution policy binds disposable isolation, no network, and declared reso
   assert.equal(decision.machineProfile.resources.memoryMb, 256);
   assert.equal(decision.machineProfile.resources.diskMb, 1024);
   assert.match(decision.decisionDigest, /^[a-f0-9]{64}$/u);
+});
+
+
+test('disposable action and assertion helpers use Python rather than Node', () => {
+  const source = readFileSync(new URL('../src/transactions/code-driver.ts', import.meta.url), 'utf8');
+  assert.match(source, /const ACTION_SCRIPT = `import os/u);
+  assert.match(source, /const ASSERTION_SCRIPT = `import os/u);
+  assert.match(source, /\['\/usr\/bin\/python3', '-c', ACTION_SCRIPT/u);
+  assert.match(source, /argv: \['\/usr\/bin\/python3', '-c', ASSERTION_SCRIPT/u);
+  assert.doesNotMatch(source, /\['\/usr\/bin\/node', '-e', ACTION_SCRIPT/u);
+  assert.doesNotMatch(source, /argv: \['\/usr\/bin\/node', '-e', ASSERTION_SCRIPT/u);
+  assert.match(source, /action path traverses a symlinked parent/u);
+  assert.match(source, /assertion path traverses a symlinked parent/u);
 });

@@ -58,43 +58,73 @@ test "$actual_tree" = "$expected_tree"
 GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' git commit -q --no-gpg-sign -m 'immutable transaction baseline'
 test "$(git rev-parse HEAD^{tree})" = "$expected_tree"`;
 
-const ACTION_SCRIPT = `'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const [root, kind, relativePath, operand] = process.argv.slice(1);
-const absoluteRoot = fs.realpathSync(root);
-function target(value) {
-  const candidate = path.resolve(absoluteRoot, value);
-  const relation = path.relative(absoluteRoot, candidate);
-  if (!relation || relation === '..' || relation.startsWith('..' + path.sep) || path.isAbsolute(relation)) throw new Error('mutation target escapes transaction root');
-  let current = absoluteRoot;
-  for (const part of path.dirname(relation).split(path.sep).filter(Boolean)) {
-    current = path.join(current, part);
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error('mutation parent is a symbolic link');
-  }
-  return candidate;
-}
-if (kind === 'NO_OP') process.exit(0);
-const destination = target(relativePath);
-if (kind === 'WRITE_FILE') {
-  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 });
-  const source = fs.realpathSync(operand);
-  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-  fs.chmodSync(destination, 0o644);
-} else if (kind === 'DELETE_PATH') {
-  const stat = fs.lstatSync(destination);
-  if (stat.isDirectory()) throw new Error('directory deletion is not supported');
-  fs.unlinkSync(destination);
-} else if (kind === 'SET_MODE') {
-  const stat = fs.lstatSync(destination);
-  if (!stat.isFile()) throw new Error('mode changes require a regular file');
-  fs.chmodSync(destination, operand === '0755' ? 0o755 : 0o644);
-} else if (kind === 'CREATE_SYMLINK') {
-  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o755 });
-  fs.symlinkSync(operand, destination);
-} else {
-  throw new Error('unsupported declared mutation action');
-}`;
+const ACTION_SCRIPT = `import os
+import shutil
+import stat
+import sys
+
+root, kind, relative_path, operand = sys.argv[1:5]
+absolute_root = os.path.realpath(root)
+
+def fail(message):
+    raise SystemExit(message)
+
+def resolve_target(value):
+    candidate = os.path.abspath(os.path.join(absolute_root, value))
+    try:
+        common = os.path.commonpath([absolute_root, candidate])
+    except ValueError:
+        fail('action path escapes transaction root')
+    if common != absolute_root or candidate == absolute_root:
+        fail('action path escapes transaction root')
+    parent = os.path.dirname(candidate)
+    relative_parent = os.path.relpath(parent, absolute_root)
+    current = absolute_root
+    if relative_parent not in ('.', ''):
+        for part in relative_parent.split(os.sep):
+            current = os.path.join(current, part)
+            if os.path.lexists(current) and os.path.islink(current):
+                fail('action path traverses a symlinked parent')
+    return candidate
+
+if kind == 'NO_OP':
+    raise SystemExit(0)
+
+destination = resolve_target(relative_path)
+parent = os.path.dirname(destination)
+
+if kind == 'WRITE_FILE':
+    os.makedirs(parent, mode=0o755, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, 'O_NOFOLLOW'):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o644)
+    try:
+        with os.fdopen(descriptor, 'wb') as output, open(os.path.realpath(operand), 'rb') as source:
+            shutil.copyfileobj(source, output)
+    except BaseException:
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+        raise
+    os.chmod(destination, 0o644, follow_symlinks=False)
+elif kind == 'DELETE_PATH':
+    info = os.lstat(destination)
+    if stat.S_ISDIR(info.st_mode):
+        fail('DELETE_PATH refuses directories')
+    os.unlink(destination)
+elif kind == 'SET_MODE':
+    info = os.lstat(destination)
+    if not stat.S_ISREG(info.st_mode):
+        fail('SET_MODE requires a regular file')
+    os.chmod(destination, 0o755 if operand == '0755' else 0o644, follow_symlinks=False)
+elif kind == 'CREATE_SYMLINK':
+    os.makedirs(parent, mode=0o755, exist_ok=True)
+    os.symlink(operand, destination)
+else:
+    fail('unsupported action kind')
+`;
 
 const CANDIDATE_SCRIPT = `set -euo pipefail
 source_root="$1"
@@ -119,33 +149,59 @@ TZ=UTC tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --format=p
 size="$(stat -c %s "$output_root/candidate.tar")"
 test "$size" -le "$artifact_limit"`;
 
-const ASSERTION_SCRIPT = `'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const [root, kind, relativePath, expected, baseTree] = process.argv.slice(1);
-const resolve = (value) => {
-  const candidate = path.resolve(root, value);
-  const relation = path.relative(root, candidate);
-  if (!relation || relation === '..' || relation.startsWith('..' + path.sep) || path.isAbsolute(relation)) throw new Error('assertion path escapes transaction root');
-  return candidate;
-};
-if (kind === 'PATH_EXISTS') {
-  fs.lstatSync(resolve(relativePath));
-} else if (kind === 'FILE_CONTAINS') {
-  if (!fs.readFileSync(resolve(relativePath), 'utf8').includes(expected)) throw new Error('file assertion failed');
-} else if (kind === 'CREDENTIALS_ABSENT') {
-  const sensitive = /(^|_)(SECRET|TOKEN|PASSWORD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)(_|$)/i;
-  if (Object.keys(process.env).some((name) => sensitive.test(name))) throw new Error('secret-bearing environment name is present');
-  if (fs.existsSync('/root/.ssh') || fs.existsSync('/root/.git-credentials')) throw new Error('credential path is present');
-} else if (kind === 'NETWORK_DISABLED') {
-  const interfaces = fs.readdirSync('/sys/class/net').filter((name) => name !== 'lo');
-  if (interfaces.length !== 0) throw new Error('non-loopback network interface is present');
-} else if (kind === 'TREE_EQUALS_BASE') {
-  const child = require('node:child_process').spawnSync('/usr/bin/git', ['write-tree'], { cwd: root, encoding: 'utf8' });
-  if (child.status !== 0 || child.stdout.trim() !== baseTree) throw new Error('working tree does not equal base tree');
-} else {
-  throw new Error('unsupported assertion');
-}`;
+const ASSERTION_SCRIPT = `import os
+import re
+import subprocess
+import sys
+
+root, kind, relative_path, expected, base_tree = sys.argv[1:6]
+absolute_root = os.path.realpath(root)
+
+def fail(message):
+    raise SystemExit(message)
+
+def resolve_target(value):
+    candidate = os.path.abspath(os.path.join(absolute_root, value))
+    try:
+        common = os.path.commonpath([absolute_root, candidate])
+    except ValueError:
+        fail('assertion path escapes transaction root')
+    if common != absolute_root or candidate == absolute_root:
+        fail('assertion path escapes transaction root')
+    parent = os.path.dirname(candidate)
+    relative_parent = os.path.relpath(parent, absolute_root)
+    current = absolute_root
+    if relative_parent not in ('.', ''):
+        for part in relative_parent.split(os.sep):
+            current = os.path.join(current, part)
+            if os.path.lexists(current) and os.path.islink(current):
+                fail('assertion path traverses a symlinked parent')
+    return candidate
+
+if kind == 'PATH_EXISTS':
+    os.lstat(resolve_target(relative_path))
+elif kind == 'FILE_CONTAINS':
+    with open(resolve_target(relative_path), 'r', encoding='utf-8') as handle:
+        if expected not in handle.read():
+            fail('FILE_CONTAINS assertion failed')
+elif kind == 'CREDENTIALS_ABSENT':
+    names = list(os.environ)
+    if any(re.search(r'(TOKEN|PASSWORD|SECRET|PRIVATE_KEY|ACCESS_KEY|SESSION)', name, re.I) for name in names):
+        fail('credential-like environment variable is present')
+    for path in ['/root/.ssh', '/root/.git-credentials', '/run/secrets']:
+        if os.path.exists(path):
+            fail('credential-bearing path is present: ' + path)
+elif kind == 'NETWORK_DISABLED':
+    interfaces = [entry for entry in os.listdir('/sys/class/net') if entry != 'lo']
+    if interfaces:
+        fail('non-loopback network interface is present: ' + ','.join(sorted(interfaces)))
+elif kind == 'TREE_EQUALS_BASE':
+    result = subprocess.run(['/usr/bin/git', 'write-tree'], cwd=absolute_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0 or result.stdout.strip() != base_tree:
+        fail('TREE_EQUALS_BASE assertion failed')
+else:
+    fail('unsupported assertion kind')
+`;
 
 export interface CodeTransactionMachineAuthority {
   create(payload: unknown, context: RuntimeExecutionContext): Promise<JsonObject>;
@@ -241,7 +297,7 @@ function safeHostOutput(mountpoint: string, relativePath: string): string {
 export function codeTransactionPolicyDecision(plan: CodeMutationPlanV1, mode: 'disposable' | 'parallel-disposable' = 'disposable'): ExecutionPolicyDecision {
   const tools = [
     ...plan.validationSteps.map((step) => step.argv[0]),
-    ...(plan.mutationMode === 'PATCH_ARTIFACT' ? ['/usr/bin/git'] : ['/usr/bin/node']),
+    ...(plan.mutationMode === 'PATCH_ARTIFACT' ? ['/usr/bin/git'] : ['/usr/bin/python3']),
   ];
   return decideExecutionPolicy({
     schemaVersion: '1.0.0', objectiveType: 'development', mutationRisk: 'high', dependencyUncertainty: 'known',
@@ -412,12 +468,12 @@ export class DisposableCodeTransactionDriver implements TransactionCodeDriver {
   }
 
   private actionArgv(record: DurableTransactionRecordV1, action: CodeExecutionActionV1): string[] {
-    if (action.kind === 'NO_OP') return ['/usr/bin/node', '-e', ACTION_SCRIPT, SOURCE_ROOT, 'NO_OP', 'unused', 'unused'];
+    if (action.kind === 'NO_OP') return ['/usr/bin/python3', '-c', ACTION_SCRIPT, SOURCE_ROOT, 'NO_OP', 'unused', 'unused'];
     const operand = action.kind === 'WRITE_FILE' ? this.inputPath(record, action.contentArtifactId as string)
       : action.kind === 'SET_MODE' ? action.mode as string
       : action.kind === 'CREATE_SYMLINK' ? action.symlinkTarget as string
       : 'unused';
-    return ['/usr/bin/node', '-e', ACTION_SCRIPT, SOURCE_ROOT, action.kind, action.path as string, operand];
+    return ['/usr/bin/python3', '-c', ACTION_SCRIPT, SOURCE_ROOT, action.kind, action.path as string, operand];
   }
 
   async execute(record: DurableTransactionRecordV1, _context: TransactionOperationContext): Promise<TransactionExecutionResult> {
@@ -454,7 +510,7 @@ export class DisposableCodeTransactionDriver implements TransactionCodeDriver {
   private assertionStep(assertion: CodeAssertionV1, index: number): CodeValidationStepV1 {
     return {
       stepId: `assertion-${index}-${assertion.assertionId}`, phase: 'assertion',
-      argv: ['/usr/bin/node', '-e', ASSERTION_SCRIPT, SOURCE_ROOT, assertion.kind, assertion.path ?? 'unused', assertion.expected ?? 'unused', assertion.kind === 'TREE_EQUALS_BASE' ? 'BASE_TREE' : 'unused'],
+      argv: ['/usr/bin/python3', '-c', ASSERTION_SCRIPT, SOURCE_ROOT, assertion.kind, assertion.path ?? 'unused', assertion.expected ?? 'unused', assertion.kind === 'TREE_EQUALS_BASE' ? 'BASE_TREE' : 'unused'],
       cwd: '.', timeoutMs: 30_000, required: true,
     };
   }

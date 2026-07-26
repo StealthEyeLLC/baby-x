@@ -303,3 +303,80 @@ test('public rollback recovers a response-loss transaction through the single ca
     /idempotency key was reused/u,
   );
 });
+
+
+test('exact generic Machine Service child metadata is adopted without transaction-only fields', async (t) => {
+  const harness = makeHarness(t);
+  const created = createVia(harness.service);
+  const executed = await execute(harness, created, 'generic-job-execute-0001');
+  const durable = tx(executed);
+  const jobId = durable.execution.mutationJobIds[0];
+  const job = harness.jobs.get(jobId);
+  harness.jobs.set({
+    ...job,
+    metadata: {
+      kind: 'exec',
+      machineService: true,
+      machineId: durable.execution.machineIds[0],
+      ownerPrincipal: durable.ownerPrincipal,
+      idempotencyKey: `transaction:${durable.transactionId}:mutation:test`,
+    },
+  });
+  const validated = await harness.service.validate(
+    { transactionId: durable.transactionId, expectedSequence: durable.lifecycle.stateSequence },
+    context('owner-a', 'generic-job-validate-0001'),
+  );
+  assert.equal(tx(validated).lifecycle.persistedState, 'VALIDATING');
+});
+
+test('resolved exact job ambiguity returns only to RECOVERY_REQUIRED before owner rollback', async (t) => {
+  const harness = makeHarness(t);
+  const created = createVia(harness.service);
+  const executed = await execute(harness, created, 'ambiguous-job-execute-0001');
+  let durable = tx(executed);
+  const jobId = durable.execution.mutationJobIds[0];
+  const job = harness.jobs.get(jobId);
+  harness.jobs.set({
+    ...job,
+    metadata: {
+      kind: 'exec',
+      machineService: true,
+      machineId: 'machine-wrong-owner',
+      ownerPrincipal: durable.ownerPrincipal,
+      idempotencyKey: `transaction:${durable.transactionId}:mutation:test`,
+    },
+  });
+  const ambiguous = await harness.service.validate(
+    { transactionId: durable.transactionId, expectedSequence: durable.lifecycle.stateSequence },
+    context('owner-a', 'ambiguous-job-validate-0001'),
+  );
+  durable = tx(ambiguous);
+  assert.equal(durable.lifecycle.persistedState, 'AMBIGUOUS');
+  assert.equal(harness.machine.destroyCalls.length, 0);
+
+  harness.jobs.set({
+    ...job,
+    metadata: {
+      kind: 'exec',
+      machineService: true,
+      machineId: durable.execution.machineIds[0],
+      ownerPrincipal: durable.ownerPrincipal,
+      idempotencyKey: `transaction:${durable.transactionId}:mutation:test`,
+    },
+  });
+  const recovered = await harness.service.reconcile(
+    { transactionId: durable.transactionId, expectedSequence: durable.lifecycle.stateSequence, reason: 'exact child ownership recovered' },
+    context('owner-a', 'ambiguous-job-reconcile-0001'),
+  );
+  durable = tx(recovered);
+  assert.equal(durable.lifecycle.persistedState, 'RECOVERY_REQUIRED');
+  assert.equal(durable.lifecycle.desiredState, 'COMMITTED');
+  assert.equal(harness.machine.destroyCalls.length, 0);
+
+  const rolled = await harness.service.rollback(
+    { transactionId: durable.transactionId, expectedSequence: durable.lifecycle.stateSequence, reason: 'owner rollback after ambiguity recovery' },
+    context('owner-a', 'ambiguous-job-rollback-0001'),
+  );
+  assert.equal(tx(rolled).lifecycle.persistedState, 'ROLLED_BACK');
+  assert.equal(harness.machine.destroyCalls.length, 1);
+});

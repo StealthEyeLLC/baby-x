@@ -166,3 +166,10 @@ test('transaction coordinator source contains no direct provider, process, merge
   assert.match(source, /machineLifecycleAuthority: 'disposable-machine-service'/u);
   assert.match(source, /processAuthority: 'baby-x-durable-jobs'/u);
 });
+
+
+test('runtime wires the disposable driver to the sole durable job authority', () => {
+  const core = readFileSync(`${process.cwd()}/runtime/src/core.ts`, 'utf8');
+  assert.match(core, /new DisposableCodeTransactionDriver\(\{ machine, jobs: this\.jobs, artifacts \}\)/u);
+  assert.doesNotMatch(core, /new DisposableCodeTransactionDriver\(\{[^}]*stateRoot/u);
+});

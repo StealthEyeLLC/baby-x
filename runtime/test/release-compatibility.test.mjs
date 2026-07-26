@@ -97,7 +97,7 @@ test('release compatibility and schema digests are deterministic and canonical',
 
 test('release record inventory is complete, recursively frozen, and versioned', () => {
   const requiredSchemas = [
-    'BuildRecordV1', 'CapacitySnapshotV1', 'CertificationRecordV1', 'ControllerLeaseV1',
+    'BuildRecordV1', 'CapacityReservationLedgerV1', 'CapacityReservationV1', 'CapacitySnapshotV1', 'CertificationRecordV1', 'ControllerLeaseV1',
     'CredentialSetReferenceV1', 'DeploymentRecordV1', 'EventRecordV1', 'EvidenceIndexV1',
     'GitHubInboxRecordV1', 'GitHubOutboxRecordV1', 'MaintenanceRecordV1', 'MigrationRunV1',
     'ObservationRecordV1', 'PendingMutationV1', 'ReleaseArtifactManifestV1', 'ReleaseRecordV1',

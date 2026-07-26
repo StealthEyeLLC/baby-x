@@ -13,6 +13,19 @@ export class ArtifactManager {
   get(id: string): JsonObject { const value = this.store.read().artifacts[id]; if (!value) throw new Error('artifact not found'); return value; }
   verify(id: string): JsonObject { const record = this.get(id); if (record.state !== 'finalized') throw new Error('artifact is not finalized'); const path = String(record.path); const bytes = readFileSync(path); const digest = createHash('sha256').update(bytes).digest('hex'); const valid = bytes.length === Number(record.size) && digest === String(record.sha256); return { id, valid, size: bytes.length, sha256: digest, expectedSize: record.size, expectedSha256: record.sha256 }; }
   list(): JsonObject[] { return Object.values(this.store.read().artifacts); }
+  touch(id: string, accessedAt = new Date().toISOString()): JsonObject { const record = this.get(id); const next = { ...record, metadata: { ...(record.metadata as JsonObject ?? {}), lastAccessedAt: accessedAt } }; this.store.update((current) => ({ artifacts: { ...current.artifacts, [id]: next } })); return next; }
+  remove(id: string, expectedSha256: string): JsonObject {
+    const current = this.store.read();
+    const record = current.artifacts[id];
+    if (!record) return { id, removed: false, alreadyAbsent: true, expectedSha256, bytesFreed: 0 };
+    if (record.state !== 'finalized' || record.sha256 !== expectedSha256) throw new Error('artifact removal identity mismatch');
+    const path = String(record.path);
+    const size = Number(record.size ?? 0);
+    const siblings = Object.values(current.artifacts).filter((entry) => entry.id !== id && entry.state === 'finalized' && entry.path === path);
+    this.store.update((value) => { const artifacts = { ...value.artifacts }; delete artifacts[id]; return { artifacts }; });
+    if (siblings.length === 0) rmSync(path, { force: true });
+    return { id, removed: true, alreadyAbsent: false, expectedSha256, sharedBlobRetained: siblings.length > 0, bytesFreed: siblings.length === 0 ? size : 0 };
+  }
   abort(id: string): void { const record = this.get(id); rmSync(String(record.path), { force: true }); this.store.update((current) => { const artifacts = { ...current.artifacts }; delete artifacts[id]; return { artifacts }; }); }
   download(id: string, offset = 0, limit = 65_536): JsonObject { const record = this.get(id); const path = String(record.path); const size = statSync(path).size; const count = Math.max(0, Math.min(limit, size - offset)); const buffer = Buffer.alloc(count); const fd = openSync(path, 'r'); try { if (count) readSync(fd, buffer, 0, count, offset); } finally { closeSync(fd); } return { data: buffer.toString('base64'), encoding: 'base64', offset: offset + count, eof: offset + count >= size }; }
 }

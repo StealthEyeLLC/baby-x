@@ -223,6 +223,7 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 babyx.release.describe
 babyx.release.capabilities
+babyx.release.capacity
 babyx.release.plan
 babyx.release.prepare
 babyx.release.promote
@@ -251,10 +252,19 @@ babyx.release.certification.get
 babyx.release.certification.list
 `.trim().split(/\s+/u);
 
-const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate', 'plan', 'live', 'evidence', 'failures']);
+const readSuffixes = new Set(['capacity', 'describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate', 'plan', 'live', 'evidence', 'failures']);
 const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   'babyx.release.describe': { type: 'object', additionalProperties: false },
   'babyx.release.capabilities': { type: 'object', additionalProperties: false },
+  'babyx.release.capacity': {
+    type: 'object', additionalProperties: false, properties: {
+      serviceHealth: { enum: ['GREEN', 'YELLOW', 'RED', 'UNKNOWN'] },
+      projection: { type: 'object', additionalProperties: false, required: ['reservationId', 'purpose', 'rootBytes', 'zfsBytes', 'memoryBytes', 'ownerPrincipal'], properties: {
+        reservationId: { type: 'string' }, purpose: { enum: ['SOURCE_ARCHIVE', 'DEPENDENCY_CACHE', 'BUILD_CACHE', 'RELEASE_ARTIFACT', 'MATERIALIZATION', 'CERTIFICATION', 'DISPOSABLE_CLONE', 'BACKGROUND_MAINTENANCE'] },
+        workClass: { enum: ['PRODUCTION_CONTROL', 'HEAVYWEIGHT', 'BACKGROUND'] }, rootBytes: { type: 'integer', minimum: 0 }, zfsBytes: { type: 'integer', minimum: 0 }, memoryBytes: { type: 'integer', minimum: 0 }, ownerPrincipal: { type: 'string' }, expiresAt: { type: 'string' },
+      } },
+    },
+  },
   'babyx.release.plan': {
     type: 'object', additionalProperties: false, required: ['request'], properties: { request: { type: 'object', additionalProperties: true } },
   },
@@ -283,7 +293,7 @@ const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
     type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 } },
   },
   'babyx.release.gc': {
-    type: 'object', additionalProperties: false, required: ['dryRun'], properties: { dryRun: { const: true }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
+    type: 'object', additionalProperties: false, required: ['dryRun'], properties: { dryRun: { type: 'boolean' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, maxBytes: { type: 'integer', minimum: 0 }, planDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' } },
   },
   'babyx.release.live': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },
   'babyx.release.status': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },

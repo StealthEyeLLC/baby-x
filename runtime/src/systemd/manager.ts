@@ -87,7 +87,7 @@ export class SystemdManager {
 
   async logs(query: SystemdUnitQuery & { lines?: number; since?: string; until?: string; follow?: boolean }): Promise<CommandResult> {
     const lines = query.lines ?? 200;
-    if (!Number.isSafeInteger(lines) || lines < 0 || lines > 100_000) throw new Error('lines must be an integer between 0 and 100000');
+    if (!Number.isSafeInteger(lines) || lines < 0 || lines > 10_000) throw new Error('lines must be an integer between 0 and 10000');
     const argv = ['/usr/bin/journalctl', '--no-pager', '--output=json-seq', '--unit', assertUnit(query.unit), '--lines', String(lines)];
     if (query.scope === 'user') argv.push('--user');
     if (query.since) argv.push('--since', query.since);

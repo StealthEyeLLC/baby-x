@@ -124,6 +124,7 @@ export interface ReleaseCoordinatorOptions {
   observation: ReleaseObservationAuthority;
   drain: ReleaseDrainAuthority;
   proofs: ReleaseProofAuthority;
+  governor?: { gc(payload: JsonObject, context: RuntimeExecutionContext): JsonObject };
   now?: () => string;
 }
 
@@ -949,7 +950,8 @@ export class ReleaseCoordinatorService {
 
   gc(payload: JsonObject, context: RuntimeExecutionContext): JsonObject {
     requiredContext(context);
-    if (payload.dryRun !== true) throw new ReleaseCoordinatorError('release_gc_dry_run_required', 'Checkpoint G permits lifecycle GC coordination only in dry-run mode');
+    if (this.options.governor !== undefined) return this.options.governor.gc(payload, context);
+    if (payload.dryRun !== true) throw new ReleaseCoordinatorError('release_gc_dry_run_required', 'live GC requires the checkpoint H resource governor');
     const limit = payload.limit === undefined ? 100 : integer(payload.limit, 'limit', 1, RELEASE_OPERATION_LIMIT);
     const records = this.listRecords(context).filter((record) => TERMINAL.has(String(record.state))).slice(0, limit);
     return { operation: 'babyx.release.gc', dryRun: true, candidates: records.map((record) => ({ deploymentId: record.deploymentId, state: record.state, releaseId: record.releaseId, retainedBecause: record.state === 'SUCCEEDED' ? ['active-or-recent-release'] : ['evidence-retention'] })), destructiveActions: [] };

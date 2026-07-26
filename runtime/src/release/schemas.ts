@@ -237,9 +237,22 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
   }),
   CapacitySnapshotV1: schema('CapacitySnapshotV1', {
     snapshotId: stringField(true, 'identifier'), observedAt: stringField(true, 'timestamp'), rootTotalBytes: integerField(true), rootAvailableBytes: integerField(true),
-    rootAvailableInodes: integerField(true), zfsPool: stringField(true), zfsAvailableBytes: integerField(true), memoryAvailableBytes: integerField(true),
-    cpuPressure: jsonField(true), memoryPressure: jsonField(true), ioPressure: jsonField(true), reservations: objectArray(true), admission: enumField(['ALLOW', 'THROTTLE', 'REJECT', 'EMERGENCY_ONLY'], true),
-    observationDigest: stringField(true, 'digest'),
+    rootAvailableInodes: integerField(true), zfsPool: stringField(true), zfsTotalBytes: integerField(), zfsAvailableBytes: integerField(true), memoryAvailableBytes: integerField(true),
+    cpuPressure: jsonField(true), memoryPressure: jsonField(true), ioPressure: jsonField(true), reservations: objectArray(true), activeReservationTotals: jsonField(),
+    admission: enumField(['ALLOW', 'THROTTLE', 'REJECT', 'EMERGENCY_ONLY'], true), governorDecision: jsonField(), observationDigest: stringField(true, 'digest'),
+  }),
+  CapacityReservationV1: schema('CapacityReservationV1', {
+    reservationId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'),
+    purpose: enumField(['SOURCE_ARCHIVE', 'DEPENDENCY_CACHE', 'BUILD_CACHE', 'RELEASE_ARTIFACT', 'MATERIALIZATION', 'CERTIFICATION', 'DISPOSABLE_CLONE', 'BACKGROUND_MAINTENANCE'], true),
+    workClass: enumField(['PRODUCTION_CONTROL', 'HEAVYWEIGHT', 'BACKGROUND'], true), rootBytes: integerField(true), zfsBytes: integerField(true), memoryBytes: integerField(true),
+    requestDigest: stringField(true, 'digest'), snapshotId: stringField(true, 'identifier'), admission: enumField(['ALLOW', 'THROTTLE', 'EMERGENCY_ONLY'], true),
+    state: enumField(['ACTIVE', 'RELEASED', 'EXPIRED'], true), createdAt: stringField(true, 'timestamp'), expiresAt: stringField(true, 'timestamp'),
+    releasedAt: stringField(false, 'timestamp'), releaseReason: stringField(),
+  }),
+  CapacityReservationLedgerV1: schema('CapacityReservationLedgerV1', {
+    ledgerId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), state: enumField(['ACTIVE'], true), sequence: integerField(true),
+    reservations: objectArray(true), reservedRootBytes: integerField(true), reservedZfsBytes: integerField(true), reservedMemoryBytes: integerField(true),
+    reconstructedAt: stringField(true, 'timestamp'), reconstructionDigest: stringField(true, 'digest'), updatedAt: stringField(true, 'timestamp'),
   }),
   GitHubInboxRecordV1: schema('GitHubInboxRecordV1', {
     inboxId: stringField(true, 'identifier'), deliveryId: stringField(true, 'identifier'), repository: stringField(true), eventName: stringField(true),
@@ -270,8 +283,9 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
     preparedAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'), observationDigest: stringField(false, 'digest'), error: structuredError(),
   }),
   RetentionDecisionV1: schema('RetentionDecisionV1', {
-    decisionId: stringField(true, 'identifier'), objectType: stringField(true, 'identifier'), objectId: stringField(true, 'identifier'), decision: enumField(['RETAIN', 'EVICT', 'QUARANTINE', 'DEFER'], true),
+    decisionId: stringField(true, 'identifier'), ownerPrincipal: stringField(), objectType: stringField(true, 'identifier'), objectId: stringField(true, 'identifier'), decision: enumField(['RETAIN', 'EVICT', 'QUARANTINE', 'DEFER'], true),
     reasons: stringArray(true), referenceCount: integerField(true), protectedReferences: stringArray(true), decidedAt: stringField(true, 'timestamp'), decisionDigest: stringField(true, 'digest'),
+    planDigest: stringField(false, 'digest'), executionState: enumField(['PLANNED', 'EXECUTED', 'FAILED']), sequence: integerField(), executedAt: stringField(false, 'timestamp'), bytesFreed: integerField(), error: structuredError(),
   }),
   MigrationRunV1: schema('MigrationRunV1', {
     migrationRunId: stringField(true, 'identifier'), deploymentId: stringField(true, 'identifier'), migrationContractDigest: stringField(true, 'digest'), phase: enumField(['EXPAND', 'MIGRATE', 'CONTRACT'], true),

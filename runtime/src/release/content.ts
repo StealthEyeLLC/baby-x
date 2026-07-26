@@ -35,12 +35,15 @@ import {
 } from './tar.ts';
 
 const GIB = 1024 * 1024 * 1024;
-const ROOT_HARD_FLOOR_BYTES = 12 * GIB;
-const ROOT_WARNING_FLOOR_BYTES = 18 * GIB;
-const ROOT_EMERGENCY_RESERVE_BYTES = 6 * GIB;
-const ZFS_EMERGENCY_RESERVE_BYTES = 10 * GIB;
-const MEMORY_EMERGENCY_RESERVE_BYTES = 2 * GIB;
-const ROOT_WARNING_PERCENT = 15;
+const ROOT_STAGING_REJECT_BYTES = 12 * GIB;
+const ROOT_WARNING_FLOOR_BYTES = 20 * GIB;
+const ROOT_BACKGROUND_THROTTLE_BYTES = 15 * GIB;
+const ROOT_EMERGENCY_RESERVE_BYTES = 8 * GIB;
+const ZFS_WARNING_FLOOR_BYTES = 3 * GIB;
+const ZFS_CLONE_REJECT_BYTES = 2 * GIB;
+const MEMORY_HEAVYWEIGHT_RESERVE_BYTES = 2 * GIB;
+const ROOT_WARNING_PERCENT = 20;
+const ZFS_WARNING_PERCENT = 25;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024 * 1024;
 
 const SECRET_PATH = /(^|\/)(?:\.env(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519)|[^/]+\.(?:pem|p12|pfx|key))$/iu;
@@ -74,6 +77,7 @@ export interface CapacityObservation extends JsonObject {
   rootAvailableBytes: number;
   rootAvailableInodes: number;
   zfsPool: string;
+  zfsTotalBytes?: number;
   zfsAvailableBytes: number;
   memoryAvailableBytes: number;
   cpuPressure: JsonObject;
@@ -83,12 +87,19 @@ export interface CapacityObservation extends JsonObject {
 
 export interface CapacityReservationRequest extends JsonObject {
   reservationId: string;
-  purpose: 'SOURCE_ARCHIVE' | 'DEPENDENCY_CACHE' | 'BUILD_CACHE' | 'RELEASE_ARTIFACT' | 'MATERIALIZATION';
+  purpose: 'SOURCE_ARCHIVE' | 'DEPENDENCY_CACHE' | 'BUILD_CACHE' | 'RELEASE_ARTIFACT' | 'MATERIALIZATION' | 'CERTIFICATION' | 'DISPOSABLE_CLONE' | 'BACKGROUND_MAINTENANCE';
+  workClass?: 'PRODUCTION_CONTROL' | 'HEAVYWEIGHT' | 'BACKGROUND';
   rootBytes: number;
   zfsBytes: number;
   memoryBytes: number;
   ownerPrincipal: string;
   expiresAt?: string;
+}
+
+export interface CapacityReservationAuthority {
+  readonly authority: 'release-resource-governor';
+  reserve(request: CapacityReservationRequest): JsonObject;
+  release(reservationId: string, ownerPrincipal: string, reason?: string): JsonObject;
 }
 
 export interface ContentServiceOptions {
@@ -98,6 +109,7 @@ export interface ContentServiceOptions {
   artifacts: ArtifactAuthority | ArtifactManager;
   store: ReleaseApplianceStore;
   capacityProvider: () => CapacityObservation;
+  capacityAuthority?: CapacityReservationAuthority;
   productionRoots?: string[];
   gitPath?: string;
   zstdPath?: string;
@@ -414,20 +426,32 @@ export function evaluateCapacity(observation: CapacityObservation, request: Capa
   const zfsAfter = observation.zfsAvailableBytes - request.zfsBytes;
   const memoryAfter = observation.memoryAvailableBytes - request.memoryBytes;
   const rootPercentAfter = observation.rootTotalBytes === 0 ? 0 : Math.floor((rootAfter * 100) / observation.rootTotalBytes);
+  const zfsTotalBytes = observation.zfsTotalBytes ?? 0;
+  const zfsPercentAfter = zfsTotalBytes === 0 ? 0 : Math.floor((zfsAfter * 100) / zfsTotalBytes);
+  const workClass = request.workClass ?? (request.purpose === 'DEPENDENCY_CACHE' || request.purpose === 'BUILD_CACHE' || request.purpose === 'BACKGROUND_MAINTENANCE' ? 'BACKGROUND' : 'HEAVYWEIGHT');
   const reasons: string[] = [];
-  if (rootAfter < ROOT_HARD_FLOOR_BYTES || rootAfter < ROOT_EMERGENCY_RESERVE_BYTES) reasons.push('root_capacity_below_hard_floor');
-  if (zfsAfter < ZFS_EMERGENCY_RESERVE_BYTES) reasons.push('zfs_capacity_below_emergency_reserve');
-  if (memoryAfter < MEMORY_EMERGENCY_RESERVE_BYTES) reasons.push('memory_capacity_below_emergency_reserve');
+  if (rootAfter < ROOT_STAGING_REJECT_BYTES) reasons.push(rootAfter < ROOT_EMERGENCY_RESERVE_BYTES ? 'root_capacity_below_emergency_floor' : 'root_capacity_below_staging_floor');
+  if (request.zfsBytes > 0 && zfsAfter < ZFS_CLONE_REJECT_BYTES) reasons.push('zfs_capacity_below_clone_floor');
+  if (workClass !== 'PRODUCTION_CONTROL' && memoryAfter < MEMORY_HEAVYWEIGHT_RESERVE_BYTES) reasons.push('memory_capacity_below_heavyweight_reserve');
   if (observation.rootAvailableInodes < 10_000) reasons.push('root_inode_capacity_low');
-  const warning = rootAfter < ROOT_WARNING_FLOOR_BYTES || rootPercentAfter < ROOT_WARNING_PERCENT;
+  const rootWarning = rootAfter < ROOT_WARNING_FLOOR_BYTES || rootPercentAfter < ROOT_WARNING_PERCENT;
+  const zfsWarning = request.zfsBytes > 0 && (zfsAfter < ZFS_WARNING_FLOOR_BYTES || (zfsTotalBytes > 0 && zfsPercentAfter < ZFS_WARNING_PERCENT));
+  const backgroundThrottle = workClass === 'BACKGROUND' && rootAfter < ROOT_BACKGROUND_THROTTLE_BYTES;
+  const warning = rootWarning || zfsWarning || backgroundThrottle;
+  const emergencyOnly = workClass === 'PRODUCTION_CONTROL' && reasons.length > 0 && rootAfter >= 0 && memoryAfter >= 0;
   return {
-    admission: reasons.length > 0 ? 'REJECT' : warning ? 'THROTTLE' : 'ALLOW',
+    admission: emergencyOnly ? 'EMERGENCY_ONLY' : reasons.length > 0 ? 'REJECT' : warning ? 'THROTTLE' : 'ALLOW',
     reasons,
     warning,
+    rootWarning,
+    zfsWarning,
+    backgroundThrottle,
     rootAfter,
     rootPercentAfter,
     zfsAfter,
+    zfsPercentAfter,
     memoryAfter,
+    workClass,
   };
 }
 
@@ -439,6 +463,7 @@ export class ImmutableReleaseContentService {
   private readonly artifacts: ArtifactAuthority;
   private readonly store: ReleaseApplianceStore;
   private readonly capacityProvider: () => CapacityObservation;
+  private readonly capacityAuthority?: CapacityReservationAuthority;
   private readonly gitPath: string;
   private readonly zstdPath: string;
   private readonly archiveLimits: ArchiveLimits;
@@ -452,6 +477,7 @@ export class ImmutableReleaseContentService {
     this.artifacts = options.artifacts as ArtifactAuthority;
     this.store = options.store;
     this.capacityProvider = options.capacityProvider;
+    this.capacityAuthority = options.capacityAuthority;
     this.gitPath = options.gitPath ?? '/usr/bin/git';
     this.zstdPath = options.zstdPath ?? '/usr/bin/zstd';
     this.archiveLimits = options.archiveLimits ?? DEFAULT_ARCHIVE_LIMITS;
@@ -470,6 +496,7 @@ export class ImmutableReleaseContentService {
   }
 
   private reserve(requestValue: CapacityReservationRequest): JsonObject {
+    if (this.capacityAuthority !== undefined) return this.capacityAuthority.reserve(requestValue);
     const request: CapacityReservationRequest = {
       ...requestValue,
       reservationId: ensureIdentifier(requestValue.reservationId, 'reservationId'),
@@ -535,8 +562,9 @@ export class ImmutableReleaseContentService {
     const contentKey = ensureDigest(String(metadata.contentKey), 'contentKey');
     const existing = this.findContentArtifact(contentKey, digest);
     if (existing !== undefined) return existing;
+    const reservationId = `reserve_${contentKey.slice(0, 40)}`;
     this.reserve({
-      reservationId: `reserve_${contentKey.slice(0, 40)}`,
+      reservationId,
       purpose: capacityPurpose,
       rootBytes: bytes.length * 2 + 1024 * 1024,
       zfsBytes: bytes.length + 1024 * 1024,
@@ -546,7 +574,8 @@ export class ImmutableReleaseContentService {
     const temporary = safeTemporaryFile(this.isolatedBuildRoot, name.replace(/[^A-Za-z0-9._-]/gu, '_'), bytes);
     try {
       try {
-        const created = this.artifacts.create(name, temporary, { ...metadata, contentKey, expectedSha256: digest });
+        const retentionClass = capacityPurpose === 'DEPENDENCY_CACHE' || capacityPurpose === 'BUILD_CACHE' ? 'CACHE' : 'RECENT';
+        const created = this.artifacts.create(name, temporary, { ...metadata, contentKey, expectedSha256: digest, retentionClass, lastAccessedAt: this.now() });
         if (created.sha256 !== digest || !artifactValid(this.artifacts, created)) throw new ReleaseContentError('release_artifact_invalid', 'artifact authority did not preserve expected bytes', { id: created.id, digest });
         return created;
       } catch (error) {
@@ -556,6 +585,7 @@ export class ImmutableReleaseContentService {
       }
     } finally {
       rmSync(temporary, { force: true });
+      try { this.capacityAuthority?.release(reservationId, ownerPrincipal, 'content-write-complete'); } catch {}
     }
   }
 
@@ -810,16 +840,18 @@ export class ImmutableReleaseContentService {
     const tar = decompressZstd(bytes, this.zstdPath, this.archiveLimits.maxExpandedBytes + 1024 * 1024);
     const entries = parseDeterministicTar(tar, this.archiveLimits);
     const expandedBytes = entries.reduce((sum, entry) => sum + (entry.type === 'file' ? entry.size : 0), 0);
+    const reservationId = `materialize_${request.artifactSha256.slice(0, 40)}`;
     this.reserve({
-      reservationId: `materialize_${request.artifactSha256.slice(0, 40)}`,
+      reservationId,
       purpose: 'MATERIALIZATION',
       rootBytes: expandedBytes + 64 * 1024 * 1024,
       zfsBytes: expandedBytes + 64 * 1024 * 1024,
       memoryBytes: Math.min(expandedBytes + 64 * 1024 * 1024, 512 * 1024 * 1024),
       ownerPrincipal: request.reservationOwner,
     });
-    const finalPath = join(this.releaseRoot, request.artifactSha256);
-    if (existsSync(finalPath)) {
+    try {
+      const finalPath = join(this.releaseRoot, request.artifactSha256);
+      if (existsSync(finalPath)) {
       const verification = this.verifyExistingMaterialization(finalPath, entries);
       if (verification.valid === true) return { materialized: true, reused: true, path: finalPath, verification };
       mkdirSync(this.quarantineRoot, { recursive: true, mode: 0o700 });
@@ -845,7 +877,10 @@ export class ImmutableReleaseContentService {
     atomicPromoteDirectory(staging, finalPath);
     const finalVerification = this.verifyExistingMaterialization(finalPath, entries);
     if (finalVerification.valid !== true) throw new ReleaseContentError('release_artifact_invalid', 'final release verification failed after atomic promotion', { finalPath, finalVerification });
-    return { materialized: true, reused: false, path: finalPath, verification: finalVerification };
+      return { materialized: true, reused: false, path: finalPath, verification: finalVerification };
+    } finally {
+      try { this.capacityAuthority?.release(reservationId, request.reservationOwner, 'materialization-complete'); } catch {}
+    }
   }
 
   createReleaseRecord(input: JsonObject): JsonObject {

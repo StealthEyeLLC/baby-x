@@ -368,6 +368,8 @@ export class JobManager {
     return next;
   }
   read(id: string, stream: 'stdout' | 'stderr', offset = 0, limit = 65_536): JsonObject {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative integer');
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > 1024 * 1024) throw new Error('limit must be an integer between 0 and 1048576');
     const record = this.get(id);
     const path = stream === 'stdout' ? record.stdoutPath : record.stderrPath;
     const size = statSync(path).size;
@@ -421,6 +423,8 @@ export interface RuntimeOptions {
   releaseDrainAuthority?: import('./release/coordinator.ts').ReleaseDrainAuthority;
   releaseProofAuthority?: import('./release/coordinator.ts').ReleaseProofAuthority;
   releaseCapacityProvider?: import('./release/content.ts').ContentServiceOptions['capacityProvider'];
+  releaseResourceGovernor?: import('./release/governor.ts').ReleaseResourceGovernor;
+  releasePriorityAuthority?: import('./release/governor.ts').PriorityEnforcementAuthority;
   releaseProductionRoots?: string[]; releaseApplianceVersion?: string;
 }
 
@@ -465,6 +469,8 @@ export class BabyXRuntime {
   private slotRuntimeServiceInstance?: import('./release/slot.ts').SlotRuntimeService;
   private routeAuthorityServiceInstance?: import('./release/route.ts').RouteAuthorityService;
   private releaseContentServiceInstance?: import('./release/content.ts').ImmutableReleaseContentService;
+  private releaseResourceGovernorInstance?: import('./release/governor.ts').ReleaseResourceGovernor;
+  private releaseResourceGovernorReconstructed = false;
   private releaseCoordinatorServiceInstance?: import('./release/coordinator.ts').ReleaseCoordinatorService;
   private releaseCoordinatorInitializePromise?: Promise<JsonObject>;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
@@ -563,26 +569,70 @@ export class BabyXRuntime {
     }
     return this.routeAuthorityServiceInstance;
   }
+  private releaseCapacityObservation(): import('./release/content.ts').CapacityObservation {
+    if (this.options.releaseCapacityProvider !== undefined) return this.options.releaseCapacityProvider();
+    const stats = statfsSync(this.stateRoot);
+    const blockSize = Number(stats.bsize);
+    const rootTotalBytes = Number(stats.blocks) * blockSize;
+    const rootAvailableBytes = Number(stats.bavail) * blockSize;
+    const parsePressure = (path: string): JsonObject => {
+      try {
+        const result: JsonObject = { status: 'AVAILABLE' };
+        for (const line of readFileSync(path, 'utf8').trim().split(/\n/u)) {
+          const [kind, ...fields] = line.trim().split(/\s+/u);
+          if (!kind) continue;
+          const metrics: JsonObject = {};
+          for (const field of fields) {
+            const [name, raw] = field.split('=');
+            if (name && raw !== undefined) metrics[name] = Number(raw);
+          }
+          result[kind] = metrics;
+        }
+        return result;
+      } catch { return { status: 'UNKNOWN' }; }
+    };
+    let zfsPool = process.env.BABY_X_RELEASE_ZFS_DATASET ?? 'babycert';
+    let zfsAvailableBytes = rootAvailableBytes;
+    let zfsTotalBytes = rootTotalBytes;
+    const zfsPath = existsSync('/usr/sbin/zfs') ? '/usr/sbin/zfs' : existsSync('/usr/bin/zfs') ? '/usr/bin/zfs' : undefined;
+    if (zfsPath !== undefined) {
+      const result = spawnSync(zfsPath, ['list', '-Hp', '-o', 'available,used', zfsPool], { encoding: 'utf8', timeout: 5_000 });
+      const [available, used] = result.status === 0 ? result.stdout.trim().split(/\s+/u).map(Number) : [];
+      if (Number.isSafeInteger(available) && Number.isSafeInteger(used) && Number(available) >= 0 && Number(used) >= 0) {
+        zfsAvailableBytes = Number(available);
+        zfsTotalBytes = Number(available) + Number(used);
+      } else zfsPool = `${zfsPool}:filesystem-fallback`;
+    } else zfsPool = `${zfsPool}:filesystem-fallback`;
+    return {
+      observedAt: new Date().toISOString(), rootTotalBytes, rootAvailableBytes, rootAvailableInodes: Number(stats.ffree),
+      zfsPool, zfsTotalBytes, zfsAvailableBytes, memoryAvailableBytes: freemem(),
+      cpuPressure: parsePressure('/proc/pressure/cpu'), memoryPressure: parsePressure('/proc/pressure/memory'), ioPressure: parsePressure('/proc/pressure/io'),
+    };
+  }
+  private async releaseResourceGovernor(reconstruct = false): Promise<import('./release/governor.ts').ReleaseResourceGovernor> {
+    if (this.releaseResourceGovernorInstance === undefined) {
+      if (this.options.releaseResourceGovernor !== undefined) this.releaseResourceGovernorInstance = this.options.releaseResourceGovernor;
+      else {
+        const { ReleaseResourceGovernor } = await import('./release/governor.ts');
+        this.releaseResourceGovernorInstance = new ReleaseResourceGovernor({ store: await this.releaseStore(), artifacts: await this.artifactManager(), capacityProvider: () => this.releaseCapacityObservation(), ...(this.options.releasePriorityAuthority === undefined ? {} : { priorityAuthority: this.options.releasePriorityAuthority }) });
+      }
+    }
+    if (reconstruct && !this.releaseResourceGovernorReconstructed) {
+      this.releaseResourceGovernorInstance.reconstruct();
+      this.releaseResourceGovernorReconstructed = true;
+    }
+    return this.releaseResourceGovernorInstance;
+  }
   private async releaseContentService(): Promise<import('./release/content.ts').ImmutableReleaseContentService> {
     if (this.releaseContentServiceInstance === undefined) {
       const { ImmutableReleaseContentService } = await import('./release/content.ts');
-      const capacityProvider = this.options.releaseCapacityProvider ?? (() => {
-        const stats = statfsSync(this.stateRoot);
-        const blockSize = Number(stats.bsize);
-        const available = Number(stats.bavail) * blockSize;
-        return {
-          observedAt: new Date().toISOString(), rootTotalBytes: Number(stats.blocks) * blockSize,
-          rootAvailableBytes: available, rootAvailableInodes: Number(stats.ffree),
-          zfsPool: 'filesystem-observation', zfsAvailableBytes: available,
-          memoryAvailableBytes: freemem(), cpuPressure: { status: 'UNKNOWN' }, memoryPressure: { status: 'UNKNOWN' }, ioPressure: { status: 'UNKNOWN' },
-        };
-      });
+      const capacityProvider = () => this.releaseCapacityObservation();
       this.releaseContentServiceInstance = new ImmutableReleaseContentService({
         isolatedBuildRoot: join(this.stateRoot, 'release-appliance', 'isolated-builds'),
         releaseRoot: join(this.stateRoot, 'release-appliance', 'immutable-releases'),
         quarantineRoot: join(this.stateRoot, 'release-appliance', 'quarantine'),
         productionRoots: this.options.releaseProductionRoots ?? [],
-        artifacts: await this.artifactManager(), store: await this.releaseStore(), capacityProvider,
+        artifacts: await this.artifactManager(), store: await this.releaseStore(), capacityProvider, capacityAuthority: await this.releaseResourceGovernor(false),
       });
     }
     return this.releaseContentServiceInstance;
@@ -601,10 +651,11 @@ export class BabyXRuntime {
         const observation = this.options.releaseObservationAuthority ?? new RouteSlotObservationAuthority(routes, slots);
         const drain = this.options.releaseDrainAuthority ?? new BoundedDrainAuthority();
         const proofs = this.options.releaseProofAuthority ?? { authority: 'existing-babyx-proof' as const, create: (requestId: string, operation: string, ok: boolean, startedAt: string, result: unknown) => this.createProof(requestId, operation, ok, startedAt, result) };
-        this.releaseCoordinatorServiceInstance = new ReleaseCoordinatorService({ stateRoot: this.stateRoot, store: await this.releaseStore(), preparation, slots, routes, jobs: this.jobs, artifacts: await this.artifactManager(), observation, drain, proofs });
+        this.releaseCoordinatorServiceInstance = new ReleaseCoordinatorService({ stateRoot: this.stateRoot, store: await this.releaseStore(), preparation, slots, routes, jobs: this.jobs, artifacts: await this.artifactManager(), observation, drain, proofs, governor: await this.releaseResourceGovernor(false) });
       }
     }
     if (reconcile && this.releaseCoordinatorInitializePromise === undefined) {
+      if (this.options.releaseCoordinatorService === undefined || this.options.releaseResourceGovernor !== undefined) await this.releaseResourceGovernor(true);
       this.jobs.reconcileRunning();
       this.releaseCoordinatorInitializePromise = this.releaseCoordinatorServiceInstance.initialize().catch((error: unknown) => ({ operation: 'babyx.release.reconcile', startup: true, processed: 0, deferred: true, error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'release_startup_reconcile_failed') : 'release_startup_reconcile_failed', message: error instanceof Error ? error.message : 'startup release reconciliation failed' } }));
     }
@@ -641,6 +692,14 @@ export class BabyXRuntime {
       return operation === 'babyx.release.describe'
         ? { ...release.describeReleaseAppliance(payload), coordinator: coordinator.describeReleaseCoordinator() }
         : { ...release.releaseApplianceCapabilities(payload), coordinator: coordinator.releaseCoordinatorCapabilities() };
+    }
+    if (operation === 'babyx.release.capacity') {
+      const recordsRoot = join(this.stateRoot, 'release-appliance', 'records');
+      if (!existsSync(recordsRoot) && this.releaseResourceGovernorInstance === undefined) {
+        const { projectReleaseCapacity } = await import('./release/governor.ts');
+        return projectReleaseCapacity(this.releaseCapacityObservation(), payload);
+      }
+      return (await this.releaseResourceGovernor(false)).capacity(payload);
     }
     if (operation === 'babyx.release.plan') {
       const coordinator = await import('./release/coordinator.ts');

@@ -170,7 +170,7 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
     serviceId: stringField(true, 'identifier'), slotId: enumField(['blue', 'green'], true), releaseId: stringField(), desiredState: enumField(SLOT_STATES, true),
     state: enumField(SLOT_STATES, true), sequence: integerField(true), systemdUnit: stringField(true), unitDigest: stringField(true, 'digest'), dropInDigest: stringField(true, 'digest'),
     serviceUser: stringField(true), serviceGroup: stringField(true), runtimeDirectory: stringField(true), endpointType: enumField(['UNIX_SOCKET', 'LOOPBACK_TCP'], true),
-    endpointIdentity: jsonField(), expectedProcessIdentity: jsonField(), observedProcessIdentity: jsonField(), activeJobIds: stringArray(true), allJobIds: stringArray(true),
+    endpointIdentity: jsonField(), expectedProcessIdentity: jsonField(), observedProcessIdentity: jsonField(), unitBundle: jsonField(true), validationResult: jsonField(), activeJobIds: stringArray(true), allJobIds: stringArray(true),
     readinessObservations: objectArray(), livenessObservations: objectArray(), routeMembership: booleanField(true), drainObservations: objectArray(), credentialSetDigest: stringField(true, 'digest'),
     startedAt: stringField(false, 'timestamp'), readyAt: stringField(false, 'timestamp'), exposedAt: stringField(false, 'timestamp'), drainStartedAt: stringField(false, 'timestamp'),
     stoppedAt: stringField(false, 'timestamp'), cleanupCompletedAt: stringField(false, 'timestamp'), ambiguity: jsonField(), error: structuredError(),

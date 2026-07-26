@@ -223,6 +223,9 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 babyx.release.describe
 babyx.release.capabilities
+babyx.release.service.get
+babyx.release.service.list
+babyx.release.slot.get
 babyx.release.certification.describe
 babyx.release.certification.certify
 babyx.release.certification.resume
@@ -231,7 +234,22 @@ babyx.release.certification.list
 `.trim().split(/\s+/u);
 
 const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate']);
-const strictReadOperations = new Set(['babyx.release.describe', 'babyx.release.capabilities']);
+const exactReadInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
+  'babyx.release.describe': { type: 'object', additionalProperties: false },
+  'babyx.release.capabilities': { type: 'object', additionalProperties: false },
+  'babyx.release.service.get': {
+    type: 'object', additionalProperties: false, required: ['serviceId'],
+    properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' } },
+  },
+  'babyx.release.service.list': {
+    type: 'object', additionalProperties: false,
+    properties: { offset: { type: 'integer', minimum: 0, maximum: 10000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
+  },
+  'babyx.release.slot.get': {
+    type: 'object', additionalProperties: false, required: ['serviceId', 'slotId'],
+    properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' }, slotId: { type: 'string', enum: ['blue', 'green'] } },
+  },
+});
 
 function familyOf(operation: string): string {
   const segments = operation.split('.');
@@ -246,9 +264,7 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
     mutation: !readSuffixes.has(suffix),
-    input: strictReadOperations.has(operation)
-      ? { type: 'object', additionalProperties: false }
-      : { type: 'object', additionalProperties: true },
+    input: exactReadInputs[operation] ?? { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };
 });

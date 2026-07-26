@@ -412,7 +412,7 @@ function toolAvailability(): JsonObject {
   return Object.fromEntries(names.map((name) => [name, executable(name)]));
 }
 
-export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; }
+export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; slotSystemdAdapter?: import('./release/slot.ts').SlotSystemdAdapter; }
 
 export interface RuntimeExecutionContext { idempotencyKey?: string; subject?: string; authorityClass?: string; }
 
@@ -452,6 +452,7 @@ export class BabyXRuntime {
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
   private releaseCertificationServiceInstance?: import('./release/certification.ts').ReleaseCertificationService;
   private releaseStoreInstance?: import('./release/store.ts').ReleaseApplianceStore;
+  private slotRuntimeServiceInstance?: import('./release/slot.ts').SlotRuntimeService;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
@@ -524,6 +525,18 @@ export class BabyXRuntime {
     }
     return this.releaseStoreInstance;
   }
+  private async slotRuntimeService(): Promise<import('./release/slot.ts').SlotRuntimeService> {
+    if (this.slotRuntimeServiceInstance === undefined) {
+      const { HostSystemdSlotAdapter, SlotRuntimeService } = await import('./release/slot.ts');
+      const systemd = this.options.slotSystemdAdapter ?? new HostSystemdSlotAdapter({
+        unitRoot: join(this.stateRoot, 'release-appliance', 'systemd-units'),
+        validationRoot: join(this.stateRoot, 'release-appliance', 'unit-validation'),
+        liveActions: false,
+      });
+      this.slotRuntimeServiceInstance = new SlotRuntimeService({ stateRoot: this.stateRoot, store: await this.releaseStore(), jobs: this.jobs, systemd });
+    }
+    return this.slotRuntimeServiceInstance;
+  }
   private async releaseCertificationService(): Promise<import('./release/certification.ts').ReleaseCertificationService> {
     if (this.releaseCertificationServiceInstance === undefined) {
       const { ReleaseCertificationService } = await import('./release/certification.ts');
@@ -553,6 +566,12 @@ export class BabyXRuntime {
       return operation === 'babyx.release.describe'
         ? release.describeReleaseAppliance(payload)
         : release.releaseApplianceCapabilities(payload);
+    }
+    if (['babyx.release.service.get', 'babyx.release.service.list', 'babyx.release.slot.get'].includes(operation)) {
+      const service = await this.slotRuntimeService();
+      if (operation === 'babyx.release.service.get') return service.getService(payload, context);
+      if (operation === 'babyx.release.service.list') return service.listServices(payload, context);
+      return service.getSlot(payload, context);
     }
     if (['babyx.release.certification.describe', 'babyx.release.certification.certify', 'babyx.release.certification.resume', 'babyx.release.certification.get', 'babyx.release.certification.list'].includes(operation)) {
       const service = await this.releaseCertificationService();

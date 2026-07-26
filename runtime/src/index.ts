@@ -20,3 +20,4 @@ export * from './artifacts/manager.ts';
 export * from './release/tar.ts';
 export * from './release/content.ts';
 export * from './release/certification.ts';
+export * from './release/slot.ts';

@@ -425,6 +425,8 @@ export interface RuntimeOptions {
   releaseCapacityProvider?: import('./release/content.ts').ContentServiceOptions['capacityProvider'];
   releaseResourceGovernor?: import('./release/governor.ts').ReleaseResourceGovernor;
   releasePriorityAuthority?: import('./release/governor.ts').PriorityEnforcementAuthority;
+  releaseCredentialAccessService?: import('./release/access.ts').CredentialAccessService;
+  releaseGitHubIntegrationService?: import('./release/access.ts').GitHubIntegrationService;
   releaseProductionRoots?: string[]; releaseApplianceVersion?: string;
 }
 
@@ -471,6 +473,8 @@ export class BabyXRuntime {
   private releaseContentServiceInstance?: import('./release/content.ts').ImmutableReleaseContentService;
   private releaseResourceGovernorInstance?: import('./release/governor.ts').ReleaseResourceGovernor;
   private releaseResourceGovernorReconstructed = false;
+  private releaseCredentialAccessServiceInstance?: import('./release/access.ts').CredentialAccessService;
+  private releaseGitHubIntegrationServiceInstance?: import('./release/access.ts').GitHubIntegrationService;
   private releaseCoordinatorServiceInstance?: import('./release/coordinator.ts').ReleaseCoordinatorService;
   private releaseCoordinatorInitializePromise?: Promise<JsonObject>;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
@@ -637,6 +641,14 @@ export class BabyXRuntime {
     }
     return this.releaseContentServiceInstance;
   }
+  private releaseCredentialAccessService(): import('./release/access.ts').CredentialAccessService | undefined {
+    if (this.releaseCredentialAccessServiceInstance === undefined) this.releaseCredentialAccessServiceInstance = this.options.releaseCredentialAccessService;
+    return this.releaseCredentialAccessServiceInstance;
+  }
+  private releaseGitHubIntegrationService(): import('./release/access.ts').GitHubIntegrationService | undefined {
+    if (this.releaseGitHubIntegrationServiceInstance === undefined) this.releaseGitHubIntegrationServiceInstance = this.options.releaseGitHubIntegrationService;
+    return this.releaseGitHubIntegrationServiceInstance;
+  }
   private async releaseCoordinatorService(reconcile = true): Promise<import('./release/coordinator.ts').ReleaseCoordinatorService> {
     if (this.releaseCoordinatorServiceInstance === undefined) {
       if (this.options.releaseCoordinatorService !== undefined) this.releaseCoordinatorServiceInstance = this.options.releaseCoordinatorService;
@@ -651,7 +663,8 @@ export class BabyXRuntime {
         const observation = this.options.releaseObservationAuthority ?? new RouteSlotObservationAuthority(routes, slots);
         const drain = this.options.releaseDrainAuthority ?? new BoundedDrainAuthority();
         const proofs = this.options.releaseProofAuthority ?? { authority: 'existing-babyx-proof' as const, create: (requestId: string, operation: string, ok: boolean, startedAt: string, result: unknown) => this.createProof(requestId, operation, ok, startedAt, result) };
-        this.releaseCoordinatorServiceInstance = new ReleaseCoordinatorService({ stateRoot: this.stateRoot, store: await this.releaseStore(), preparation, slots, routes, jobs: this.jobs, artifacts: await this.artifactManager(), observation, drain, proofs, governor: await this.releaseResourceGovernor(false) });
+        const reporter = this.releaseGitHubIntegrationService();
+        this.releaseCoordinatorServiceInstance = new ReleaseCoordinatorService({ stateRoot: this.stateRoot, store: await this.releaseStore(), preparation, slots, routes, jobs: this.jobs, artifacts: await this.artifactManager(), observation, drain, proofs, governor: await this.releaseResourceGovernor(false), ...(reporter === undefined ? {} : { reporter }) });
       }
     }
     if (reconcile && this.releaseCoordinatorInitializePromise === undefined) {
@@ -700,6 +713,29 @@ export class BabyXRuntime {
         return projectReleaseCapacity(this.releaseCapacityObservation(), payload);
       }
       return (await this.releaseResourceGovernor(false)).capacity(payload);
+    }
+    if (operation === 'babyx.release.credentials.describe') {
+      const service = this.releaseCredentialAccessService();
+      if (service === undefined) return { operation, readOnly: true, configured: false, capabilities: { providers: [], rawMaterialReturned: false }, credentialSets: [] };
+      return service.describe(payload, context);
+    }
+    if (operation === 'babyx.release.credentials.rotate') {
+      const service = this.releaseCredentialAccessService();
+      if (service === undefined) {
+        const { ReleaseAccessError } = await import('./release/access.ts');
+        throw new ReleaseAccessError('release_provider_unavailable', 'credential reference provider is not configured');
+      }
+      return service.rotate(payload, context);
+    }
+    if (operation === 'babyx.release.github.status') {
+      const service = this.releaseGitHubIntegrationService();
+      if (service === undefined) return { operation, readOnly: true, configured: false, configuredRepositories: [], provider: { provider: 'UNCONFIGURED' }, inbox: [], outbox: [], counts: { inbox: 0, outbox: 0, queued: 0, deferred: 0, delivered: 0 } };
+      return service.status(payload, context);
+    }
+    if (operation === 'babyx.release.github.reconcile') {
+      const service = this.releaseGitHubIntegrationService();
+      if (service === undefined) return { operation, configured: false, processedInbox: [], reconciledOutbox: [], processedCount: 0, deliveredCount: 0, deferredCount: 0 };
+      return service.reconcile(payload, context);
     }
     if (operation === 'babyx.release.plan') {
       const coordinator = await import('./release/coordinator.ts');

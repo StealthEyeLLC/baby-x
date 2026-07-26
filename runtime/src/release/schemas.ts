@@ -102,6 +102,8 @@ export const RELEASE_FAILURE_CODES = [
   'release_preview_auth_required', 'release_preview_cleanup_failed', 'release_preview_not_expired', 'release_private_probe_failed',
   'release_public_admin_forbidden', 'release_public_probe_failed', 'release_record_not_found', 'release_response_lost',
   'release_restore_unobserved', 'release_shadow_credential_forbidden', 'release_shadow_side_effect_forbidden',
+  'release_webhook_signature_invalid', 'release_github_delivery_conflict', 'release_github_token_invalid', 'release_github_unavailable',
+  'release_credential_reference_invalid', 'release_credential_rotation_failed', 'release_approval_mismatch', 'release_approval_expired',
 ] as const;
 
 const structuredError = (): ReleaseFieldSchema => ({
@@ -232,8 +234,10 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
   }),
   CredentialSetReferenceV1: schema('CredentialSetReferenceV1', {
     credentialSetId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), serviceId: stringField(true, 'identifier'), version: integerField(true),
-    names: stringArray(true), provider: enumField(['SYSTEMD_CREDENTIAL', 'SYSTEMD_ENCRYPTED_CREDENTIAL', 'LEGACY_FILE_ADAPTER'], true), referenceDigest: stringField(true, 'digest'),
-    createdAt: stringField(true, 'timestamp'), rotatedAt: stringField(false, 'timestamp'),
+    names: stringArray(true), provider: enumField(['SYSTEMD_CREDENTIAL', 'SYSTEMD_ENCRYPTED_CREDENTIAL', 'LEGACY_FILE_ADAPTER'], true), entries: objectArray(true),
+    referenceDigest: stringField(true, 'digest'), bindingDigest: stringField(true, 'digest'), state: enumField(['ACTIVE', 'ROTATING', 'RETIRED', 'REVOKED'], true), sequence: integerField(true),
+    previousCredentialSetId: stringField(), compatibilityLauncher: jsonField(), overlapUntil: stringField(false, 'timestamp'), createdAt: stringField(true, 'timestamp'),
+    updatedAt: stringField(true, 'timestamp'), rotatedAt: stringField(false, 'timestamp'), retiredAt: stringField(false, 'timestamp'), validation: jsonField(), error: structuredError(),
   }),
   CapacitySnapshotV1: schema('CapacitySnapshotV1', {
     snapshotId: stringField(true, 'identifier'), observedAt: stringField(true, 'timestamp'), rootTotalBytes: integerField(true), rootAvailableBytes: integerField(true),
@@ -255,14 +259,19 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
     reconstructedAt: stringField(true, 'timestamp'), reconstructionDigest: stringField(true, 'digest'), updatedAt: stringField(true, 'timestamp'),
   }),
   GitHubInboxRecordV1: schema('GitHubInboxRecordV1', {
-    inboxId: stringField(true, 'identifier'), deliveryId: stringField(true, 'identifier'), repository: stringField(true), eventName: stringField(true),
-    bodySha256: stringField(true, 'digest'), signatureVerified: booleanField(true), receivedAt: stringField(true, 'timestamp'), normalizedRequestDigest: stringField(true, 'digest'),
-    disposition: enumField(['ACCEPTED', 'DUPLICATE', 'REJECTED', 'DEFERRED'], true), deploymentId: stringField(), error: structuredError(),
+    inboxId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), deliveryId: stringField(true, 'identifier'), source: enumField(['WEBHOOK', 'POLL'], true),
+    repositoryId: stringField(true, 'identifier'), repository: stringField(true), installationId: stringField(true, 'identifier'), eventName: stringField(true), action: stringField(),
+    bodySha256: stringField(true, 'digest'), signatureVerified: booleanField(true), receivedAt: stringField(true, 'timestamp'), normalizedEvent: jsonField(true),
+    normalizedRequestDigest: stringField(true, 'digest'), convergenceKey: stringField(true, 'digest'), processingState: enumField(['RECEIVED', 'PROCESSING', 'PROCESSED', 'EXCLUDED', 'CONFLICT', 'RECOVERY_REQUIRED'], true),
+    disposition: enumField(['ACCEPTED', 'DUPLICATE', 'REJECTED', 'DEFERRED'], true), sequence: integerField(true), processedAt: stringField(false, 'timestamp'),
+    deploymentId: stringField(), exclusionReason: stringField(), error: structuredError(),
   }),
   GitHubOutboxRecordV1: schema('GitHubOutboxRecordV1', {
-    outboxId: stringField(true, 'identifier'), repository: stringField(true), deploymentId: stringField(true, 'identifier'), reportKind: enumField(['DEPLOYMENT', 'CHECK', 'COMMENT'], true),
-    payloadDigest: stringField(true, 'digest'), state: enumField(['QUEUED', 'SENDING', 'DELIVERED', 'FAILED', 'DEFERRED'], true), attemptCount: integerField(true),
-    nextAttemptAt: stringField(false, 'timestamp'), deliveredAt: stringField(false, 'timestamp'), remoteIdentity: jsonField(), error: structuredError(),
+    outboxId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), repositoryId: stringField(true, 'identifier'), repository: stringField(true),
+    installationId: stringField(true, 'identifier'), deploymentId: stringField(true, 'identifier'), reportKind: enumField(['DEPLOYMENT', 'CHECK', 'COMMENT'], true), targetOperation: stringField(true, 'identifier'),
+    payloadDigest: stringField(true, 'digest'), payload: jsonField(true), state: enumField(['QUEUED', 'SENDING', 'DELIVERED', 'FAILED', 'DEFERRED'], true), attemptCount: integerField(true), sequence: integerField(true),
+    createdAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'), nextAttemptAt: stringField(false, 'timestamp'), deliveredAt: stringField(false, 'timestamp'),
+    remoteIdentity: jsonField(), lastStatus: jsonField(), error: structuredError(),
   }),
   ControllerLeaseV1: schema('ControllerLeaseV1', {
     leaseId: stringField(true, 'identifier'), resourceType: enumField(['DEPLOYMENT', 'ROUTE', 'SERVICE', 'MAINTENANCE'], true), resourceId: stringField(true, 'identifier'),

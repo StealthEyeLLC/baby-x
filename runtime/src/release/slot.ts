@@ -83,6 +83,20 @@ export interface SlotUnitBundle extends JsonObject {
   executablePath: string;
   nativeReadiness: boolean;
   nativeWatchdog: boolean;
+  credentialSetId?: string;
+  credentialBindingDigest?: string;
+  credentialNames?: string[];
+}
+
+
+export interface SlotCredentialBinding extends JsonObject {
+  credentialSetId: string;
+  referenceDigest: string;
+  bindingDigest: string;
+  provider: 'SYSTEMD_CREDENTIAL' | 'SYSTEMD_ENCRYPTED_CREDENTIAL' | 'LEGACY_FILE_ADAPTER';
+  names: string[];
+  entries: JsonObject[];
+  compatibilityLauncher?: { path: string; environmentMap: JsonObject };
 }
 
 export interface SlotUnitObservation extends JsonObject {
@@ -251,6 +265,12 @@ function systemdQuote(value: string): string {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%')}"`;
 }
 
+function systemdPath(value: string): string {
+  if (value.includes('\0') || value.includes('\n') || value.includes('\r')) throw new SlotRuntimeError('release_invalid_request', 'systemd path contains prohibited control characters');
+  return value.replaceAll('\\', '\\x5c').replaceAll(' ', '\\x20').replaceAll('\t', '\\t').replaceAll('%', '%%');
+}
+
+
 function unitName(serviceId: string, slot: SlotId): string {
   const result = `babyx-release-${identifier(serviceId, 'serviceId')}-${slot}.service`;
   if (!UNIT.test(result)) throw new SlotRuntimeError('release_unit_invalid', 'generated unit name is invalid');
@@ -319,6 +339,43 @@ export function normalizeServiceDefinition(value: unknown): JsonObject {
   return { ...service.record, manifestDigest: service.digest };
 }
 
+function normalizeCredentialBinding(value: unknown, declaredNames: readonly string[]): SlotCredentialBinding | undefined {
+  if (value === undefined) return undefined;
+  const input = object(value, 'credentialBinding');
+  const allowed = new Set(['credentialSetId','referenceDigest','bindingDigest','provider','names','entries','compatibilityLauncher']);
+  for (const key of Object.keys(input)) if (!allowed.has(key)) throw new SlotRuntimeError('release_invalid_request', `credentialBinding contains unsupported property ${key}`);
+  const provider = String(input.provider);
+  if (!['SYSTEMD_CREDENTIAL','SYSTEMD_ENCRYPTED_CREDENTIAL','LEGACY_FILE_ADAPTER'].includes(provider)) throw new SlotRuntimeError('release_invalid_request', 'credential binding provider is invalid');
+  if (!Array.isArray(input.names) || !Array.isArray(input.entries)) throw new SlotRuntimeError('release_invalid_request', 'credential binding names and entries are required');
+  const names = [...new Set(input.names.map((name) => identifier(name, 'credentialName')))].sort();
+  const declared = new Set(declaredNames);
+  for (const name of names) if (!declared.has(name)) throw new SlotRuntimeError('release_credential_reference_invalid', `credential ${name} is not declared by the service`);
+  const entries = input.entries.map((entryValue) => {
+    const entry = object(entryValue, 'credentialEntry');
+    const name = identifier(entry.name, 'credentialEntry.name');
+    if (!names.includes(name)) throw new SlotRuntimeError('release_credential_reference_invalid', 'credential entry is not present in the set names');
+    const mode = String(entry.mode);
+    if (!['PLAIN','ENCRYPTED'].includes(mode)) throw new SlotRuntimeError('release_credential_reference_invalid', 'credential entry mode is invalid');
+    const sourceRef = String(entry.sourceRef ?? '');
+    if (!sourceRef.startsWith('/') || sourceRef.includes('\n') || sourceRef.includes('\r') || sourceRef.includes('\0')) throw new SlotRuntimeError('release_credential_reference_invalid', 'credential source reference must be an absolute bounded path');
+    const objectDigest = digest(entry.objectDigest, 'credentialEntry.objectDigest');
+    const version = integer(entry.version, 'credentialEntry.version', 1, Number.MAX_SAFE_INTEGER);
+    const environmentName = entry.environmentName === undefined ? undefined : String(entry.environmentName);
+    if (environmentName !== undefined && !/^[A-Z_][A-Z0-9_]{0,127}$/u.test(environmentName)) throw new SlotRuntimeError('release_credential_reference_invalid', 'legacy environment name is invalid');
+    return { name, mode, sourceRef, objectDigest, version, ...(environmentName === undefined ? {} : { environmentName }) };
+  }).sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  if (provider === 'LEGACY_FILE_ADAPTER' && entries.some((entry) => entry.environmentName === undefined)) throw new SlotRuntimeError('release_credential_reference_invalid', 'legacy credential entries require environmentName');
+  const compatibilityLauncher = input.compatibilityLauncher === undefined ? undefined : object(input.compatibilityLauncher, 'compatibilityLauncher');
+  const normalized: SlotCredentialBinding = {
+    credentialSetId: identifier(input.credentialSetId, 'credentialSetId'), referenceDigest: digest(input.referenceDigest, 'referenceDigest'), bindingDigest: digest(input.bindingDigest, 'bindingDigest'),
+    provider: provider as SlotCredentialBinding['provider'], names, entries,
+    ...(compatibilityLauncher === undefined ? {} : { compatibilityLauncher: { path: safeAbsolute(compatibilityLauncher.path, 'compatibilityLauncher.path'), environmentMap: object(compatibilityLauncher.environmentMap, 'compatibilityLauncher.environmentMap') } }),
+  };
+  const calculated = sha256(canonicalize({ credentialSetId: normalized.credentialSetId, referenceDigest: normalized.referenceDigest, provider: normalized.provider, names: normalized.names, entries: normalized.entries, compatibilityLauncher: normalized.compatibilityLauncher ?? null }));
+  if (calculated !== normalized.bindingDigest) throw new SlotRuntimeError('release_credential_reference_invalid', 'credential binding digest does not match normalized metadata');
+  return normalized;
+}
+
 export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, release: JsonObject, roots: JsonObject): SlotUnitBundle {
   const service = normalizeService(serviceValue);
   const slot = slotId(slotValue);
@@ -335,6 +392,7 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
   const cacheRoot = ensureUnder(cacheRootBase, join(cacheRootBase, service.serviceId, slot), 'cacheRoot');
   const logRoot = ensureUnder(logRootBase, join(logRootBase, service.serviceId, slot), 'logRoot');
   const name = unitName(service.serviceId, slot);
+  const credentialBinding = normalizeCredentialBinding(roots.credentialBinding, service.record.credentialReferenceNames as string[]);
   const requestedEndpoint = roots.endpointMode;
   const endpointType: SlotEndpointType = requestedEndpoint === undefined
     ? service.endpointPreference
@@ -355,6 +413,13 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     `BABYX_ENDPOINT=${endpoint}`,
   ].sort();
   const writable = [runtimeRoot, stateRoot, cacheRoot, logRoot].sort();
+  const executableArgv = credentialBinding?.provider === 'LEGACY_FILE_ADAPTER'
+    ? [String(credentialBinding.compatibilityLauncher?.path ?? '/usr/libexec/babyx-credential-launcher'), ...service.argv]
+    : service.argv;
+  const credentialDirectives = credentialBinding === undefined ? [] : credentialBinding.entries.map((entry) => `${entry.mode === 'ENCRYPTED' ? 'LoadCredentialEncrypted' : 'LoadCredential'}=${entry.name}:${systemdPath(String(entry.sourceRef))}`);
+  const legacyEnvironmentMap = credentialBinding?.provider === 'LEGACY_FILE_ADAPTER'
+    ? credentialBinding.entries.map((entry) => `${String(entry.environmentName)}:${String(entry.name)}`).sort().join(',')
+    : undefined;
   const unitLines = [
     '[Unit]',
     `Description=Baby-X release ${service.serviceId} ${slot}`,
@@ -364,15 +429,15 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     `Type=${service.nativeReadiness ? 'notify' : 'simple'}`,
     `User=${service.serviceUser}`,
     `Group=${service.serviceGroup}`,
-    `WorkingDirectory=${systemdQuote(workingDirectory)}`,
-    `ExecStart=${service.argv.map(systemdQuote).join(' ')}`,
+    `WorkingDirectory=${systemdPath(workingDirectory)}`,
+    `ExecStart=${executableArgv.map(systemdQuote).join(' ')}`,
     `Slice=${service.resourceClass === 'PRODUCTION' ? 'babyx-production.slice' : 'babyx-background.slice'}`,
     'NoNewPrivileges=yes',
     'PrivateTmp=yes',
     'ProtectSystem=strict',
     'ProtectHome=yes',
-    `ReadOnlyPaths=${systemdQuote(releaseRoot)}`,
-    `ReadWritePaths=${writable.map(systemdQuote).join(' ')}`,
+    `ReadOnlyPaths=${systemdPath(releaseRoot)}`,
+    `ReadWritePaths=${writable.map(systemdPath).join(' ')}`,
     'Restart=on-failure',
     'RestartSec=2s',
     'KillMode=control-group',
@@ -389,6 +454,8 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
   const dropInLines = [
     '[Service]',
     ...environment.map((entry) => `Environment=${systemdQuote(entry)}`),
+    ...(legacyEnvironmentMap === undefined ? [] : [`Environment=${systemdQuote(`BABYX_CREDENTIAL_MAP=${legacyEnvironmentMap}`)}`]),
+    ...credentialDirectives,
     `RuntimeDirectoryMode=0750`,
     `StateDirectoryMode=0750`,
     `CacheDirectoryMode=0750`,
@@ -407,7 +474,7 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     dropInBytes,
     unitDigest,
     dropInDigest,
-    unitGenerationDigest: sha256(canonicalize({ contract: SLOT_RUNTIME_CONTRACT_VERSION, unitDigest, dropInDigest, releaseId, artifactDigest, endpointType, endpoint })),
+    unitGenerationDigest: sha256(canonicalize({ contract: SLOT_RUNTIME_CONTRACT_VERSION, unitDigest, dropInDigest, releaseId, artifactDigest, endpointType, endpoint, credentialBindingDigest: credentialBinding?.bindingDigest ?? null })),
     releaseRoot,
     runtimeRoot,
     stateRoot,
@@ -420,6 +487,7 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     executablePath: service.executablePath,
     nativeReadiness: service.nativeReadiness,
     nativeWatchdog: service.nativeWatchdog,
+    ...(credentialBinding === undefined ? {} : { credentialSetId: credentialBinding.credentialSetId, credentialBindingDigest: credentialBinding.bindingDigest, credentialNames: credentialBinding.names }),
   };
 }
 
@@ -752,7 +820,9 @@ export class SlotRuntimeService {
     const credentialSetDigest = digest(value.credentialSetDigest, 'credentialSetDigest');
     for (const root of Object.values(this.roots)) mkdirSync(String(root), { recursive: true, mode: 0o700 });
     const endpointMode = value.endpointMode === undefined ? undefined : value.endpointMode === 'UNIX_SOCKET' || value.endpointMode === 'LOOPBACK_TCP' ? value.endpointMode : (() => { throw new SlotRuntimeError('release_invalid_request', 'endpointMode is invalid'); })();
-    const bundle = generateSlotUnit(service.record, slot, release, { ...this.roots, ...(endpointMode === undefined ? {} : { endpointMode }) });
+    const credentialBinding = value.credentialBinding === undefined ? undefined : normalizeCredentialBinding(value.credentialBinding, service.record.credentialReferenceNames as string[]);
+    if (credentialBinding !== undefined && credentialBinding.referenceDigest !== credentialSetDigest) throw new SlotRuntimeError('release_credential_reference_invalid', 'credential set digest does not match binding reference digest');
+    const bundle = generateSlotUnit(service.record, slot, release, { ...this.roots, ...(endpointMode === undefined ? {} : { endpointMode }), ...(credentialBinding === undefined ? {} : { credentialBinding }) });
     const recordId = `${service.serviceId}:${slot}`;
     const expectedSequence = value.expectedSequence === undefined ? (this.options.store.hasRecord('SlotRecordV1', recordId) ? Number(this.options.store.getRecord('SlotRecordV1', recordId).sequence) : 0) : integer(value.expectedSequence, 'expectedSequence', 0, Number.MAX_SAFE_INTEGER);
     const requestDigest = sha256(canonicalize({ serviceDigest: service.digest, slot, releaseId, artifactSha256, credentialSetDigest, bundle }));
@@ -786,6 +856,7 @@ export class SlotRuntimeService {
       routeMembership: false,
       drainObservations: [],
       credentialSetDigest,
+      ...(credentialBinding === undefined ? {} : { credentialSetId: credentialBinding.credentialSetId, credentialBindingDigest: credentialBinding.bindingDigest }),
       unitBundle: bundle,
     });
     const stagedIntent = this.options.store.applyMutation({ schemaId: 'SlotRecordV1', recordId, ownerPrincipal: authenticated.subject, expectedSequence, idempotencyKey: authenticated.idempotencyKey, requestDigest, operation: 'babyx.release.slot.stage', phase: 'stage-intent', record: stagingRecord, occurredAt: this.now(), artifactReferences: [{ artifactId: release.artifactId, artifactSha256 }] });
@@ -891,7 +962,7 @@ export class SlotRuntimeService {
     try { await this.options.systemd.cleanup(bundle); } catch (error) { return this.recovery(record, authenticated.subject, 'cleanup-effect-failed', error, requestDigest); }
     const observation = await this.options.systemd.observe(bundle);
     if (!positiveAbsence(observation)) return this.recovery(record, authenticated.subject, 'cleanup-absence-unproven', new SlotRuntimeError('release_cleanup_failed', 'cleanup did not prove unit, process, endpoint, runtime path, and transient-unit absence'), requestDigest, { ambiguity: { observationDigest: sha256(canonicalize(observation)) } });
-    return this.transition(record, authenticated.subject, 'EMPTY_VERIFIED', 'cleanup-verified', `${authenticated.idempotencyKey}-verified`, sha256(canonicalize({ requestDigest, observation })), { desiredState: 'EMPTY_VERIFIED', releaseId: undefined, observedProcessIdentity: undefined, endpointIdentity: undefined, routeMembership: false, cleanupCompletedAt: this.now(), ambiguity: undefined, error: undefined });
+    return this.transition(record, authenticated.subject, 'EMPTY_VERIFIED', 'cleanup-verified', `${authenticated.idempotencyKey}-verified`, sha256(canonicalize({ requestDigest, observation })), { desiredState: 'EMPTY_VERIFIED', releaseId: undefined, observedProcessIdentity: undefined, endpointIdentity: undefined, credentialSetId: undefined, credentialBindingDigest: undefined, routeMembership: false, cleanupCompletedAt: this.now(), ambiguity: undefined, error: undefined });
   }
 
   activate(value: JsonObject, context: RuntimeExecutionContext): JsonObject {

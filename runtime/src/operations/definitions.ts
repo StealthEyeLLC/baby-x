@@ -224,6 +224,10 @@ babyx.counterexample.remove
 babyx.release.describe
 babyx.release.capabilities
 babyx.release.capacity
+babyx.release.credentials.describe
+babyx.release.credentials.rotate
+babyx.release.github.status
+babyx.release.github.reconcile
 babyx.release.plan
 babyx.release.prepare
 babyx.release.promote
@@ -264,6 +268,28 @@ const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
         workClass: { enum: ['PRODUCTION_CONTROL', 'HEAVYWEIGHT', 'BACKGROUND'] }, rootBytes: { type: 'integer', minimum: 0 }, zfsBytes: { type: 'integer', minimum: 0 }, memoryBytes: { type: 'integer', minimum: 0 }, ownerPrincipal: { type: 'string' }, expiresAt: { type: 'string' },
       } },
     },
+  },
+  'babyx.release.credentials.describe': {
+    type: 'object', additionalProperties: false, properties: { serviceId: { type: 'string' } },
+  },
+  'babyx.release.credentials.rotate': {
+    type: 'object', additionalProperties: false, required: ['credentialSet', 'expectedProcessIdentity'], properties: {
+      credentialSet: { type: 'object', additionalProperties: false, required: ['credentialSetId', 'serviceId', 'version', 'provider', 'entries'], properties: {
+        credentialSetId: { type: 'string' }, serviceId: { type: 'string' }, version: { type: 'integer', minimum: 1 },
+        provider: { enum: ['SYSTEMD_CREDENTIAL', 'SYSTEMD_ENCRYPTED_CREDENTIAL', 'LEGACY_FILE_ADAPTER'] },
+        entries: { type: 'array', minItems: 1, maxItems: 256, items: { type: 'object', additionalProperties: false, required: ['name', 'mode', 'sourceRef', 'objectDigest', 'version'], properties: {
+          name: { type: 'string' }, mode: { enum: ['PLAIN', 'ENCRYPTED'] }, sourceRef: { type: 'string' }, objectDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' }, version: { type: 'integer', minimum: 1 }, environmentName: { type: 'string' },
+        } } },
+        previousCredentialSetId: { type: 'string' }, overlapUntil: { type: 'string' },
+      } },
+      expectedProcessIdentity: { type: 'object', additionalProperties: true }, endpointMode: { enum: ['UNIX_SOCKET', 'LOOPBACK_TCP'] },
+    },
+  },
+  'babyx.release.github.status': {
+    type: 'object', additionalProperties: false, properties: { repository: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
+  },
+  'babyx.release.github.reconcile': {
+    type: 'object', additionalProperties: false, properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, poll: { type: 'boolean' } },
   },
   'babyx.release.plan': {
     type: 'object', additionalProperties: false, required: ['request'], properties: { request: { type: 'object', additionalProperties: true } },

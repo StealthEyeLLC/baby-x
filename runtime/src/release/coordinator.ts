@@ -125,6 +125,7 @@ export interface ReleaseCoordinatorOptions {
   drain: ReleaseDrainAuthority;
   proofs: ReleaseProofAuthority;
   governor?: { gc(payload: JsonObject, context: RuntimeExecutionContext): JsonObject };
+  reporter?: { queueDeploymentProjection(record: JsonObject, context: RuntimeExecutionContext): JsonObject; reportingSatisfied(record: JsonObject): boolean };
   now?: () => string;
 }
 
@@ -1203,7 +1204,7 @@ export class ReleaseCoordinatorService {
   private finalizeSuccess(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): JsonObject {
     const active = activeJobs(this.options.jobs, record.allJobIds);
     if (active.length > 0) return this.recovery(record, request.ownerPrincipal, 'active-related-jobs', new ReleaseCoordinatorError('release_active_jobs', 'active related jobs block terminal success', { jobIds: active.map((job) => job.id) }));
-    const successEvidence = this.successEvidence(record);
+    const successEvidence = this.successEvidence(record, this.options.reporter?.reportingSatisfied(record) ?? true);
     try { assertDeploymentSuccess(successEvidence); } catch (error) { return this.recovery(record, request.ownerPrincipal, 'success-evidence-incomplete', error); }
     const evidence = {
       schemaVersion: '1.0.0', deploymentId: record.deploymentId, serviceId: record.serviceId, state: 'SUCCEEDED',
@@ -1342,7 +1343,7 @@ export class ReleaseCoordinatorService {
     return { noop: false, inactiveSlot, activeSlot, activeReleaseId, activeSlotRecord, routeRecord };
   }
 
-  private successEvidence(record: JsonObject): DeploymentSuccessEvidence {
+  private successEvidence(record: JsonObject, githubReportingDeliveredOrQueued = true): DeploymentSuccessEvidence {
     return {
       exactSourceResolved: object(record.sourceIdentity, 'record.sourceIdentity').commit !== undefined && object(record.sourceIdentity, 'record.sourceIdentity').tree !== undefined,
       artifactManifestVerified: object(record.artifactManifest, 'record.artifactManifest').manifestDigest !== undefined,
@@ -1357,7 +1358,7 @@ export class ReleaseCoordinatorService {
       allRelatedJobsTerminal: activeJobs(this.options.jobs, record.allJobIds).length === 0,
       previousSlotHandledTruthfully: record.drainStatus !== undefined || record.priorKnownGoodSlotId === undefined,
       evidenceIndexCompleteAndVerified: true,
-      githubReportingDeliveredOrQueued: true,
+      githubReportingDeliveredOrQueued,
       noUnresolvedAmbiguity: record.ambiguity === undefined,
     };
   }
@@ -1415,7 +1416,11 @@ export class ReleaseCoordinatorService {
     for (const [key, value] of Object.entries(patch)) { if (value === undefined) delete draft[key]; else draft[key] = value; }
     const candidate = validateReleaseRecord('DeploymentRecordV1', { ...draft, state, sequence: sequence + 1, updatedAt: occurredAt, ...(TERMINAL.has(state) ? { completedAt: occurredAt } : {}) });
     const normalizedKey = IDENTIFIER.test(idempotencyKey) && idempotencyKey.length <= 128 ? idempotencyKey : `transition-${sha256(idempotencyKey).slice(0, 64)}`;
-    return this.options.store.applyMutation({ schemaId: 'DeploymentRecordV1', recordId: String(record.deploymentId), ownerPrincipal, expectedSequence: sequence, idempotencyKey: normalizedKey, requestDigest: sha256(canonicalize({ deploymentId: record.deploymentId, prior, state, phase, patch })), operation: 'babyx.release.coordinate', phase: identifier(phase, 'phase'), record: candidate, occurredAt, childJobIds: Array.isArray(candidate.allJobIds) ? candidate.allJobIds as string[] : [], observationDigest: patch.observationState === undefined ? undefined : sha256(canonicalize(patch.observationState)), artifactReferences, receiptReferences });
+    const persisted = this.options.store.applyMutation({ schemaId: 'DeploymentRecordV1', recordId: String(record.deploymentId), ownerPrincipal, expectedSequence: sequence, idempotencyKey: normalizedKey, requestDigest: sha256(canonicalize({ deploymentId: record.deploymentId, prior, state, phase, patch })), operation: 'babyx.release.coordinate', phase: identifier(phase, 'phase'), record: candidate, occurredAt, childJobIds: Array.isArray(candidate.allJobIds) ? candidate.allJobIds as string[] : [], observationDigest: patch.observationState === undefined ? undefined : sha256(canonicalize(patch.observationState)), artifactReferences, receiptReferences });
+    if (this.options.reporter !== undefined) {
+      try { this.options.reporter.queueDeploymentProjection(persisted, { subject: ownerPrincipal, authorityClass: 'owner', idempotencyKey: `github-report-${sha256(`${record.deploymentId}:${sequence + 1}`).slice(0, 40)}` }); } catch {}
+    }
+    return persisted;
   }
 
   private structuredError(error: unknown, fallbackCode: string, retryable: boolean, phase: string, productionImpact: 'NONE' | 'CANDIDATE_ONLY' | 'ROLLED_BACK' | 'ACTIVE_DEGRADED' | 'UNKNOWN'): JsonObject {

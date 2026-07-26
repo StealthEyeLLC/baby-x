@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
 
 const root = process.cwd();
-const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0 };
+const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, packagedAssets: [] };
 if (process.version !== 'v24.18.0') throw new Error(`Node.js 24.18.0 required, found ${process.version}`);
 rmSync(join(root, 'dist'), { recursive: true, force: true });
 
@@ -28,6 +28,12 @@ function walk(sourceRoot, destinationRoot) {
 }
 walk(join(root, 'runtime/src'), join(root, 'dist/runtime'));
 walk(join(root, 'gateway/src'), join(root, 'dist/gateway'));
+const launcherSource = join(root, 'runtime/scripts/babyx-credential-launcher.sh');
+const launcherDestination = join(root, 'dist/libexec/babyx-credential-launcher');
+mkdirSync(dirname(launcherDestination), { recursive: true });
+copyFileSync(launcherSource, launcherDestination);
+chmodSync(launcherDestination, 0o755);
+report.packagedAssets.push({ path: 'libexec/babyx-credential-launcher', mode: '0755' });
 
 const compiler = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v c++'], { encoding: 'utf8' }).stdout.trim();
 const includeCandidates = ['/opt/node-v24.18.0-linux-x64/include/node', '/usr/include/node'];

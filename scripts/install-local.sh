@@ -11,5 +11,12 @@ ln -sfn "$(readlink -f "$root/current" 2>/dev/null || true)" "$root/previous.tmp
 mv -Tf "$root/previous.tmp" "$root/previous" 2>/dev/null || true
 ln -sfn "$release" "$root/current.tmp"
 mv -Tf "$root/current.tmp" "$root/current"
-if [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]]; then cp ops/systemd/baby-x.service ops/systemd/baby-x.socket ops/systemd/baby-x-gateway.service /etc/systemd/system/; cp ops/tmpfiles/baby-x.conf /etc/tmpfiles.d/; systemd-tmpfiles --create /etc/tmpfiles.d/baby-x.conf; systemctl daemon-reload; systemctl restart baby-x.socket baby-x-gateway.service; fi
+if [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]]; then
+  BABY_X_RELEASE_PATH="$release" scripts/install-release-assets.sh
+  cp ops/systemd/baby-x.service ops/systemd/baby-x.socket ops/systemd/baby-x-gateway.service /etc/systemd/system/
+  cp ops/tmpfiles/baby-x.conf /etc/tmpfiles.d/
+  systemd-tmpfiles --create /etc/tmpfiles.d/baby-x.conf
+  systemctl daemon-reload
+  systemctl restart baby-x.socket baby-x-gateway.service
+fi
 scripts/verify-local.sh

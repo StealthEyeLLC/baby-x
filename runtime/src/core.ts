@@ -412,7 +412,7 @@ function toolAvailability(): JsonObject {
   return Object.fromEntries(names.map((name) => [name, executable(name)]));
 }
 
-export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; slotSystemdAdapter?: import('./release/slot.ts').SlotSystemdAdapter; }
+export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; slotSystemdAdapter?: import('./release/slot.ts').SlotSystemdAdapter; routeCaddyAdapter?: import('./release/route.ts').RouteCaddyAdapter; }
 
 export interface RuntimeExecutionContext { idempotencyKey?: string; subject?: string; authorityClass?: string; }
 
@@ -453,6 +453,7 @@ export class BabyXRuntime {
   private releaseCertificationServiceInstance?: import('./release/certification.ts').ReleaseCertificationService;
   private releaseStoreInstance?: import('./release/store.ts').ReleaseApplianceStore;
   private slotRuntimeServiceInstance?: import('./release/slot.ts').SlotRuntimeService;
+  private routeAuthorityServiceInstance?: import('./release/route.ts').RouteAuthorityService;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
@@ -537,6 +538,18 @@ export class BabyXRuntime {
     }
     return this.slotRuntimeServiceInstance;
   }
+  private async routeAuthorityService(): Promise<import('./release/route.ts').RouteAuthorityService> {
+    if (this.routeAuthorityServiceInstance === undefined) {
+      const { HostCaddyAdminAdapter, RouteAuthorityService } = await import('./release/route.ts');
+      const caddy = this.options.routeCaddyAdapter ?? new HostCaddyAdminAdapter({
+        adminEndpoint: 'http://127.0.0.1:2019/',
+        validationRoot: join(this.stateRoot, 'release-appliance', 'caddy-validation'),
+        liveActions: false,
+      });
+      this.routeAuthorityServiceInstance = new RouteAuthorityService({ stateRoot: this.stateRoot, store: await this.releaseStore(), artifacts: await this.artifactManager(), caddy });
+    }
+    return this.routeAuthorityServiceInstance;
+  }
   private async releaseCertificationService(): Promise<import('./release/certification.ts').ReleaseCertificationService> {
     if (this.releaseCertificationServiceInstance === undefined) {
       const { ReleaseCertificationService } = await import('./release/certification.ts');
@@ -573,6 +586,7 @@ export class BabyXRuntime {
       if (operation === 'babyx.release.service.list') return service.listServices(payload, context);
       return service.getSlot(payload, context);
     }
+    if (operation === 'babyx.release.route.get') return (await this.routeAuthorityService()).getRoute(payload, context);
     if (['babyx.release.certification.describe', 'babyx.release.certification.certify', 'babyx.release.certification.resume', 'babyx.release.certification.get', 'babyx.release.certification.list'].includes(operation)) {
       const service = await this.releaseCertificationService();
       if (operation === 'babyx.release.certification.describe') return service.describe();

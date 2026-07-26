@@ -226,6 +226,7 @@ babyx.release.capabilities
 babyx.release.service.get
 babyx.release.service.list
 babyx.release.slot.get
+babyx.release.route.get
 babyx.release.certification.describe
 babyx.release.certification.certify
 babyx.release.certification.resume
@@ -248,6 +249,10 @@ const exactReadInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   'babyx.release.slot.get': {
     type: 'object', additionalProperties: false, required: ['serviceId', 'slotId'],
     properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' }, slotId: { type: 'string', enum: ['blue', 'green'] } },
+  },
+  'babyx.release.route.get': {
+    type: 'object', additionalProperties: false, required: ['serviceId'],
+    properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' } },
   },
 });
 

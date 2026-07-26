@@ -10,7 +10,7 @@ import {
   parseRawGitDiff,
   validationExecutionDigest,
 } from '../../dist/runtime/transactions/code-schemas.js';
-import { codeTransactionPolicyDecision } from '../../dist/runtime/transactions/code-driver.js';
+import { codeTransactionAssertionStep, codeTransactionPolicyDecision } from '../../dist/runtime/transactions/code-driver.js';
 
 const transactionId = `tx_${'1'.repeat(32)}`;
 const baseCommit = 'a'.repeat(40);
@@ -123,9 +123,35 @@ test('disposable action and assertion helpers use Python rather than Node', () =
   assert.match(source, /const ACTION_SCRIPT = `import os/u);
   assert.match(source, /const ASSERTION_SCRIPT = `import os/u);
   assert.match(source, /\['\/usr\/bin\/python3', '-c', ACTION_SCRIPT/u);
-  assert.match(source, /argv: \['\/usr\/bin\/python3', '-c', ASSERTION_SCRIPT/u);
+  assert.match(source, /export function codeTransactionAssertionStep/u);
+  assert.match(source, /'\/usr\/bin\/python3',[\s\S]*'-c',[\s\S]*ASSERTION_SCRIPT/u);
   assert.doesNotMatch(source, /\['\/usr\/bin\/node', '-e', ACTION_SCRIPT/u);
   assert.doesNotMatch(source, /argv: \['\/usr\/bin\/node', '-e', ASSERTION_SCRIPT/u);
   assert.match(source, /action path traverses a symlinked parent/u);
   assert.match(source, /assertion path traverses a symlinked parent/u);
+});
+
+test('generated assertion argv is positionally unique for every strict assertion kind', () => {
+  const assertions = [
+    { assertionId: 'network', kind: 'NETWORK_DISABLED', path: null, expected: null },
+    { assertionId: 'credentials', kind: 'CREDENTIALS_ABSENT', path: null, expected: null },
+    { assertionId: 'tree', kind: 'TREE_EQUALS_BASE', path: null, expected: null },
+    { assertionId: 'exists', kind: 'PATH_EXISTS', path: 'docs/fixture.md', expected: null },
+    { assertionId: 'contains', kind: 'FILE_CONTAINS', path: 'docs/fixture.md', expected: 'expected-content' },
+  ];
+  for (const [index, assertion] of assertions.entries()) {
+    const step = codeTransactionAssertionStep(assertion, index);
+    assert.equal(new Set(step.argv).size, step.argv.length, `${assertion.kind} argv contains duplicates`);
+    assert.equal(step.argv[0], '/usr/bin/python3');
+    assert.equal(step.argv[1], '-c');
+    assert.equal(step.required, true);
+  }
+});
+
+test('generated action placeholders are positionally distinct', () => {
+  const source = readFileSync(new URL('../src/transactions/code-driver.ts', import.meta.url), 'utf8');
+  assert.match(source, /NO_OP_PATH_UNUSED/u);
+  assert.match(source, /NO_OP_OPERAND_UNUSED/u);
+  assert.match(source, /`\$\{action\.kind\}_OPERAND_UNUSED`/u);
+  assert.doesNotMatch(source, /'NO_OP', 'unused', 'unused'/u);
 });

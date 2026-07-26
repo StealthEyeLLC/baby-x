@@ -203,6 +203,26 @@ else:
     fail('unsupported assertion kind')
 `;
 
+export function codeTransactionAssertionStep(assertion: CodeAssertionV1, index: number): CodeValidationStepV1 {
+  return {
+    stepId: `assertion-${index}-${assertion.assertionId}`,
+    phase: 'assertion',
+    argv: [
+      '/usr/bin/python3',
+      '-c',
+      ASSERTION_SCRIPT,
+      SOURCE_ROOT,
+      assertion.kind,
+      assertion.path ?? `ASSERTION_PATH_UNUSED_${index}`,
+      assertion.expected ?? `ASSERTION_EXPECTED_UNUSED_${index}`,
+      assertion.kind === 'TREE_EQUALS_BASE' ? 'BASE_TREE' : `ASSERTION_BASE_TREE_UNUSED_${index}`,
+    ],
+    cwd: '.',
+    timeoutMs: 30_000,
+    required: true,
+  };
+}
+
 export interface CodeTransactionMachineAuthority {
   create(payload: unknown, context: RuntimeExecutionContext): Promise<JsonObject>;
   get(payload: JsonObject, context: RuntimeExecutionContext): JsonObject;
@@ -468,11 +488,11 @@ export class DisposableCodeTransactionDriver implements TransactionCodeDriver {
   }
 
   private actionArgv(record: DurableTransactionRecordV1, action: CodeExecutionActionV1): string[] {
-    if (action.kind === 'NO_OP') return ['/usr/bin/python3', '-c', ACTION_SCRIPT, SOURCE_ROOT, 'NO_OP', 'unused', 'unused'];
+    if (action.kind === 'NO_OP') return ['/usr/bin/python3', '-c', ACTION_SCRIPT, SOURCE_ROOT, 'NO_OP', 'NO_OP_PATH_UNUSED', 'NO_OP_OPERAND_UNUSED'];
     const operand = action.kind === 'WRITE_FILE' ? this.inputPath(record, action.contentArtifactId as string)
       : action.kind === 'SET_MODE' ? action.mode as string
       : action.kind === 'CREATE_SYMLINK' ? action.symlinkTarget as string
-      : 'unused';
+      : `${action.kind}_OPERAND_UNUSED`;
     return ['/usr/bin/python3', '-c', ACTION_SCRIPT, SOURCE_ROOT, action.kind, action.path as string, operand];
   }
 
@@ -508,11 +528,7 @@ export class DisposableCodeTransactionDriver implements TransactionCodeDriver {
   }
 
   private assertionStep(assertion: CodeAssertionV1, index: number): CodeValidationStepV1 {
-    return {
-      stepId: `assertion-${index}-${assertion.assertionId}`, phase: 'assertion',
-      argv: ['/usr/bin/python3', '-c', ASSERTION_SCRIPT, SOURCE_ROOT, assertion.kind, assertion.path ?? 'unused', assertion.expected ?? 'unused', assertion.kind === 'TREE_EQUALS_BASE' ? 'BASE_TREE' : 'unused'],
-      cwd: '.', timeoutMs: 30_000, required: true,
-    };
+    return codeTransactionAssertionStep(assertion, index);
   }
 
   private execution(record: DurableTransactionRecordV1, step: CodeValidationStepV1, job: JobRecord, artifactIds: string[]): CodeValidationExecutionV1 {

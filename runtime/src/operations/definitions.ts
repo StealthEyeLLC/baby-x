@@ -11,6 +11,7 @@ export interface OperationDefinition {
 const operations = `
 babyx.describe
 babyx.health
+babyx.core.compatibility
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -238,7 +239,9 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
     mutation: !readSuffixes.has(suffix),
-    input: { type: 'object', additionalProperties: true },
+    input: operation === 'babyx.core.compatibility'
+      ? { type: 'object', additionalProperties: false, properties: {} }
+      : { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };
 });

@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 export const COMPATIBILITY_MANIFEST_SCHEMA_VERSION = '1.0.0' as const;
 export const BABY_X_CORE_COMPATIBILITY_VERSION = '2.0.0' as const;
 export const OPERATION_CATALOG_VERSION = '2.0.0' as const;
-export const TRANSACTION_SCHEMA_VERSION = '1.0.0' as const;
+export const TRANSACTION_LEGACY_SCHEMA_VERSION = '1.0.0' as const;
+export const TRANSACTION_SCHEMA_VERSION = '1.1.0' as const;
 
 export type DurableSchemaDomain =
   | 'durableJob'
@@ -71,7 +72,7 @@ const manifestDraft = {
     certification: { current: '1.0.0', readable: ['1.0.0'], unknownNewer: 'reject' },
     executionPolicy: { current: '1.0.0', readable: ['1.0.0'], unknownNewer: 'reject' },
     candidateRacing: { current: '1.0.0', readable: ['1.0.0'], unknownNewer: 'reject' },
-    transaction: { current: TRANSACTION_SCHEMA_VERSION, readable: [TRANSACTION_SCHEMA_VERSION], unknownNewer: 'reject' },
+    transaction: { current: TRANSACTION_SCHEMA_VERSION, readable: [TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION], unknownNewer: 'reject' },
   },
   supportedProviderContracts: [
     { providerId: 'zfs-nspawn-disposable@1', contractVersion: '1.0.0', readableMachineSchemaVersions: ['1.0.0'] },

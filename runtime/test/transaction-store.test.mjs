@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DurableTransactionStore } from '../../dist/runtime/transactions/store.js';
-import { makeRecord, mutationDetails, tempRoot } from './_transaction-fixture.mjs';
+import { createRequest, makeRecord, mutationDetails, tempRoot } from './_transaction-fixture.mjs';
 
 function lease(record, overrides = {}) {
   return {
@@ -29,13 +29,10 @@ test('creation is idempotent and conflicting idempotency-key reuse is rejected',
   const replay = store.create(makeRecord({ transactionId: `tx_${'2'.repeat(32)}` }), mutationDetails({ operation: 'babyx.transaction.create', phase: 'request' }));
   assert.equal(replay.transactionId, first.transactionId);
   assert.throws(() => store.create(makeRecord({ transactionId: `tx_${'3'.repeat(32)}`, request: { ...makeRecord().source, repository: 'different' } }), mutationDetails()), /unsupported properties|idempotency/u);
-  const conflicting = makeRecord({ transactionId: `tx_${'3'.repeat(32)}`, request: {
-    schemaVersion: '1.0.0', transactionKind: 'CODE_MUTATION', repository: 'different/repository', commit: 'a'.repeat(40), tree: 'b'.repeat(40),
-    immutableSourceReference: 'artifact:source', sourceManifestDigest: '1'.repeat(64), protectedSnapshot: 'babycert/base/noble@golden-v1',
-    expectedSnapshotGuid: '9351137475418520293', snapshotCreationTxg: '53', policyDecisionDigest: '3'.repeat(64), selectedEnvironmentClass: 'disposable',
-    providerId: 'zfs-nspawn-disposable@1', providerVersion: '1.0.0', networkMode: 'none',
-    resourceBoundIdentity: { machineName: 'bxt-test0001', cloneDataset: 'babycert/certifications/tx-test0001', mountpoint: '/var/lib/baby-machines/tx-test0001', expectedRootPrefix: '/var/lib/baby-machines' },
-  } });
+  const conflicting = makeRecord({
+    transactionId: `tx_${'3'.repeat(32)}`,
+    request: createRequest({ repository: 'different/repository' }),
+  });
   assert.throws(() => store.create(conflicting, mutationDetails()), /idempotency key was already used/u);
 });
 

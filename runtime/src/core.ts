@@ -526,11 +526,15 @@ export class BabyXRuntime {
   private async transactionService(): Promise<import('./transactions/service.ts').TransactionService> {
     if (this.transactionServiceInstance === undefined) {
       const { TransactionService } = await import('./transactions/service.ts');
+      const { DisposableCodeTransactionDriver } = await import('./transactions/code-driver.ts');
+      const machine = await this.machineService();
+      const artifacts = await this.artifactManager();
       this.transactionServiceInstance = new TransactionService({
         stateRoot: this.stateRoot,
-        machine: await this.machineService(),
+        machine,
         jobs: this.jobs,
-        artifacts: await this.artifactManager(),
+        artifacts,
+        codeDriver: new DisposableCodeTransactionDriver({ stateRoot: this.stateRoot, machine, artifacts }),
       });
       this.transactionServiceInitializePromise = this.transactionServiceInstance.initialize().catch((error: unknown) => ({
         operation: 'babyx.transaction.reconcile', startup: true, processed: 0, deferred: true,

@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import { canonicalize, sha256, type JsonObject } from '../core.ts';
-import { TRANSACTION_SCHEMA_VERSION } from '../compatibility/manifest.ts';
-export { TRANSACTION_SCHEMA_VERSION };
+import { TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION } from '../compatibility/manifest.ts';
+import {
+  assertCodeMutationPlan,
+  codeMutationPlanDigest,
+  normalizeCodeMutationPlan,
+  type CodeMutationPlanV1,
+  type CodePathChangeV1,
+  type CodeValidationExecutionV1,
+} from './code-schemas.ts';
+export { TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION };
 
 export const TRANSACTION_EVENT_SCHEMA_VERSION = '1.0.0' as const;
 export const TRANSACTION_LEASE_SCHEMA_VERSION = '1.0.0' as const;
@@ -200,10 +208,17 @@ export interface TransactionCandidateBindingV1 extends JsonObject {
   baseTree: string;
   candidateTree: string | null;
   changedPaths: string[];
+  addedFiles: string[];
+  deletedFiles: string[];
+  modifiedFiles: string[];
+  fileModeChanges: string[];
+  symlinkChanges: string[];
+  pathChanges: CodePathChangeV1[];
   patchArtifactId: string | null;
   candidateArchiveArtifactId: string | null;
   candidateManifestArtifactId: string | null;
   validationDigest: string | null;
+  mutationPlanDigest: string;
   validationPassed: boolean;
 }
 
@@ -243,6 +258,14 @@ export interface TransactionEnvironmentBindingV1 extends JsonObject {
   credentialPresence: boolean;
 }
 
+export interface TransactionCodeBindingV1 extends JsonObject {
+  mutationPlan: CodeMutationPlanV1;
+  mutationPlanDigest: string;
+  materializationJobId: string | null;
+  candidateJobIds: string[];
+  validationExecutions: CodeValidationExecutionV1[];
+}
+
 export interface TransactionLifecycleV1 extends JsonObject {
   persistedState: TransactionState;
   desiredState: TransactionState;
@@ -254,7 +277,7 @@ export interface TransactionLifecycleV1 extends JsonObject {
 }
 
 export interface DurableTransactionRecordV1 extends JsonObject {
-  schemaVersion: typeof TRANSACTION_SCHEMA_VERSION;
+  schemaVersion: typeof TRANSACTION_SCHEMA_VERSION | typeof TRANSACTION_LEGACY_SCHEMA_VERSION;
   transactionId: string;
   transactionKind: TransactionKind;
   ownerPrincipal: string;
@@ -268,6 +291,7 @@ export interface DurableTransactionRecordV1 extends JsonObject {
   evidence: TransactionEvidenceBindingV1;
   cleanup: TransactionCleanupBindingV1;
   environment: TransactionEnvironmentBindingV1;
+  code: TransactionCodeBindingV1 | null;
   error: TransactionErrorBindingV1 | null;
 }
 
@@ -331,6 +355,7 @@ export interface TransactionCreateRequestV1 extends JsonObject {
   normalizedEnvironment?: { name: string; value: string }[];
   credentialReferenceIds?: string[];
   credentialPresence?: boolean;
+  mutationPlan: JsonObject;
 }
 
 function validateLifecycle(value: unknown): TransactionLifecycleV1 {
@@ -408,7 +433,7 @@ function validateExecution(value: unknown): TransactionExecutionBindingV1 {
   return { machineIds, activeJobIds, allRelatedJobIds, mutationJobIds, validationJobIds, jobTerminalityStatus, mutationSubmitted: bool(item.mutationSubmitted, 'execution.mutationSubmitted'), validationSubmitted: bool(item.validationSubmitted, 'execution.validationSubmitted') };
 }
 
-function validateCandidate(value: unknown, source: TransactionSourceBindingV1): TransactionCandidateBindingV1 {
+function validateLegacyCandidate(value: unknown, source: TransactionSourceBindingV1): TransactionCandidateBindingV1 {
   const item = object(value, 'candidate');
   exactKeys(item, 'candidate', ['candidateId', 'baseCommit', 'baseTree', 'candidateTree', 'changedPaths', 'patchArtifactId', 'candidateArchiveArtifactId', 'candidateManifestArtifactId', 'validationDigest', 'validationPassed']);
   const baseCommit = gitIdentity(item.baseCommit, 'candidate.baseCommit');
@@ -417,10 +442,47 @@ function validateCandidate(value: unknown, source: TransactionSourceBindingV1): 
   return {
     candidateId: nullableText(item.candidateId, 'candidate.candidateId', 256), baseCommit, baseTree,
     candidateTree: nullableGitIdentity(item.candidateTree, 'candidate.candidateTree'), changedPaths: relativePathArray(item.changedPaths, 'candidate.changedPaths'),
+    addedFiles: [], deletedFiles: [], modifiedFiles: [], fileModeChanges: [], symlinkChanges: [], pathChanges: [],
     patchArtifactId: nullableText(item.patchArtifactId, 'candidate.patchArtifactId', 256),
     candidateArchiveArtifactId: nullableText(item.candidateArchiveArtifactId, 'candidate.candidateArchiveArtifactId', 256),
     candidateManifestArtifactId: nullableText(item.candidateManifestArtifactId, 'candidate.candidateManifestArtifactId', 256),
-    validationDigest: nullableDigest(item.validationDigest, 'candidate.validationDigest'), validationPassed: bool(item.validationPassed, 'candidate.validationPassed'),
+    validationDigest: nullableDigest(item.validationDigest, 'candidate.validationDigest'), mutationPlanDigest: '0'.repeat(64),
+    validationPassed: bool(item.validationPassed, 'candidate.validationPassed'),
+  };
+}
+
+function validateCandidate(value: unknown, source: TransactionSourceBindingV1): TransactionCandidateBindingV1 {
+  const item = object(value, 'candidate');
+  exactKeys(item, 'candidate', ['candidateId', 'baseCommit', 'baseTree', 'candidateTree', 'changedPaths', 'addedFiles', 'deletedFiles', 'modifiedFiles', 'fileModeChanges', 'symlinkChanges', 'pathChanges', 'patchArtifactId', 'candidateArchiveArtifactId', 'candidateManifestArtifactId', 'validationDigest', 'mutationPlanDigest', 'validationPassed']);
+  const baseCommit = gitIdentity(item.baseCommit, 'candidate.baseCommit');
+  const baseTree = gitIdentity(item.baseTree, 'candidate.baseTree');
+  if (baseCommit !== source.commit || baseTree !== source.tree) invalid('candidate base identity must equal the immutable source identity');
+  if (!Array.isArray(item.pathChanges) || item.pathChanges.length > 100_000) invalid('candidate.pathChanges must be a bounded array');
+  const pathChanges = item.pathChanges.map((entry, index) => {
+    const change = object(entry, `candidate.pathChanges[${index}]`);
+    exactKeys(change, `candidate.pathChanges[${index}]`, ['path', 'status', 'oldMode', 'newMode', 'oldObject', 'newObject', 'symlinkChanged']);
+    const status = text(change.status, `candidate.pathChanges[${index}].status`) as CodePathChangeV1['status'];
+    if (!['added', 'deleted', 'modified', 'type-changed'].includes(status)) invalid('candidate path-change status is unsupported');
+    return {
+      path: relativePath(change.path, `candidate.pathChanges[${index}].path`), status,
+      oldMode: text(change.oldMode, `candidate.pathChanges[${index}].oldMode`, 16), newMode: text(change.newMode, `candidate.pathChanges[${index}].newMode`, 16),
+      oldObject: text(change.oldObject, `candidate.pathChanges[${index}].oldObject`, 64), newObject: text(change.newObject, `candidate.pathChanges[${index}].newObject`, 64),
+      symlinkChanged: bool(change.symlinkChanged, `candidate.pathChanges[${index}].symlinkChanged`),
+    };
+  });
+  const changedPaths = relativePathArray(item.changedPaths, 'candidate.changedPaths');
+  if (canonicalize(changedPaths) !== canonicalize(pathChanges.map((entry) => entry.path))) invalid('candidate changed paths must exactly match pathChanges');
+  return {
+    candidateId: nullableText(item.candidateId, 'candidate.candidateId', 256), baseCommit, baseTree,
+    candidateTree: nullableGitIdentity(item.candidateTree, 'candidate.candidateTree'), changedPaths,
+    addedFiles: relativePathArray(item.addedFiles, 'candidate.addedFiles'), deletedFiles: relativePathArray(item.deletedFiles, 'candidate.deletedFiles'),
+    modifiedFiles: relativePathArray(item.modifiedFiles, 'candidate.modifiedFiles'), fileModeChanges: relativePathArray(item.fileModeChanges, 'candidate.fileModeChanges'),
+    symlinkChanges: relativePathArray(item.symlinkChanges, 'candidate.symlinkChanges'), pathChanges,
+    patchArtifactId: nullableText(item.patchArtifactId, 'candidate.patchArtifactId', 256),
+    candidateArchiveArtifactId: nullableText(item.candidateArchiveArtifactId, 'candidate.candidateArchiveArtifactId', 256),
+    candidateManifestArtifactId: nullableText(item.candidateManifestArtifactId, 'candidate.candidateManifestArtifactId', 256),
+    validationDigest: nullableDigest(item.validationDigest, 'candidate.validationDigest'), mutationPlanDigest: digest(item.mutationPlanDigest, 'candidate.mutationPlanDigest'),
+    validationPassed: bool(item.validationPassed, 'candidate.validationPassed'),
   };
 }
 
@@ -467,6 +529,41 @@ function validateEnvironment(value: unknown): TransactionEnvironmentBindingV1 {
   return { normalizedValues, normalizedDigest, credentialReferenceIds: stringArray(item.credentialReferenceIds, 'environment.credentialReferenceIds'), credentialPresence: bool(item.credentialPresence, 'environment.credentialPresence') };
 }
 
+function validateCode(value: unknown, transactionId: string, source: TransactionSourceBindingV1): TransactionCodeBindingV1 {
+  const item = object(value, 'code');
+  exactKeys(item, 'code', ['mutationPlan', 'mutationPlanDigest', 'materializationJobId', 'candidateJobIds', 'validationExecutions']);
+  const mutationPlan = assertCodeMutationPlan(item.mutationPlan);
+  if (mutationPlan.transactionId !== transactionId || mutationPlan.baseCommit !== source.commit || mutationPlan.baseTree !== source.tree) invalid('code mutation plan identity conflicts with transaction source');
+  const mutationPlanDigest = digest(item.mutationPlanDigest, 'code.mutationPlanDigest');
+  if (mutationPlanDigest !== codeMutationPlanDigest(mutationPlan)) invalid('code mutation plan digest is invalid');
+  if (!Array.isArray(item.validationExecutions) || item.validationExecutions.length > 64) invalid('code.validationExecutions must be a bounded array');
+  const validationExecutions = item.validationExecutions.map((entry, index) => {
+    const execution = object(entry, `code.validationExecutions[${index}]`);
+    exactKeys(execution, `code.validationExecutions[${index}]`, ['stepId', 'phase', 'jobId', 'executionPlanDigest', 'argv', 'startedAt', 'completedAt', 'status', 'exitCode', 'signal', 'artifactIds', 'receiptReferences']);
+    const status = text(execution.status, `code.validationExecutions[${index}].status`) as CodeValidationExecutionV1['status'];
+    if (!['passed', 'failed', 'lost', 'ambiguous'].includes(status)) invalid('code validation execution status is unsupported');
+    const exitCode = execution.exitCode === null ? null : integer(execution.exitCode, `code.validationExecutions[${index}].exitCode`);
+    return {
+      stepId: text(execution.stepId, `code.validationExecutions[${index}].stepId`, 128),
+      phase: text(execution.phase, `code.validationExecutions[${index}].phase`, 64) as CodeValidationExecutionV1['phase'],
+      jobId: text(execution.jobId, `code.validationExecutions[${index}].jobId`, 256),
+      executionPlanDigest: digest(execution.executionPlanDigest, `code.validationExecutions[${index}].executionPlanDigest`),
+      argv: stringArray(execution.argv, `code.validationExecutions[${index}].argv`, 128),
+      startedAt: timestamp(execution.startedAt, `code.validationExecutions[${index}].startedAt`),
+      completedAt: timestamp(execution.completedAt, `code.validationExecutions[${index}].completedAt`), status, exitCode,
+      signal: execution.signal === null ? null : text(execution.signal, `code.validationExecutions[${index}].signal`, 64),
+      artifactIds: stringArray(execution.artifactIds, `code.validationExecutions[${index}].artifactIds`),
+      receiptReferences: stringArray(execution.receiptReferences, `code.validationExecutions[${index}].receiptReferences`),
+    };
+  });
+  return {
+    mutationPlan, mutationPlanDigest,
+    materializationJobId: item.materializationJobId === null ? null : text(item.materializationJobId, 'code.materializationJobId', 256),
+    candidateJobIds: stringArray(item.candidateJobIds, 'code.candidateJobIds'),
+    validationExecutions,
+  };
+}
+
 function validateError(value: unknown): TransactionErrorBindingV1 | null {
   if (value === null) return null;
   const item = object(value, 'error');
@@ -486,17 +583,22 @@ export function newTransactionId(): string {
 
 export function assertTransactionRecord(value: unknown): DurableTransactionRecordV1 {
   const item = object(value, 'transaction');
-  exactKeys(item, 'transaction', ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'error']);
-  if (item.schemaVersion !== TRANSACTION_SCHEMA_VERSION) invalid('transaction schema version is unsupported', { schemaVersion: item.schemaVersion });
+  const legacy = item.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION;
+  const current = item.schemaVersion === TRANSACTION_SCHEMA_VERSION;
+  if (!legacy && !current) invalid('transaction schema version is unsupported', { schemaVersion: item.schemaVersion });
+  exactKeys(item, 'transaction', legacy
+    ? ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'error']
+    : ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'code', 'error']);
   const transactionKind = text(item.transactionKind, 'transactionKind') as TransactionKind;
   if (!TRANSACTION_KINDS.includes(transactionKind)) invalid('transaction kind is unsupported', { transactionKind });
   const source = validateSource(item.source);
   const record: DurableTransactionRecordV1 = {
-    schemaVersion: TRANSACTION_SCHEMA_VERSION, transactionId: assertTransactionId(item.transactionId), transactionKind,
+    schemaVersion: legacy ? TRANSACTION_LEGACY_SCHEMA_VERSION : TRANSACTION_SCHEMA_VERSION, transactionId: assertTransactionId(item.transactionId), transactionKind,
     ownerPrincipal: text(item.ownerPrincipal, 'ownerPrincipal', 512), creationRequestDigest: digest(item.creationRequestDigest, 'creationRequestDigest'),
     idempotencyKey: text(item.idempotencyKey, 'idempotencyKey', 256), lifecycle: validateLifecycle(item.lifecycle), source,
-    policy: validatePolicy(item.policy), execution: validateExecution(item.execution), candidate: validateCandidate(item.candidate, source),
-    evidence: validateEvidence(item.evidence), cleanup: validateCleanup(item.cleanup), environment: validateEnvironment(item.environment), error: validateError(item.error),
+    policy: validatePolicy(item.policy), execution: validateExecution(item.execution), candidate: legacy ? validateLegacyCandidate(item.candidate, source) : validateCandidate(item.candidate, source),
+    evidence: validateEvidence(item.evidence), cleanup: validateCleanup(item.cleanup), environment: validateEnvironment(item.environment),
+    code: legacy ? null : validateCode(item.code, assertTransactionId(item.transactionId), source), error: validateError(item.error),
   };
   assertTransactionStateInvariants(record);
   return record;
@@ -505,6 +607,7 @@ export function assertTransactionRecord(value: unknown): DurableTransactionRecor
 export function assertTransactionStateInvariants(record: DurableTransactionRecordV1): void {
   if (record.lifecycle.persistedState === 'COMMITTED') {
     if (!record.candidate.validationPassed || record.candidate.candidateTree === null || record.candidate.candidateManifestArtifactId === null || record.candidate.validationDigest === null) invalid('COMMITTED requires a durable validated candidate tree and manifest');
+    if (record.schemaVersion === TRANSACTION_SCHEMA_VERSION && (record.candidate.patchArtifactId === null || record.candidate.candidateArchiveArtifactId === null)) invalid('V2-C COMMITTED requires complete candidate artifacts');
     if (record.execution.activeJobIds.length > 0 || record.execution.jobTerminalityStatus !== 'all-terminal') invalid('COMMITTED requires all related jobs terminal');
     if (!record.cleanup.completed) invalid('COMMITTED requires completed positive cleanup');
     if (record.evidence.finalEvidenceIndexArtifactId === null || record.evidence.finalEvidenceIndexDigest === null || record.evidence.eventTailDigest === null) invalid('COMMITTED requires complete evidence');
@@ -520,12 +623,24 @@ export function assertTransactionTransition(prior: TransactionState, next: Trans
 }
 
 export function transactionRecordDigest(record: DurableTransactionRecordV1): string {
+  if (record.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION) {
+    const { code: _code, candidate, ...rest } = record;
+    const legacyCandidate = {
+      candidateId: candidate.candidateId, baseCommit: candidate.baseCommit, baseTree: candidate.baseTree,
+      candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, patchArtifactId: candidate.patchArtifactId,
+      candidateArchiveArtifactId: candidate.candidateArchiveArtifactId, candidateManifestArtifactId: candidate.candidateManifestArtifactId,
+      validationDigest: candidate.validationDigest, validationPassed: candidate.validationPassed,
+    };
+    const legacy = { ...rest, candidate: legacyCandidate };
+    assertTransactionRecord(legacy);
+    return sha256(canonicalize(legacy));
+  }
   return sha256(canonicalize(assertTransactionRecord(record)));
 }
 
 export function normalizeTransactionCreateRequest(value: unknown, ownerPrincipal: string, idempotencyKey: string): TransactionCreateRequestV1 {
   const item = object(value, 'create request');
-  const allowed = ['schemaVersion', 'transactionKind', 'repository', 'branch', 'commit', 'tree', 'sourceArchiveArtifactId', 'immutableSourceReference', 'sourceManifestDigest', 'packageLockDigest', 'protectedSnapshot', 'expectedSnapshotGuid', 'snapshotCreationTxg', 'policyDecisionDigest', 'selectedEnvironmentClass', 'providerId', 'providerVersion', 'networkMode', 'resourceBoundIdentity', 'normalizedEnvironment', 'credentialReferenceIds', 'credentialPresence'];
+  const allowed = ['schemaVersion', 'transactionKind', 'repository', 'branch', 'commit', 'tree', 'sourceArchiveArtifactId', 'immutableSourceReference', 'sourceManifestDigest', 'packageLockDigest', 'protectedSnapshot', 'expectedSnapshotGuid', 'snapshotCreationTxg', 'policyDecisionDigest', 'selectedEnvironmentClass', 'providerId', 'providerVersion', 'networkMode', 'resourceBoundIdentity', 'normalizedEnvironment', 'credentialReferenceIds', 'credentialPresence', 'mutationPlan'];
   const unknown = Object.keys(item).filter((key) => !allowed.includes(key));
   if (unknown.length > 0) throw new TransactionError('transaction_invalid_request', 'create request contains unsupported properties', { properties: unknown });
   if (item.schemaVersion !== TRANSACTION_SCHEMA_VERSION) throw new TransactionError('transaction_invalid_request', 'transaction schema version is unsupported');
@@ -541,13 +656,17 @@ export function normalizeTransactionCreateRequest(value: unknown, ownerPrincipal
     return { name, value: text(pair.value, `normalizedEnvironment[${index}].value`, 4096) };
   }).sort((left, right) => left.name.localeCompare(right.name));
   if (new Set(normalizedValues.map((entry) => entry.name)).size !== normalizedValues.length) throw new TransactionError('transaction_invalid_request', 'normalized environment names must be unique');
+  const normalizedCommit = gitIdentity(item.commit, 'commit');
+  const normalizedTree = gitIdentity(item.tree, 'tree');
+  const normalizedPlan = normalizeCodeMutationPlan(item.mutationPlan, 'tx_pending0000000000000000', normalizedCommit, normalizedTree);
+  const mutationPlan = Object.fromEntries(Object.entries(normalizedPlan).filter(([key]) => key !== 'transactionId')) as JsonObject;
   const policy = validatePolicy({
     policyDecisionDigest: item.policyDecisionDigest, selectedEnvironmentClass: item.selectedEnvironmentClass,
     providerId: item.providerId, providerVersion: item.providerVersion, networkMode: item.networkMode, resourceBoundIdentity: item.resourceBoundIdentity,
   });
   return {
     schemaVersion: TRANSACTION_SCHEMA_VERSION, transactionKind, repository: text(item.repository, 'repository', 1024),
-    ...(item.branch === undefined ? {} : { branch: text(item.branch, 'branch', 1024) }), commit: gitIdentity(item.commit, 'commit'), tree: gitIdentity(item.tree, 'tree'),
+    ...(item.branch === undefined ? {} : { branch: text(item.branch, 'branch', 1024) }), commit: normalizedCommit, tree: normalizedTree,
     ...(item.sourceArchiveArtifactId === undefined ? {} : { sourceArchiveArtifactId: text(item.sourceArchiveArtifactId, 'sourceArchiveArtifactId', 256) }),
     immutableSourceReference: text(item.immutableSourceReference, 'immutableSourceReference', 2048), sourceManifestDigest: digest(item.sourceManifestDigest, 'sourceManifestDigest'),
     ...(item.packageLockDigest === undefined ? {} : { packageLockDigest: digest(item.packageLockDigest, 'packageLockDigest') }),
@@ -557,6 +676,7 @@ export function normalizeTransactionCreateRequest(value: unknown, ownerPrincipal
     resourceBoundIdentity: policy.resourceBoundIdentity, normalizedEnvironment: normalizedValues,
     credentialReferenceIds: item.credentialReferenceIds === undefined ? [] : stringArray(item.credentialReferenceIds, 'credentialReferenceIds'),
     credentialPresence: item.credentialPresence === undefined ? false : bool(item.credentialPresence, 'credentialPresence'),
+    mutationPlan,
   };
 }
 
@@ -582,12 +702,18 @@ export function initialTransactionRecord(request: TransactionCreateRequestV1, ow
       providerId: request.providerId, providerVersion: request.providerVersion, networkMode: 'none', resourceBoundIdentity: structuredClone(request.resourceBoundIdentity),
     },
     execution: { machineIds: [], activeJobIds: [], allRelatedJobIds: [], mutationJobIds: [], validationJobIds: [], jobTerminalityStatus: 'not-observed', mutationSubmitted: false, validationSubmitted: false },
-    candidate: { candidateId: null, baseCommit: request.commit, baseTree: request.tree, candidateTree: null, changedPaths: [], patchArtifactId: null, candidateArchiveArtifactId: null, candidateManifestArtifactId: null, validationDigest: null, validationPassed: false },
+    candidate: { candidateId: null, baseCommit: request.commit, baseTree: request.tree, candidateTree: null, changedPaths: [], addedFiles: [], deletedFiles: [], modifiedFiles: [], fileModeChanges: [], symlinkChanges: [], pathChanges: [], patchArtifactId: null, candidateArchiveArtifactId: null, candidateManifestArtifactId: null, validationDigest: null, mutationPlanDigest: '0'.repeat(64), validationPassed: false },
     evidence: { artifactIds: [], receiptReferences: [], eventTailDigest: null, finalEvidenceIndexArtifactId: null, finalEvidenceIndexDigest: null },
     cleanup: { required: false, requested: false, completed: false, machineAbsenceVerified: false, processAbsenceVerified: false, mountAbsenceVerified: false, rootPathAbsenceVerified: false, datasetAbsenceVerified: false, sourcePreserved: false, completedAt: null },
     environment: { normalizedValues, normalizedDigest: sha256(canonicalize(normalizedValues)), credentialReferenceIds: request.credentialReferenceIds ?? [], credentialPresence: request.credentialPresence ?? false },
+    code: (() => {
+      const mutationPlan = normalizeCodeMutationPlan(request.mutationPlan, transactionId, request.commit, request.tree);
+      const mutationPlanDigest = codeMutationPlanDigest(mutationPlan);
+      return { mutationPlan, mutationPlanDigest, materializationJobId: null, candidateJobIds: [], validationExecutions: [] };
+    })(),
     error: null,
   };
+  record.candidate.mutationPlanDigest = record.code.mutationPlanDigest;
   return assertTransactionRecord(record);
 }
 

@@ -240,3 +240,66 @@ test('status is a read-only derivation and reports unknown child truth without m
   assert.equal(after.lifecycle.stateSequence, before.lifecycle.stateSequence);
   assert.deepEqual(after, before);
 });
+
+test('public rollback recovers a response-loss transaction through the single canonical cleanup path', async (t) => {
+  const harness = makeHarness(t);
+  harness.codeDriver.fail.execute = new Error('simulated response loss before child adoption');
+  const created = createVia(harness.service);
+  const uncertain = await execute(harness, created, 'execute-response-loss-for-rollback-0001');
+  const recovery = tx(uncertain);
+  const preservedError = structuredClone(recovery.error);
+
+  assert.equal(recovery.lifecycle.persistedState, 'RECOVERY_REQUIRED');
+  assert.equal(recovery.lifecycle.desiredState, 'COMMITTED');
+  assert.equal(recovery.cleanup.requested, false);
+  assert.equal(harness.machine.destroyCalls.length, 0);
+
+  const payload = {
+    transactionId: recovery.transactionId,
+    expectedSequence: recovery.lifecycle.stateSequence,
+    reason: 'owner requested rollback after execution response loss',
+  };
+
+  await assert.rejects(
+    () => harness.service.rollback(payload, context('owner-b', 'rollback-response-loss-wrong-owner-0001')),
+    /wrong_principal|does not own/u,
+  );
+  await assert.rejects(
+    () => harness.service.rollback({ ...payload, expectedSequence: payload.expectedSequence - 1 }, context('owner-a', 'rollback-response-loss-stale-sequence-0001')),
+    /expected sequence does not match/u,
+  );
+
+  const rolledBack = await harness.service.rollback(payload, context('owner-a', 'rollback-response-loss-0001'));
+  const durable = tx(rolledBack);
+  assert.equal(durable.lifecycle.persistedState, 'ROLLED_BACK');
+  assert.equal(durable.lifecycle.desiredState, 'ROLLED_BACK');
+  assert.equal(durable.lifecycle.terminal, true);
+  assert.equal(durable.cleanup.requested, true);
+  assert.equal(durable.cleanup.completed, true);
+  assert.equal(durable.cleanup.machineAbsenceVerified, true);
+  assert.equal(durable.cleanup.processAbsenceVerified, true);
+  assert.equal(durable.cleanup.mountAbsenceVerified, true);
+  assert.equal(durable.cleanup.rootPathAbsenceVerified, true);
+  assert.equal(durable.cleanup.datasetAbsenceVerified, true);
+  assert.deepEqual(durable.error, preservedError);
+  assert.equal(harness.machine.destroyCalls.length, 1);
+
+  const events = harness.service.store.events(durable.transactionId, 0, 100);
+  for (let index = 0; index < events.length; index += 1) {
+    assert.equal(events[index].nextSequence, index + 1);
+    assert.equal(events[index].priorSequence, index);
+    if (index > 0) assert.equal(events[index].previousEventDigest, events[index - 1].eventDigest);
+  }
+  assert.ok(events.some((event) => event.priorState === 'RECOVERY_REQUIRED' && event.nextState === 'ROLLBACK_REQUESTED'));
+  assert.ok(events.some((event) => event.priorState === 'ROLLBACK_REQUESTED' && event.nextState === 'ROLLING_BACK'));
+  assert.equal(events.at(-1).nextState, 'ROLLED_BACK');
+
+  const replay = await harness.service.rollback(payload, context('owner-a', 'rollback-response-loss-0001'));
+  assert.equal(replay.replayed, true);
+  assert.equal(tx(replay).lifecycle.persistedState, 'ROLLED_BACK');
+  assert.equal(harness.machine.destroyCalls.length, 1);
+  await assert.rejects(
+    () => harness.service.rollback({ ...payload, reason: 'conflicting rollback request' }, context('owner-a', 'rollback-response-loss-0001')),
+    /idempotency key was reused/u,
+  );
+});

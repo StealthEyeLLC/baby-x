@@ -194,8 +194,26 @@ function contextFor(record: DurableTransactionRecordV1, suffix: string): Runtime
   return { subject: record.ownerPrincipal, authorityClass: 'unrestricted-owner', idempotencyKey: `transaction:${record.transactionId}:${suffix}` };
 }
 
-function binding(record: DurableTransactionRecordV1, phase: 'materialization' | 'mutation' | 'validation' | 'candidate', stepId: string): JsonObject {
-  return { transactionId: record.transactionId, ownerPrincipal: record.ownerPrincipal, phase, stepId, planDigest: record.code.mutationPlanDigest };
+export function codeTransactionMachineExecutionRequest(
+  record: DurableTransactionRecordV1,
+  machine: JsonObject,
+  phase: 'materialization' | 'mutation' | 'validation' | 'candidate',
+  stepId: string,
+  argv: string[],
+  cwd: string,
+  timeoutMs: number,
+): JsonObject {
+  return {
+    machineId: machine.machineId,
+    expectedSequence: lifecycle(machine).sequence,
+    argv,
+    cwd,
+    env: {},
+    timeoutMs,
+    outputLimitBytes: record.code.mutationPlan.resourceBounds.outputLimitBytes,
+    artifactPolicy: { captureStreams: true },
+    reason: `code transaction ${record.transactionId} ${phase} ${stepId}`,
+  };
 }
 
 function artifactMetadata(record: DurableTransactionRecordV1, role: string): JsonObject {
@@ -325,12 +343,10 @@ export class DisposableCodeTransactionDriver implements TransactionCodeDriver {
   }
 
   private async submit(record: DurableTransactionRecordV1, machine: JsonObject, phase: 'materialization' | 'mutation' | 'validation' | 'candidate', stepId: string, argv: string[], cwd: string, timeoutMs: number): Promise<{ machine: JsonObject; job: JobRecord }> {
-    const response = await this.options.machine.exec({
-      machineId: machine.machineId, expectedSequence: lifecycle(machine).sequence, argv, cwd, env: {},
-      timeoutMs, outputLimitBytes: record.code.mutationPlan.resourceBounds.outputLimitBytes,
-      artifactPolicy: { captureStreams: true }, transactionBinding: binding(record, phase, stepId),
-      reason: `code transaction ${record.transactionId} ${phase} ${stepId}`,
-    }, contextFor(record, `${phase}:${stepId}`));
+    const response = await this.options.machine.exec(
+      codeTransactionMachineExecutionRequest(record, machine, phase, stepId, argv, cwd, timeoutMs),
+      contextFor(record, `${phase}:${stepId}`),
+    );
     const jobId = String(response.jobId);
     const job = await this.waitJob(jobId, timeoutMs);
     const settled = await this.waitMachineSettled(record, jobId);

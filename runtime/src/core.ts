@@ -851,6 +851,11 @@ export class BabyXRuntime {
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
+    if (operation === 'babyx.core.compatibility') {
+      if (Object.keys(payload).length > 0) throw new Error('babyx.core.compatibility does not accept input');
+      const compatibility = await import('./compatibility/manifest.ts');
+      return compatibility.describeCoreCompatibility({ currentSourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? null, currentSourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? null });
+    }
     if (operation === 'babyx.health') return this.health();
     if (operation.startsWith('babyx.root.')) {
       const service = await this.rootAuthorityService();

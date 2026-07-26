@@ -24,6 +24,7 @@ export interface OperationDefinition {
 const operations = `
 babyx.describe
 babyx.health
+babyx.core.compatibility
 babyx.root.describe
 babyx.root.transaction.create
 babyx.root.transaction.get
@@ -394,6 +395,7 @@ function rootSchema(operation: string): Record<string, unknown> {
 }
 
 function schemaFor(operation: string): Record<string, unknown> {
+  if (operation === 'babyx.core.compatibility') return objectSchema({});
   if (operation.startsWith('babyx.root.')) return rootSchema(operation);
   if (operation === 'babyx.describe' || operation === 'babyx.health' || operation.endsWith('.describe')) return objectSchema({});
   if (operation === 'babyx.exec') return objectSchema({ argv: stringArray, cwd: stringValue, env: jsonObject, target: jsonObject, timeoutMs: positiveInteger }, ['argv']);
@@ -491,7 +493,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.4.0';
+export const OPERATION_CATALOG_VERSION = '3.5.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

@@ -88,7 +88,7 @@ export const CERTIFICATION_STATES = [
   'SUCCEEDED', 'FAILED', 'PRESERVED', 'RECOVERY_REQUIRED', 'AMBIGUOUS',
 ] as const;
 
-const failureCodes = [
+export const RELEASE_FAILURE_CODES = [
   'release_invalid_request', 'release_wrong_principal', 'release_stale_sequence', 'release_idempotency_conflict',
   'release_capacity_insufficient', 'release_source_unresolved', 'release_source_mismatch', 'release_cache_corrupt',
   'release_build_failed', 'release_artifact_invalid', 'release_certification_failed', 'release_certification_stale',
@@ -108,7 +108,7 @@ const structuredError = (): ReleaseFieldSchema => ({
   kind: 'object',
   additionalProperties: false,
   properties: {
-    code: enumField(failureCodes, true),
+    code: enumField(RELEASE_FAILURE_CODES, true),
     message: stringField(true),
     retryable: booleanField(true),
     phase: stringField(false, 'identifier'),
@@ -198,14 +198,23 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
   DeploymentRecordV1: schema('DeploymentRecordV1', {
     deploymentId: stringField(true, 'identifier'), deploymentKind: enumField(['APPLICATION_RELEASE'], true), ownerPrincipal: stringField(true, 'identifier'),
     idempotencyKey: stringField(true, 'identifier'), creationRequestDigest: stringField(true, 'digest'), serviceId: stringField(true, 'identifier'), serviceDefinitionDigest: stringField(true, 'digest'),
-    triggerSource: enumField(['MANUAL', 'GITHUB', 'SCHEDULED', 'RECONCILIATION'], true), triggerIdentity: jsonField(true), sourceIdentity: referenceField('SourceIdentityV1'),
-    buildId: stringField(), artifactId: stringField(), certificationId: stringField(), releaseId: stringField(), slotId: enumField(['blue', 'green']), routeId: stringField(),
+    triggerSource: enumField(['MANUAL', 'GITHUB', 'SCHEDULED', 'RECONCILIATION'], true), triggerIdentity: jsonField(true), normalizedRequest: jsonField(true),
+    controllerLeaseId: stringField(), controllerLeaseObservationDigest: stringField(false, 'digest'), pendingEffect: jsonField(), recoveryFromState: enumField(DEPLOYMENT_STATES), recoveryResolution: jsonField(),
+    sourceIdentity: referenceField('SourceIdentityV1'), sourceManifest: jsonField(), sourceEpoch: integerField(), sourceReceiptReferences: stringArray(),
+    buildId: stringField(), artifactId: stringField(), artifact: jsonField(), artifactManifest: jsonField(), artifactReused: booleanField(), artifactReceiptReferences: stringArray(),
+    certificationId: stringField(), certification: jsonField(), releaseId: stringField(), releaseRecord: jsonField(), materialization: jsonField(),
+    slotId: enumField(['blue', 'green']), slotRecord: jsonField(), privateReadiness: jsonField(), routeId: stringField(), routeRecord: jsonField(), routeMode: enumField(['DIRECT', 'CANARY', 'SHADOW', 'PREVIEW']),
+    candidateRouteDigest: stringField(false, 'digest'), priorRouteDigest: stringField(false, 'digest'), routeLeaseId: stringField(), priorRouteReadback: jsonField(), observedLiveReleaseId: stringField(),
     state: enumField(DEPLOYMENT_STATES, true), desiredState: enumField(DEPLOYMENT_STATES, true), sequence: integerField(true), createdAt: stringField(true, 'timestamp'),
-    updatedAt: stringField(true, 'timestamp'), completedAt: stringField(false, 'timestamp'), approvalPolicy: jsonField(true), approvalEvidence: objectArray(),
-    activeJobIds: stringArray(true), allJobIds: stringArray(true), machineIds: stringArray(true), observationPolicy: jsonField(true), observationResults: objectArray(),
-    priorKnownGoodReleaseId: stringField(), priorKnownGoodSlotId: enumField(['blue', 'green']), rollbackTarget: jsonField(), rollbackStatus: jsonField(), drainStatus: jsonField(),
-    cleanup: jsonField(true), capacityAdmissionSnapshotId: stringField(true, 'identifier'), credentialSetDigest: stringField(true, 'digest'), githubInboxIds: stringArray(), githubOutboxIds: stringArray(),
-    eventTailDigest: stringField(false, 'digest'), artifactReferences: objectArray(), receiptReferences: stringArray(), evidenceIndexId: stringField(), error: structuredError(),
+    updatedAt: stringField(true, 'timestamp'), completedAt: stringField(false, 'timestamp'), approvalPolicy: jsonField(true), approvalEvidence: objectArray(), approvalDigest: stringField(false, 'digest'), schedule: jsonField(),
+    activeJobIds: stringArray(true), allJobIds: stringArray(true), machineIds: stringArray(true), observationPolicy: jsonField(true), observationResults: objectArray(), observationState: jsonField(),
+    observationStartedAt: stringField(false, 'timestamp'), observationCompletedAt: stringField(false, 'timestamp'),
+    priorKnownGoodReleaseId: stringField(), priorKnownGoodSlotId: enumField(['blue', 'green']), rollbackTarget: jsonField(), rollbackStatus: jsonField(), rollbackObservation: jsonField(), routeRestored: booleanField(),
+    drainStatus: jsonField(), cleanup: jsonField(true), terminalIntent: enumField(['ROLLED_BACK', 'FAILED', 'CANCELLED', 'EXPIRED']), cancellation: jsonField(), expiration: jsonField(),
+    capacityAdmissionSnapshotId: stringField(true, 'identifier'), credentialSetDigest: stringField(true, 'digest'), githubInboxIds: stringArray(), githubOutboxIds: stringArray(),
+    groupContract: jsonField(), groupResult: jsonField(), migrationContract: jsonField(), migrationResult: jsonField(), noopPromotion: booleanField(),
+    eventTailDigest: stringField(false, 'digest'), artifactReferences: objectArray(), receiptReferences: stringArray(), evidenceIndexId: stringField(), evidenceIndexDigest: stringField(false, 'digest'),
+    finalProof: jsonField(), successEvidence: jsonField(), failureClass: stringField(), ambiguity: jsonField(), error: structuredError(),
   }),
   ObservationRecordV1: schema('ObservationRecordV1', {
     observationId: stringField(true, 'identifier'), deploymentId: stringField(true, 'identifier'), sampleSequence: integerField(true), observedAt: stringField(true, 'timestamp'),

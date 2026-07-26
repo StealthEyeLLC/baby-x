@@ -924,6 +924,21 @@ export class SlotRuntimeService {
     return this.transition(record, authenticated.subject, 'DRAINING', 'drain-start', authenticated.idempotencyKey, sha256(canonicalize({ serviceId, slot, action: 'drain' })), { desiredState: 'DRAINING', routeMembership: false, drainStartedAt: this.now() });
   }
 
+
+  restoreActive(value: JsonObject, context: RuntimeExecutionContext): JsonObject {
+    const authenticated = exactContext(context);
+    const serviceId = identifier(value.serviceId, 'serviceId');
+    const slot = slotId(value.slotId);
+    const record = this.ownerSlot(`${serviceId}:${slot}`, authenticated.subject);
+    const expectedSequence = integer(value.expectedSequence, 'expectedSequence', 0, Number.MAX_SAFE_INTEGER);
+    if (Number(record.sequence) !== expectedSequence) throw new SlotRuntimeError('release_stale_sequence', 'expected sequence does not match the slot record');
+    if (record.state !== 'DRAINING') throw new SlotRuntimeError('release_invalid_state', 'only DRAINING may be restored to ACTIVE');
+    if (value.routeReadbackVerified !== true) throw new SlotRuntimeError('release_route_ambiguous', 'rollback activation requires exact restored-route readback');
+    const routeDigest = digest(value.routeDigest, 'routeDigest');
+    const requestDigest = sha256(canonicalize({ serviceId, slot, releaseId: record.releaseId, routeDigest, action: 'restore-active' }));
+    return this.transition(record, authenticated.subject, 'ACTIVE', 'rollback-route-readback-activation', authenticated.idempotencyKey, requestDigest, { desiredState: 'ACTIVE', routeMembership: true, exposedAt: this.now() });
+  }
+
   getService(payload: JsonObject, context: RuntimeExecutionContext): JsonObject {
     strictReadPayload(payload, ['serviceId']);
     const serviceId = identifier(payload.serviceId, 'serviceId');

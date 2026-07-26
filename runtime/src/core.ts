@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto';
-import { constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync, readdirSync, copyFileSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, writeSync, readdirSync, copyFileSync } from 'node:fs';
+import { freemem, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { processIdentity as readProcessIdentity } from './process/identity.ts';
 import { OPERATION_DEFINITIONS, OPERATION_NAMES, type OperationDefinition } from './operations/definitions.ts';
@@ -412,7 +412,17 @@ function toolAvailability(): JsonObject {
   return Object.fromEntries(names.map((name) => [name, executable(name)]));
 }
 
-export interface RuntimeOptions { stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject; slotSystemdAdapter?: import('./release/slot.ts').SlotSystemdAdapter; routeCaddyAdapter?: import('./release/route.ts').RouteCaddyAdapter; }
+export interface RuntimeOptions {
+  stateRoot?: string; sourceCommit?: string; sourceTree?: string; proofPrivateKey?: string; proofKeyId?: string; machineServiceConfig?: JsonObject;
+  slotSystemdAdapter?: import('./release/slot.ts').SlotSystemdAdapter; routeCaddyAdapter?: import('./release/route.ts').RouteCaddyAdapter;
+  releaseCoordinatorService?: import('./release/coordinator.ts').ReleaseCoordinatorService;
+  releasePreparationAuthority?: import('./release/coordinator.ts').ReleasePreparationAuthority;
+  releaseObservationAuthority?: import('./release/coordinator.ts').ReleaseObservationAuthority;
+  releaseDrainAuthority?: import('./release/coordinator.ts').ReleaseDrainAuthority;
+  releaseProofAuthority?: import('./release/coordinator.ts').ReleaseProofAuthority;
+  releaseCapacityProvider?: import('./release/content.ts').ContentServiceOptions['capacityProvider'];
+  releaseProductionRoots?: string[]; releaseApplianceVersion?: string;
+}
 
 export interface RuntimeExecutionContext { idempotencyKey?: string; subject?: string; authorityClass?: string; }
 
@@ -454,6 +464,9 @@ export class BabyXRuntime {
   private releaseStoreInstance?: import('./release/store.ts').ReleaseApplianceStore;
   private slotRuntimeServiceInstance?: import('./release/slot.ts').SlotRuntimeService;
   private routeAuthorityServiceInstance?: import('./release/route.ts').RouteAuthorityService;
+  private releaseContentServiceInstance?: import('./release/content.ts').ImmutableReleaseContentService;
+  private releaseCoordinatorServiceInstance?: import('./release/coordinator.ts').ReleaseCoordinatorService;
+  private releaseCoordinatorInitializePromise?: Promise<JsonObject>;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
@@ -550,6 +563,54 @@ export class BabyXRuntime {
     }
     return this.routeAuthorityServiceInstance;
   }
+  private async releaseContentService(): Promise<import('./release/content.ts').ImmutableReleaseContentService> {
+    if (this.releaseContentServiceInstance === undefined) {
+      const { ImmutableReleaseContentService } = await import('./release/content.ts');
+      const capacityProvider = this.options.releaseCapacityProvider ?? (() => {
+        const stats = statfsSync(this.stateRoot);
+        const blockSize = Number(stats.bsize);
+        const available = Number(stats.bavail) * blockSize;
+        return {
+          observedAt: new Date().toISOString(), rootTotalBytes: Number(stats.blocks) * blockSize,
+          rootAvailableBytes: available, rootAvailableInodes: Number(stats.ffree),
+          zfsPool: 'filesystem-observation', zfsAvailableBytes: available,
+          memoryAvailableBytes: freemem(), cpuPressure: { status: 'UNKNOWN' }, memoryPressure: { status: 'UNKNOWN' }, ioPressure: { status: 'UNKNOWN' },
+        };
+      });
+      this.releaseContentServiceInstance = new ImmutableReleaseContentService({
+        isolatedBuildRoot: join(this.stateRoot, 'release-appliance', 'isolated-builds'),
+        releaseRoot: join(this.stateRoot, 'release-appliance', 'immutable-releases'),
+        quarantineRoot: join(this.stateRoot, 'release-appliance', 'quarantine'),
+        productionRoots: this.options.releaseProductionRoots ?? [],
+        artifacts: await this.artifactManager(), store: await this.releaseStore(), capacityProvider,
+      });
+    }
+    return this.releaseContentServiceInstance;
+  }
+  private async releaseCoordinatorService(reconcile = true): Promise<import('./release/coordinator.ts').ReleaseCoordinatorService> {
+    if (this.releaseCoordinatorServiceInstance === undefined) {
+      if (this.options.releaseCoordinatorService !== undefined) this.releaseCoordinatorServiceInstance = this.options.releaseCoordinatorService;
+      else {
+        const { BoundedDrainAuthority, CompositeReleasePreparationAuthority, ReleaseCoordinatorService, RouteSlotObservationAuthority } = await import('./release/coordinator.ts');
+        const slots = await this.slotRuntimeService();
+        const routes = await this.routeAuthorityService();
+        const preparation = this.options.releasePreparationAuthority ?? new CompositeReleasePreparationAuthority({
+          content: await this.releaseContentService(), certification: await this.releaseCertificationService(), jobs: this.jobs,
+          artifacts: await this.artifactManager(), applianceVersion: this.options.releaseApplianceVersion ?? '1.0.0',
+        });
+        const observation = this.options.releaseObservationAuthority ?? new RouteSlotObservationAuthority(routes, slots);
+        const drain = this.options.releaseDrainAuthority ?? new BoundedDrainAuthority();
+        const proofs = this.options.releaseProofAuthority ?? { authority: 'existing-babyx-proof' as const, create: (requestId: string, operation: string, ok: boolean, startedAt: string, result: unknown) => this.createProof(requestId, operation, ok, startedAt, result) };
+        this.releaseCoordinatorServiceInstance = new ReleaseCoordinatorService({ stateRoot: this.stateRoot, store: await this.releaseStore(), preparation, slots, routes, jobs: this.jobs, artifacts: await this.artifactManager(), observation, drain, proofs });
+      }
+    }
+    if (reconcile && this.releaseCoordinatorInitializePromise === undefined) {
+      this.jobs.reconcileRunning();
+      this.releaseCoordinatorInitializePromise = this.releaseCoordinatorServiceInstance.initialize().catch((error: unknown) => ({ operation: 'babyx.release.reconcile', startup: true, processed: 0, deferred: true, error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'release_startup_reconcile_failed') : 'release_startup_reconcile_failed', message: error instanceof Error ? error.message : 'startup release reconciliation failed' } }));
+    }
+    if (reconcile) await this.releaseCoordinatorInitializePromise;
+    return this.releaseCoordinatorServiceInstance;
+  }
   private async releaseCertificationService(): Promise<import('./release/certification.ts').ReleaseCertificationService> {
     if (this.releaseCertificationServiceInstance === undefined) {
       const { ReleaseCertificationService } = await import('./release/certification.ts');
@@ -576,17 +637,62 @@ export class BabyXRuntime {
     if (operation === 'babyx.health') return this.health();
     if (operation === 'babyx.release.describe' || operation === 'babyx.release.capabilities') {
       const release = await import('./release/compatibility.ts');
+      const coordinator = await import('./release/coordinator.ts');
       return operation === 'babyx.release.describe'
-        ? release.describeReleaseAppliance(payload)
-        : release.releaseApplianceCapabilities(payload);
+        ? { ...release.describeReleaseAppliance(payload), coordinator: coordinator.describeReleaseCoordinator() }
+        : { ...release.releaseApplianceCapabilities(payload), coordinator: coordinator.releaseCoordinatorCapabilities() };
+    }
+    if (operation === 'babyx.release.plan') {
+      const coordinator = await import('./release/coordinator.ts');
+      return coordinator.planReleaseDeployment(payload, context);
+    }
+    if (['babyx.release.prepare', 'babyx.release.promote', 'babyx.release.approve', 'babyx.release.cancel', 'babyx.release.rollback', 'babyx.release.reconcile', 'babyx.release.resume', 'babyx.release.expire', 'babyx.release.gc', 'babyx.release.live', 'babyx.release.status', 'babyx.release.get', 'babyx.release.list', 'babyx.release.events', 'babyx.release.evidence', 'babyx.release.failures'].includes(operation)) {
+      const readOnly = ['babyx.release.live', 'babyx.release.status', 'babyx.release.get', 'babyx.release.list', 'babyx.release.events', 'babyx.release.evidence', 'babyx.release.failures'].includes(operation);
+      const recordsRoot = join(this.stateRoot, 'release-appliance', 'records');
+      if (readOnly && !existsSync(recordsRoot) && this.releaseCoordinatorServiceInstance === undefined) {
+        if (operation === 'babyx.release.list') return { operation, deployments: [], offset: 0, limit: typeof payload.limit === 'number' ? payload.limit : 50, total: 0, nextOffset: null };
+        if (operation === 'babyx.release.failures') return { operation, failures: [], limit: typeof payload.limit === 'number' ? payload.limit : 100 };
+        const { ReleaseCoordinatorError } = await import('./release/coordinator.ts');
+        throw new ReleaseCoordinatorError('release_record_not_found', 'deployment was not found');
+      }
+      const coordinator = await this.releaseCoordinatorService(!readOnly);
+      if (operation === 'babyx.release.prepare') return coordinator.prepare(payload, context);
+      if (operation === 'babyx.release.promote') return coordinator.promote(payload, context);
+      if (operation === 'babyx.release.approve') return coordinator.approve(payload, context);
+      if (operation === 'babyx.release.cancel') return coordinator.cancel(payload, context);
+      if (operation === 'babyx.release.rollback') return coordinator.rollback(payload, context);
+      if (operation === 'babyx.release.reconcile') return coordinator.reconcile(payload, context);
+      if (operation === 'babyx.release.resume') return coordinator.resume(payload, context);
+      if (operation === 'babyx.release.expire') return coordinator.expire(payload, context);
+      if (operation === 'babyx.release.gc') return coordinator.gc(payload, context);
+      if (operation === 'babyx.release.live') return coordinator.live(payload, context);
+      if (operation === 'babyx.release.status') return coordinator.status(payload, context);
+      if (operation === 'babyx.release.get') return coordinator.get(payload, context);
+      if (operation === 'babyx.release.list') return coordinator.list(payload, context);
+      if (operation === 'babyx.release.events') return coordinator.events(payload, context);
+      if (operation === 'babyx.release.evidence') return coordinator.evidence(payload, context);
+      return coordinator.failures(payload, context);
     }
     if (['babyx.release.service.get', 'babyx.release.service.list', 'babyx.release.slot.get'].includes(operation)) {
+      const recordsRoot = join(this.stateRoot, 'release-appliance', 'records');
+      if (!existsSync(recordsRoot) && this.slotRuntimeServiceInstance === undefined) {
+        if (operation === 'babyx.release.service.list') return { operation, services: [], offset: 0, limit: typeof payload.limit === 'number' ? payload.limit : 50, total: 0, nextOffset: null };
+        const { SlotRuntimeError } = await import('./release/slot.ts');
+        throw new SlotRuntimeError('release_record_not_found', operation === 'babyx.release.slot.get' ? 'slot was not found' : 'service was not found');
+      }
       const service = await this.slotRuntimeService();
       if (operation === 'babyx.release.service.get') return service.getService(payload, context);
       if (operation === 'babyx.release.service.list') return service.listServices(payload, context);
       return service.getSlot(payload, context);
     }
-    if (operation === 'babyx.release.route.get') return (await this.routeAuthorityService()).getRoute(payload, context);
+    if (operation === 'babyx.release.route.get') {
+      const recordsRoot = join(this.stateRoot, 'release-appliance', 'records');
+      if (!existsSync(recordsRoot) && this.routeAuthorityServiceInstance === undefined) {
+        const { RouteAuthorityError } = await import('./release/route.ts');
+        throw new RouteAuthorityError('release_record_not_found', 'route was not found');
+      }
+      return (await this.routeAuthorityService()).getRoute(payload, context);
+    }
     if (['babyx.release.certification.describe', 'babyx.release.certification.certify', 'babyx.release.certification.resume', 'babyx.release.certification.get', 'babyx.release.certification.list'].includes(operation)) {
       const service = await this.releaseCertificationService();
       if (operation === 'babyx.release.certification.describe') return service.describe();

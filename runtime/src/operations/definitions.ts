@@ -223,6 +223,23 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 babyx.release.describe
 babyx.release.capabilities
+babyx.release.plan
+babyx.release.prepare
+babyx.release.promote
+babyx.release.approve
+babyx.release.cancel
+babyx.release.rollback
+babyx.release.reconcile
+babyx.release.resume
+babyx.release.expire
+babyx.release.gc
+babyx.release.live
+babyx.release.status
+babyx.release.get
+babyx.release.list
+babyx.release.events
+babyx.release.evidence
+babyx.release.failures
 babyx.release.service.get
 babyx.release.service.list
 babyx.release.slot.get
@@ -234,10 +251,47 @@ babyx.release.certification.get
 babyx.release.certification.list
 `.trim().split(/\s+/u);
 
-const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate']);
-const exactReadInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
+const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate', 'plan', 'live', 'evidence', 'failures']);
+const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   'babyx.release.describe': { type: 'object', additionalProperties: false },
   'babyx.release.capabilities': { type: 'object', additionalProperties: false },
+  'babyx.release.plan': {
+    type: 'object', additionalProperties: false, required: ['request'], properties: { request: { type: 'object', additionalProperties: true } },
+  },
+  'babyx.release.prepare': {
+    type: 'object', additionalProperties: false, required: ['request'], properties: { request: { type: 'object', additionalProperties: true }, deploymentId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' } },
+  },
+  'babyx.release.promote': {
+    type: 'object', additionalProperties: false, properties: { request: { type: 'object', additionalProperties: true }, deploymentId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' } },
+  },
+  'babyx.release.approve': {
+    type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence', 'approval'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, approval: { type: 'object', additionalProperties: true } },
+  },
+  'babyx.release.cancel': {
+    type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, reason: { type: 'string', maxLength: 1024 } },
+  },
+  'babyx.release.rollback': {
+    type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, reason: { type: 'string', maxLength: 1024 }, automatic: { type: 'boolean' } },
+  },
+  'babyx.release.reconcile': {
+    type: 'object', additionalProperties: false, properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 } },
+  },
+  'babyx.release.resume': {
+    type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence', 'resolution'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, resolution: { type: 'object', additionalProperties: true } },
+  },
+  'babyx.release.expire': {
+    type: 'object', additionalProperties: false, required: ['deploymentId', 'expectedSequence'], properties: { deploymentId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 } },
+  },
+  'babyx.release.gc': {
+    type: 'object', additionalProperties: false, required: ['dryRun'], properties: { dryRun: { const: true }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
+  },
+  'babyx.release.live': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },
+  'babyx.release.status': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },
+  'babyx.release.get': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },
+  'babyx.release.list': { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, state: { type: 'string' }, serviceId: { type: 'string' } } },
+  'babyx.release.events': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 1000 } } },
+  'babyx.release.evidence': { type: 'object', additionalProperties: false, required: ['deploymentId'], properties: { deploymentId: { type: 'string' } } },
+  'babyx.release.failures': { type: 'object', additionalProperties: false, properties: { limit: { type: 'integer', minimum: 1, maximum: 200 } } },
   'babyx.release.service.get': {
     type: 'object', additionalProperties: false, required: ['serviceId'],
     properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' } },
@@ -269,7 +323,7 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
     mutation: !readSuffixes.has(suffix),
-    input: exactReadInputs[operation] ?? { type: 'object', additionalProperties: true },
+    input: exactInputs[operation] ?? { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };
 });

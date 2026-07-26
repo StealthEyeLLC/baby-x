@@ -22,3 +22,4 @@ export * from './release/content.ts';
 export * from './release/certification.ts';
 export * from './release/slot.ts';
 export * from './release/route.ts';
+export * from './release/coordinator.ts';

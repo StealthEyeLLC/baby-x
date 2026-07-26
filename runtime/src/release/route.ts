@@ -1015,6 +1015,39 @@ export class RouteAuthorityService {
     return this.transition(restored, authenticated.subject, 'RESTORED_VERIFIED', 'preview-cleanup-verified', `${authenticated.idempotencyKey}-absence`, sha256(canonicalize({ routeId, observation: observation.configDigest, absent })), { previewCleanup: { routeRemoved: absent || (record.previousObservedUpstreams as string[]).length > 0, positiveAbsence: absent, observedAt: observation.observedAt, observationDigest: observation.configDigest }, cleanupCompletedAt: this.now(), routeAbsent: absent });
   }
 
+  async observeActive(value: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
+    const authenticated = exactContext(context);
+    const serviceId = identifier(value.serviceId, 'serviceId');
+    const routeId = routeIdFor(serviceId);
+    const record = this.ownerRoute(routeId, context.authorityClass === 'unrestricted-owner' ? undefined : authenticated.subject);
+    const observation = await this.options.caddy.readback(routeId);
+    const upstreams = observedRouteUpstreams(observation.config, routeId);
+    const restored = value.expected === 'PREVIOUS' || record.state === 'RESTORED_VERIFIED';
+    const expectedDigest = restored ? record.previousConfigDigest : record.candidateConfigDigest;
+    const expectedUpstreams = restored ? record.previousObservedUpstreams : record.expectedUpstreams;
+    const identityMatches = typeof expectedDigest === 'string'
+      && observation.configDigest === expectedDigest
+      && sameStrings(upstreams, expectedUpstreams);
+    if (!identityMatches) return {
+      status: 'UNKNOWN', observedAt: observation.observedAt, configDigest: observation.configDigest,
+      upstreams, expectedDigest: expectedDigest ?? null, expectedUpstreams: expectedUpstreams ?? [],
+      detailsDigest: sha256(canonicalize({ observation: observation.configDigest, upstreams, expectedDigest: expectedDigest ?? null, expectedUpstreams: expectedUpstreams ?? [] })),
+    };
+    const probeResult = await this.options.caddy.probe({
+      kind: (restored && Array.isArray(expectedUpstreams) && expectedUpstreams.length === 0) ? 'ABSENCE' : 'PUBLIC',
+      serviceId, routeId, publicIdentity: record.publicIdentity as JsonObject,
+      expectedUpstreams: Array.isArray(expectedUpstreams) ? expectedUpstreams.map(String) : [],
+      ...(value.expectedReleaseIdentity === undefined ? {} : { expectedReleaseIdentity: identifier(value.expectedReleaseIdentity, 'expectedReleaseIdentity') }),
+      timeoutMs: value.timeoutMs === undefined ? 30_000 : integer(value.timeoutMs, 'timeoutMs', 1, 300_000),
+    });
+    return {
+      status: probeResult.status, observedAt: observation.observedAt, configDigest: observation.configDigest,
+      upstreams, probeResult, latencyMs: probeResult.latencyMs ?? null,
+      errorRate: probeResult.status === 'PASS' ? 0 : 1, processRestarts: 0,
+      detailsDigest: sha256(canonicalize({ observation: observation.configDigest, upstreams, probeResult })),
+    };
+  }
+
   getRoute(payload: JsonObject, context: RuntimeExecutionContext): JsonObject {
     const input = strictObject(payload, 'payload', ['serviceId']);
     const routeId = routeIdFor(identifier(input.serviceId, 'serviceId'));

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, closeSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
-import { type JsonObject } from '../core.ts';
+import { canonicalize, type JsonObject } from '../core.ts';
 import { DurableRecordStore } from '../storage/record-store.ts';
 
 const MAX_CHUNK = 65_536;
@@ -97,6 +97,34 @@ export class ArtifactManager {
     const fd = openSync(this.contentPath(record), 'r');
     try { fsyncSync(fd); } finally { closeSync(fd); }
     return this.finalize(String(record.id), source.size, source.sha256);
+  }
+
+  createBytes(name: string, bytes: Buffer, metadata: JsonObject = {}): JsonObject {
+    if (bytes.length > MAX_ARTIFACT_BYTES) throw new Error('artifact source exceeds maximum size');
+    const record = this.begin(name, metadata);
+    this.upload(String(record.id), 0, bytes);
+    return this.finalize(String(record.id), bytes.length, createHash('sha256').update(bytes).digest('hex'));
+  }
+
+  createOnce(idempotencyKey: string, name: string, sourcePath: string, metadata: JsonObject = {}): JsonObject {
+    return this.createBytesOnce(idempotencyKey, name, readFileSync(sourcePath), metadata);
+  }
+
+  createBytesOnce(idempotencyKey: string, name: string, bytes: Buffer, metadata: JsonObject = {}): JsonObject {
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 256 || idempotencyKey.includes('\0')) throw new Error('artifact idempotency key is invalid');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const normalizedMetadata = { ...metadata, idempotencyKey };
+    const existing = this.list().filter((record) => {
+      const candidate = record.metadata;
+      return candidate !== null && typeof candidate === 'object' && !Array.isArray(candidate) && (candidate as JsonObject).idempotencyKey === idempotencyKey;
+    });
+    if (existing.length > 1) throw new Error('artifact idempotency index is ambiguous');
+    if (existing.length === 1) {
+      const record = existing[0];
+      if (record.state !== 'finalized' || record.name !== name || record.sha256 !== digest || canonicalize(record.metadata) !== canonicalize(normalizedMetadata)) throw new Error('artifact idempotency key conflict');
+      return this.verify(String(record.id));
+    }
+    return this.createBytes(name, bytes, normalizedMetadata);
   }
 
   get(id: string): JsonObject {

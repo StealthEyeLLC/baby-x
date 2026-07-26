@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { canonicalize, sha256, type JsonObject } from '../core.ts';
 import {
   TRANSACTION_INDEX_SCHEMA_VERSION,
+  TRANSACTION_SCHEMA_VERSION,
   TRANSACTION_LEASE_SCHEMA_VERSION,
   TRANSACTION_STATES,
   TRANSACTION_TERMINAL_STATES,
@@ -76,6 +77,7 @@ export interface TransactionRecordPatch {
   evidence?: Partial<DurableTransactionRecordV1['evidence']>;
   cleanup?: Partial<DurableTransactionRecordV1['cleanup']>;
   environment?: Partial<DurableTransactionRecordV1['environment']>;
+  code?: Partial<DurableTransactionRecordV1['code']>;
   error?: DurableTransactionRecordV1['error'];
 }
 
@@ -133,6 +135,7 @@ function mergeRecord(current: DurableTransactionRecordV1, patch: TransactionReco
     evidence: { ...current.evidence, ...(patch.evidence ?? {}) },
     cleanup: { ...current.cleanup, ...(patch.cleanup ?? {}) },
     environment: { ...current.environment, ...(patch.environment ?? {}) },
+    code: current.code === null ? null : { ...current.code, ...(patch.code ?? {}) },
     error: patch.error === undefined ? current.error : patch.error,
   };
 }
@@ -253,6 +256,7 @@ export class DurableTransactionStore {
 
   private mutate(transactionId: string, expectedSequence: number, requestedState: TransactionState | undefined, details: TransactionMutationDetails, patch: TransactionRecordPatch): DurableTransactionRecordV1 {
     const current = this.get(transactionId);
+    if (current.schemaVersion !== TRANSACTION_SCHEMA_VERSION || current.code === null) throw storeError('transaction_mutation_plan_required', 'legacy transaction records are readable but cannot execute or mutate without an explicit migration');
     if (current.lifecycle.stateSequence !== expectedSequence) throw storeError('transaction_stale_sequence', 'expected sequence does not match durable transaction truth', { expectedSequence, actualSequence: current.lifecycle.stateSequence });
     if (current.lifecycle.terminal) throw storeError('transaction_terminal', 'terminal transactions cannot mutate', { transactionId, state: current.lifecycle.persistedState });
     const nextState = requestedState ?? current.lifecycle.persistedState;

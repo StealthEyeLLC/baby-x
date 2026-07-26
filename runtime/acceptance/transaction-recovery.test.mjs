@@ -44,7 +44,7 @@ test('complete delegated lifecycle reaches COMMITTED only after candidate, evide
   assert.deepEqual(harness.codeDriver.calls, { checkpoint: 1, execute: 1, validate: 1, finalize: 1, completeEvidence: 1 });
 });
 
-test('startup reconciliation after machine and mutation creation does not duplicate either authority action', async (t) => {
+test('startup reconciliation resumes validation without duplicating machine or mutation work', async (t) => {
   const first = makeHarness(t);
   const created = createVia(first.service);
   const executed = await execute(first, created);
@@ -64,9 +64,9 @@ test('startup reconciliation after machine and mutation creation does not duplic
   const report = await restarted.service.initialize();
   assert.equal(report.processed, 1);
   assert.equal(first.machine.records.size, machineCount);
-  assert.equal(first.jobs.records.size, jobCount);
-  assert.deepEqual(first.codeDriver.calls, driverCalls);
-  assert.equal(restarted.service.store.get(tx(executed).transactionId).lifecycle.persistedState, 'EXECUTING');
+  assert.equal(first.jobs.records.size, jobCount + 1);
+  assert.deepEqual(first.codeDriver.calls, { ...driverCalls, validate: driverCalls.validate + 1 });
+  assert.equal(restarted.service.store.get(tx(executed).transactionId).lifecycle.persistedState, 'VALIDATING');
 });
 
 test('response loss after durable execute intent persists RECOVERY_REQUIRED and startup does not resubmit blindly', async (t) => {
@@ -160,6 +160,55 @@ test('cleanup obstruction persists RECOVERY_REQUIRED and reconciliation resumes 
   const events = harness.service.store.events(tx(recovered).transactionId, 0, 100);
   assert.ok(events.some((event) => event.nextState === 'RECOVERY_REQUIRED'));
   assert.equal(events.at(-1).nextState, 'ROLLED_BACK');
+});
+
+test('candidate-ready cleanup obstruction cannot commit until reconciliation proves absence and completes evidence', async (t) => {
+  const harness = makeHarness(t);
+  const created = createVia(harness.service);
+  const executed = await execute(harness, created);
+  const validating = await validate(harness, executed);
+  harness.machine.destroyFailure = new Error('simulated candidate cleanup obstruction');
+  const blocked = await finalize(harness, validating);
+  assert.equal(tx(blocked).lifecycle.persistedState, 'RECOVERY_REQUIRED');
+  assert.equal(tx(blocked).lifecycle.desiredState, 'COMMITTED');
+  assert.equal(tx(blocked).candidate.validationPassed, true);
+  assert.equal(tx(blocked).cleanup.completed, false);
+  assert.equal(harness.codeDriver.calls.completeEvidence, 0);
+  harness.machine.destroyFailure = null;
+  const recovered = await harness.service.reconcile(
+    { transactionId: tx(blocked).transactionId, expectedSequence: tx(blocked).lifecycle.stateSequence, reason: 'cleanup obstruction resolved' },
+    context('owner-a', 'reconcile-commit-key-0001'),
+  );
+  assert.equal(tx(recovered).lifecycle.persistedState, 'COMMITTED');
+  assert.equal(tx(recovered).cleanup.completed, true);
+  assert.equal(tx(recovered).evidence.finalEvidenceIndexArtifactId.startsWith('evidence-'), true);
+  assert.equal(harness.codeDriver.calls.finalize, 1);
+  assert.equal(harness.codeDriver.calls.completeEvidence, 1);
+});
+
+test('restart after validation completion prepares one candidate, cleans once, and reaches truthful COMMITTED', async (t) => {
+  const first = makeHarness(t);
+  const created = createVia(first.service);
+  const executed = await execute(first, created);
+  const validating = await validate(first, executed);
+  assert.equal(tx(validating).lifecycle.persistedState, 'VALIDATING');
+  const restarted = makeHarness(t, {
+    stateRoot: first.stateRoot,
+    jobs: first.jobs,
+    machine: first.machine,
+    artifacts: first.artifacts,
+    codeDriver: first.codeDriver,
+    controllerId: 'controller-after-validation',
+    hostBootId: 'boot-after-validation',
+  });
+  await restarted.service.initialize();
+  const durable = restarted.service.store.get(tx(validating).transactionId);
+  assert.equal(durable.lifecycle.persistedState, 'COMMITTED');
+  assert.equal(durable.candidate.validationPassed, true);
+  assert.equal(durable.cleanup.completed, true);
+  assert.equal(first.codeDriver.calls.finalize, 1);
+  assert.equal(first.codeDriver.calls.completeEvidence, 1);
+  assert.equal(first.machine.destroyCalls.length, 1);
 });
 
 test('incomplete candidate artifact truth prevents COMMITTED', async (t) => {

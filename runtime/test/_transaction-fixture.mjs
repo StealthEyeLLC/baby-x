@@ -15,8 +15,8 @@ const DIGESTS = Object.freeze({
 });
 
 export function createRequest(overrides = {}) {
-  return {
-    schemaVersion: '1.0.0',
+  const request = {
+    schemaVersion: '1.1.0',
     transactionKind: 'CODE_MUTATION',
     repository: 'StealthEyeLLC/baby-x',
     branch: 'build/baby-x-transactional-tool-fabric-v2',
@@ -43,8 +43,33 @@ export function createRequest(overrides = {}) {
     normalizedEnvironment: [{ name: 'CI', value: 'true' }],
     credentialReferenceIds: [],
     credentialPresence: false,
+    mutationPlan: {
+      schemaVersion: '1.0.0',
+      baseCommit: 'a'.repeat(40),
+      baseTree: 'b'.repeat(40),
+      mutationMode: 'DECLARED_EXECUTION_PLAN',
+      patchArtifactId: null,
+      executionPlanProfileId: 'babyx.code-mutation@1',
+      executionActions: [{ stepId: 'noop', kind: 'NO_OP', path: null, contentArtifactId: null, mode: null, symlinkTarget: null }],
+      mutationInputArtifactIds: [],
+      workingDirectory: '.',
+      changedPathAllowlist: ['docs/fixture.md'],
+      validationProfile: 'test-validation@1',
+      validationSteps: [{ stepId: 'test', phase: 'targeted-tests', argv: ['/usr/bin/true'], cwd: '.', timeoutMs: 30_000, required: true }],
+      assertions: [],
+      resourceBounds: {
+        timeoutMs: 60_000, memoryMaxBytes: 268_435_456, cpuQuotaPercent: 100, tasksMax: 256,
+        diskQuotaBytes: 1_073_741_824, outputLimitBytes: 1_048_576, artifactLimitBytes: 67_108_864,
+      },
+      expectedOutputFormat: 'git-tree-candidate-v1',
+      idempotencyIdentity: 'fixture-plan-0001',
+    },
     ...overrides,
   };
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'mutationPlan')) {
+    request.mutationPlan = { ...request.mutationPlan, baseCommit: request.commit, baseTree: request.tree };
+  }
+  return request;
 }
 
 export function makeRecord({
@@ -207,6 +232,7 @@ export class FakeArtifacts {
     if (!record) throw new Error(`artifact ${id} not found`);
     return structuredClone(record);
   }
+  verify(id) { return { ...this.get(id), verified: true }; }
 }
 
 export function finalizedArtifact(id, sha256 = '5'.repeat(64)) {
@@ -225,11 +251,14 @@ export class FakeCodeDriver {
   async checkpoint(record) {
     this.calls.checkpoint += 1;
     if (this.fail.checkpoint) throw this.fail.checkpoint;
+    const machineId = `machine-${record.transactionId.slice(-8)}`;
+    this.machine?.set(activeMachine({ machineId, ownerPrincipal: record.ownerPrincipal, expectedSnapshotGuid: record.source.expectedSnapshotGuid }));
     return {
       observedSnapshotGuid: record.source.expectedSnapshotGuid,
       snapshotCreationTxg: record.source.snapshotCreationTxg,
       sourceVerifiedAt: '2026-07-25T12:01:00.000Z',
       observationDigest: '6'.repeat(64),
+      machineIds: [machineId],
     };
   }
 
@@ -238,9 +267,8 @@ export class FakeCodeDriver {
     if (this.fail.execute) throw this.fail.execute;
     const machineId = `machine-${record.transactionId.slice(-8)}`;
     const jobId = `job-mutation-${record.transactionId.slice(-8)}`;
-    this.machine?.set(activeMachine({ machineId, ownerPrincipal: record.ownerPrincipal, expectedSnapshotGuid: record.source.expectedSnapshotGuid }));
     this.jobs?.set(jobRecord(jobId, record.transactionId, record.ownerPrincipal));
-    return { machineIds: [machineId], allRelatedJobIds: [jobId], mutationJobIds: [jobId], activeJobIds: [] };
+    return { machineIds: [machineId], allRelatedJobIds: [jobId], mutationJobIds: [jobId], activeJobIds: [], materializationJobId: jobId };
   }
 
   async validate(record) {
@@ -248,7 +276,14 @@ export class FakeCodeDriver {
     if (this.fail.validate) throw this.fail.validate;
     const jobId = `job-validation-${record.transactionId.slice(-8)}`;
     this.jobs?.set(jobRecord(jobId, record.transactionId, record.ownerPrincipal));
-    return { allRelatedJobIds: [jobId], validationJobIds: [jobId], activeJobIds: [] };
+    return {
+      allRelatedJobIds: [jobId], validationJobIds: [jobId], activeJobIds: [],
+      validationExecutions: [{
+        stepId: 'test', phase: 'targeted-tests', jobId, executionPlanDigest: '9'.repeat(64), argv: ['/usr/bin/true'],
+        startedAt: '2026-07-25T12:02:00.000Z', completedAt: '2026-07-25T12:02:01.000Z', status: 'passed',
+        exitCode: 0, signal: null, artifactIds: [], receiptReferences: [],
+      }],
+    };
   }
 
   async finalize(record) {
@@ -261,6 +296,8 @@ export class FakeCodeDriver {
       candidateId: `candidate-${suffix}`,
       candidateTree: 'c'.repeat(40),
       changedPaths: ['docs/fixture.md'],
+      pathChanges: [{ path: 'docs/fixture.md', status: 'modified', oldMode: '100644', newMode: '100644', oldObject: 'a'.repeat(40), newObject: 'b'.repeat(40), symlinkChanged: false }],
+      addedFiles: [], deletedFiles: [], modifiedFiles: ['docs/fixture.md'], fileModeChanges: [], symlinkChanges: [],
       patchArtifactId: ids[0],
       candidateArchiveArtifactId: ids[1],
       candidateManifestArtifactId: ids[2],
@@ -268,6 +305,8 @@ export class FakeCodeDriver {
       validationPassed: true,
       artifactIds: ids,
       receiptReferences: [`receipt-${suffix}`],
+      candidateJobIds: [],
+      validationExecutions: record.code.validationExecutions,
     };
   }
 

@@ -41,6 +41,8 @@ function committedRecord() {
       candidateId: 'candidate-1',
       candidateTree: 'c'.repeat(40),
       changedPaths: ['docs/fixture.md'],
+      modifiedFiles: ['docs/fixture.md'],
+      pathChanges: [{ path: 'docs/fixture.md', status: 'modified', oldMode: '100644', newMode: '100644', oldObject: 'a'.repeat(40), newObject: 'b'.repeat(40), symlinkChanged: false }],
       patchArtifactId: 'patch-1',
       candidateArchiveArtifactId: 'archive-1',
       candidateManifestArtifactId: 'manifest-1',
@@ -163,4 +165,33 @@ test('event sequence discontinuity is rejected', () => {
 test('structured error details are bounded and redact secret-bearing keys', () => {
   const redacted = redactTransactionDetails({ token: 'secret', nested: { password: 'secret', safe: 'value' } });
   assert.deepEqual(redacted, { token: '[REDACTED]', nested: { password: '[REDACTED]', safe: 'value' } });
+});
+
+
+test('existing strict V2-B records remain readable without durable rewrite', () => {
+  const current = makeRecord();
+  const { code: _code, candidate, ...rest } = current;
+  const legacy = {
+    ...rest,
+    schemaVersion: '1.0.0',
+    candidate: {
+      candidateId: candidate.candidateId,
+      baseCommit: candidate.baseCommit,
+      baseTree: candidate.baseTree,
+      candidateTree: candidate.candidateTree,
+      changedPaths: candidate.changedPaths,
+      patchArtifactId: candidate.patchArtifactId,
+      candidateArchiveArtifactId: candidate.candidateArchiveArtifactId,
+      candidateManifestArtifactId: candidate.candidateManifestArtifactId,
+      validationDigest: candidate.validationDigest,
+      validationPassed: candidate.validationPassed,
+    },
+  };
+  const before = JSON.stringify(legacy);
+  const readable = assertTransactionRecord(legacy);
+  assert.equal(readable.schemaVersion, '1.0.0');
+  assert.equal(readable.code, null);
+  assert.equal(JSON.stringify(legacy), before);
+  assert.match(transactionRecordDigest(readable), /^[a-f0-9]{64}$/u);
+  assert.throws(() => assertTransactionRecord({ ...legacy, code: null }), /incompatible schema/u);
 });

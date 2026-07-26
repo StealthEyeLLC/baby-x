@@ -18,6 +18,7 @@ import {
   type TransactionState,
 } from './schemas.ts';
 import { DurableTransactionStore, type TransactionMutationDetails, type TransactionRecordPatch } from './store.ts';
+import type { CodePathChangeV1, CodeValidationExecutionV1 } from './code-schemas.ts';
 
 export interface TransactionOperationContext extends RuntimeExecutionContext {}
 
@@ -37,6 +38,7 @@ export interface TransactionJobSurface {
 
 export interface TransactionArtifactSurface {
   get(id: string): JsonObject;
+  verify?(id: string): JsonObject;
 }
 
 export interface TransactionCheckpointResult {
@@ -44,6 +46,7 @@ export interface TransactionCheckpointResult {
   snapshotCreationTxg: string;
   sourceVerifiedAt: string;
   observationDigest: string;
+  machineIds: string[];
 }
 
 export interface TransactionExecutionResult {
@@ -51,18 +54,26 @@ export interface TransactionExecutionResult {
   allRelatedJobIds: string[];
   mutationJobIds: string[];
   activeJobIds: string[];
+  materializationJobId: string;
 }
 
 export interface TransactionValidationResult {
   allRelatedJobIds: string[];
   validationJobIds: string[];
   activeJobIds: string[];
+  validationExecutions: CodeValidationExecutionV1[];
 }
 
 export interface TransactionCandidateResult {
   candidateId: string;
   candidateTree: string;
   changedPaths: string[];
+  pathChanges: CodePathChangeV1[];
+  addedFiles: string[];
+  deletedFiles: string[];
+  modifiedFiles: string[];
+  fileModeChanges: string[];
+  symlinkChanges: string[];
   patchArtifactId: string;
   candidateArchiveArtifactId: string;
   candidateManifestArtifactId: string;
@@ -70,6 +81,8 @@ export interface TransactionCandidateResult {
   validationPassed: true;
   artifactIds: string[];
   receiptReferences: string[];
+  candidateJobIds: string[];
+  validationExecutions: CodeValidationExecutionV1[];
 }
 
 export interface TransactionEvidenceResult {
@@ -394,7 +407,12 @@ export class TransactionService {
           const failed = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'FAILED', this.details('babyx.transaction.execute', 'checkpoint-mismatch', prelude.requestDigest, context, { observationDigest: checkpoint.observationDigest }), { error: errorBinding('transaction_source_mismatch', 'source snapshot identity does not match the bound transaction baseline', false, 'checkpoint', checkpoint) });
           return { operation: 'babyx.transaction.execute', transaction: publicRecord(failed), replayed: false };
         }
-        current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.execute', 'checkpoint-readback', prelude.requestDigest, context, { observationDigest: checkpoint.observationDigest }), { source: { observedSnapshotGuid: checkpoint.observedSnapshotGuid, sourceVerifiedAt: checkpoint.sourceVerifiedAt } });
+        const checkpointMachineIds = stringList(checkpoint.machineIds, 'checkpoint.machineIds');
+        current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.execute', 'checkpoint-readback', prelude.requestDigest, context, { observationDigest: checkpoint.observationDigest, machineId: checkpointMachineIds[0] ?? null }), {
+          source: { observedSnapshotGuid: checkpoint.observedSnapshotGuid, sourceVerifiedAt: checkpoint.sourceVerifiedAt },
+          execution: { machineIds: checkpointMachineIds },
+          cleanup: { required: checkpointMachineIds.length > 0, sourcePreserved: true },
+        });
         current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'READY', this.details('babyx.transaction.execute', 'checkpoint-complete', prelude.requestDigest, context));
       }
       if (current.lifecycle.persistedState !== 'READY') throw serviceError('transaction_state_conflict', 'execute requires REQUESTED, CHECKPOINTING, or READY state', { state: current.lifecycle.persistedState });
@@ -411,18 +429,19 @@ export class TransactionService {
       for (const id of [...mutationJobIds, ...activeJobIds]) if (!allRelatedJobIds.includes(id)) throw serviceError('transaction_phase_result_invalid', 'execution job subsets are not bound to allRelatedJobIds');
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'EXECUTING', this.details('babyx.transaction.execute', 'mutation-submitted', prelude.requestDigest, context, { machineId: machineIds[0] ?? null, jobIds: mutationJobIds }), {
         execution: { machineIds, allRelatedJobIds, mutationJobIds, activeJobIds, mutationSubmitted: true, jobTerminalityStatus: activeJobIds.length > 0 ? 'active' : 'all-terminal' },
+        code: { materializationJobId: result.materializationJobId },
         cleanup: { required: machineIds.length > 0, sourcePreserved: true },
       });
       return { operation: 'babyx.transaction.execute', transaction: publicRecord(current), replayed: false };
     } finally { this.releaseLease(prelude.record, lease); }
   }
 
-  private observeJobs(record: DurableTransactionRecordV1, reconcile: boolean): JobObservation {
+  private observeJobs(record: DurableTransactionRecordV1, reconcile: boolean, selectedJobIds: readonly string[] = record.execution.allRelatedJobIds): JobObservation {
     const records: JobRecord[] = [];
     const activeJobIds: string[] = [];
     let allSuccessful = true;
     let ambiguous = false;
-    for (const jobId of record.execution.allRelatedJobIds) {
+    for (const jobId of selectedJobIds) {
       let job: JobRecord;
       try { job = reconcile ? this.options.jobs.reconcile(jobId) : this.options.jobs.get(jobId); }
       catch { ambiguous = true; allSuccessful = false; continue; }
@@ -432,7 +451,7 @@ export class TransactionService {
       if (job.status === 'running') activeJobIds.push(jobId);
       if (job.status !== 'completed' || job.exitCode !== 0 || job.signal !== null && job.signal !== undefined) allSuccessful = false;
     }
-    return { records, activeJobIds, allTerminal: !ambiguous && activeJobIds.length === 0 && records.length === record.execution.allRelatedJobIds.length, allSuccessful: !ambiguous && allSuccessful, ambiguous };
+    return { records, activeJobIds, allTerminal: !ambiguous && activeJobIds.length === 0 && records.length === selectedJobIds.length, allSuccessful: !ambiguous && allSuccessful, ambiguous };
   }
 
   async validate(payload: JsonObject, context: TransactionOperationContext): Promise<JsonObject> {
@@ -440,7 +459,7 @@ export class TransactionService {
     if (prelude.replayed) return { operation: 'babyx.transaction.validate', transaction: publicRecord(prelude.record), replayed: true };
     if (this.options.codeDriver === undefined) throw serviceError('transaction_phase_unavailable', 'disposable code transaction driver is unavailable');
     if (prelude.record.lifecycle.persistedState !== 'EXECUTING') throw serviceError('transaction_state_conflict', 'validate requires EXECUTING state', { state: prelude.record.lifecycle.persistedState });
-    const mutationTruth = this.observeJobs(prelude.record, true);
+    const mutationTruth = this.observeJobs(prelude.record, true, prelude.record.execution.mutationJobIds);
     if (mutationTruth.ambiguous) {
       const ambiguous = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'AMBIGUOUS', this.details('babyx.transaction.validate', 'mutation-job-ambiguous', prelude.requestDigest, context), { execution: { activeJobIds: mutationTruth.activeJobIds, jobTerminalityStatus: 'ambiguous' }, error: errorBinding('transaction_job_ambiguous', 'mutation job ownership or truth is ambiguous', false, 'execution') });
       return { operation: 'babyx.transaction.validate', transaction: publicRecord(ambiguous), replayed: false };
@@ -463,7 +482,10 @@ export class TransactionService {
       const activeJobIds = stringList(result.activeJobIds, 'activeJobIds');
       const allRelatedJobIds = unique([...prelude.record.execution.allRelatedJobIds, ...newRelated]);
       for (const id of [...validationJobIds, ...activeJobIds]) if (!allRelatedJobIds.includes(id)) throw serviceError('transaction_phase_result_invalid', 'validation job subsets are not bound to allRelatedJobIds');
-      const validating = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'VALIDATING', this.details('babyx.transaction.validate', 'validation-submitted', prelude.requestDigest, context, { jobIds: validationJobIds }), { execution: { allRelatedJobIds, validationJobIds, activeJobIds, validationSubmitted: true, jobTerminalityStatus: activeJobIds.length > 0 ? 'active' : 'all-terminal' } });
+      const validating = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'VALIDATING', this.details('babyx.transaction.validate', 'validation-submitted', prelude.requestDigest, context, { jobIds: validationJobIds }), {
+        execution: { allRelatedJobIds, validationJobIds, activeJobIds, validationSubmitted: true, jobTerminalityStatus: activeJobIds.length > 0 ? 'active' : 'all-terminal' },
+        code: { validationExecutions: result.validationExecutions },
+      });
       return { operation: 'babyx.transaction.validate', transaction: publicRecord(validating), replayed: false };
     } finally { this.releaseLease(prelude.record, lease); }
   }
@@ -473,7 +495,7 @@ export class TransactionService {
     if (prelude.replayed) return { operation: 'babyx.transaction.finalize', transaction: publicRecord(prelude.record), replayed: true };
     if (this.options.codeDriver === undefined) throw serviceError('transaction_phase_unavailable', 'disposable code transaction driver is unavailable');
     if (prelude.record.lifecycle.persistedState !== 'VALIDATING') throw serviceError('transaction_state_conflict', 'finalize requires VALIDATING state', { state: prelude.record.lifecycle.persistedState });
-    const validationTruth = this.observeJobs(prelude.record, true);
+    const validationTruth = this.observeJobs(prelude.record, true, prelude.record.execution.validationJobIds);
     if (validationTruth.ambiguous) {
       const ambiguous = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'AMBIGUOUS', this.details('babyx.transaction.finalize', 'validation-ambiguous', prelude.requestDigest, context), { execution: { activeJobIds: validationTruth.activeJobIds, jobTerminalityStatus: 'ambiguous' }, error: errorBinding('transaction_validation_ambiguous', 'validation job ownership or result is ambiguous', false, 'validation') });
       return { operation: 'babyx.transaction.finalize', transaction: publicRecord(ambiguous), replayed: false };
@@ -498,11 +520,22 @@ export class TransactionService {
         if (!artifactIds.includes(requiredId)) throw serviceError('transaction_candidate_invalid', 'required candidate artifact is not bound in artifactIds', { artifactId: requiredId });
       }
       for (const artifactId of artifactIds) {
-        const artifact = this.options.artifacts.get(artifactId);
-        if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'candidate artifact is not finalized', { artifactId });
+        const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
+        if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'candidate artifact is not finalized and digest-verified', { artifactId });
       }
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CANDIDATE_READY', this.details('babyx.transaction.finalize', 'candidate-durable', prelude.requestDigest, context, { candidateId: candidate.candidateId, candidateTree: candidate.candidateTree }), {
-        candidate: { candidateId: candidate.candidateId, candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, patchArtifactId: candidate.patchArtifactId, candidateArchiveArtifactId: candidate.candidateArchiveArtifactId, candidateManifestArtifactId: candidate.candidateManifestArtifactId, validationDigest: candidate.validationDigest, validationPassed: true },
+        candidate: {
+          candidateId: candidate.candidateId, candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, pathChanges: candidate.pathChanges,
+          addedFiles: candidate.addedFiles, deletedFiles: candidate.deletedFiles, modifiedFiles: candidate.modifiedFiles,
+          fileModeChanges: candidate.fileModeChanges, symlinkChanges: candidate.symlinkChanges,
+          patchArtifactId: candidate.patchArtifactId, candidateArchiveArtifactId: candidate.candidateArchiveArtifactId,
+          candidateManifestArtifactId: candidate.candidateManifestArtifactId, validationDigest: candidate.validationDigest, validationPassed: true,
+        },
+        execution: {
+          allRelatedJobIds: unique([...current.execution.allRelatedJobIds, ...candidate.candidateJobIds]),
+          activeJobIds: current.execution.activeJobIds.filter((id) => !candidate.candidateJobIds.includes(id)),
+        },
+        code: { candidateJobIds: candidate.candidateJobIds, validationExecutions: candidate.validationExecutions },
         evidence: { artifactIds: unique([...current.evidence.artifactIds, ...artifactIds]), receiptReferences: unique([...current.evidence.receiptReferences, ...candidate.receiptReferences]) },
       });
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CLEANING', this.details('babyx.transaction.finalize', 'cleanup-intent', prelude.requestDigest, context), { cleanup: { requested: true } });
@@ -517,8 +550,8 @@ export class TransactionService {
       const evidenceArtifacts = stringList(evidence.artifactIds, 'evidence.artifactIds');
       if (!evidenceArtifacts.includes(evidence.finalEvidenceIndexArtifactId)) throw serviceError('transaction_evidence_incomplete', 'final evidence index is not bound in artifactIds');
       for (const artifactId of evidenceArtifacts) {
-        const artifact = this.options.artifacts.get(artifactId);
-        if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'evidence artifact is not finalized', { artifactId });
+        const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
+        if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'evidence artifact is not finalized and digest-verified', { artifactId });
       }
       current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.finalize', 'evidence-durable', prelude.requestDigest, context), { evidence: { artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]), receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]), finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest } });
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'COMMITTED', this.details('babyx.transaction.finalize', 'transaction-committed', prelude.requestDigest, context, { candidateId: current.candidate.candidateId, candidateTree: current.candidate.candidateTree }));
@@ -631,11 +664,129 @@ export class TransactionService {
         return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
       }
       current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'child-truth-observed', prelude.requestDigest, context, { jobIds: jobs.records.map((job) => job.id) }), { execution: { activeJobIds: jobs.activeJobIds, jobTerminalityStatus: jobs.allTerminal ? 'all-terminal' : 'active' } });
-      if (['ROLLBACK_REQUESTED', 'ROLLING_BACK'].includes(current.lifecycle.persistedState) || current.lifecycle.persistedState === 'RECOVERY_REQUIRED' && ['ROLLED_BACK', 'EXPIRED'].includes(current.lifecycle.desiredState)) return this.cleanupToTerminal(current.lifecycle.persistedState === 'RECOVERY_REQUIRED' ? this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLING_BACK', this.details('babyx.transaction.reconcile', 'resume-rollback', prelude.requestDigest, context)) : current, prelude.requestDigest, context, current.lifecycle.desiredState === 'EXPIRED');
-      if (current.lifecycle.persistedState === 'CLEANING' || current.lifecycle.persistedState === 'RECOVERY_REQUIRED' && current.lifecycle.desiredState === 'COMMITTED') {
-        if (current.lifecycle.persistedState === 'RECOVERY_REQUIRED') current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CLEANING', this.details('babyx.transaction.reconcile', 'resume-cleaning', prelude.requestDigest, context));
+
+      if (['ROLLBACK_REQUESTED', 'ROLLING_BACK'].includes(current.lifecycle.persistedState) || current.lifecycle.persistedState === 'RECOVERY_REQUIRED' && ['ROLLED_BACK', 'EXPIRED'].includes(current.lifecycle.desiredState)) {
+        return this.cleanupToTerminal(current.lifecycle.persistedState === 'RECOVERY_REQUIRED'
+          ? this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLING_BACK', this.details('babyx.transaction.reconcile', 'resume-rollback', prelude.requestDigest, context))
+          : current, prelude.requestDigest, context, current.lifecycle.desiredState === 'EXPIRED');
+      }
+
+      if (current.lifecycle.persistedState === 'EXECUTING') {
+        const mutationTruth = this.observeJobs(current, true, current.execution.mutationJobIds);
+        if (mutationTruth.ambiguous) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'AMBIGUOUS', this.details('babyx.transaction.reconcile', 'mutation-job-ambiguous', prelude.requestDigest, context), { execution: { activeJobIds: mutationTruth.activeJobIds, jobTerminalityStatus: 'ambiguous' }, error: errorBinding('transaction_job_ambiguous', 'mutation job ownership or truth is ambiguous', false, 'execution') });
+          return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        }
+        if (!mutationTruth.allTerminal) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false, deferred: true };
+        if (!mutationTruth.allSuccessful) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'mutation-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' }, error: errorBinding('transaction_mutation_failed', 'mutation job failed or was lost', false, 'execution', { jobs: mutationTruth.records.map((job) => ({ id: job.id, status: job.status, exitCode: job.exitCode ?? null, signal: job.signal ?? null })) }) });
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+        }
+        const driver = this.options.codeDriver;
+        if (driver === undefined) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'validation-driver-unavailable', prelude.requestDigest, context), { error: errorBinding('transaction_phase_unavailable', 'disposable code transaction driver is unavailable', true, 'validation') });
+          return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        }
+        let result: TransactionValidationResult;
+        try { result = await driver.validate(current, context); }
+        catch (error) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'validation-response-lost', prelude.requestDigest, context), { error: errorBinding('transaction_validation_uncertain', error instanceof Error ? error.message : String(error), true, 'validation', error) });
+          return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        }
+        const newRelated = stringList(result.allRelatedJobIds, 'allRelatedJobIds');
+        const validationJobIds = stringList(result.validationJobIds, 'validationJobIds');
+        const activeJobIds = stringList(result.activeJobIds, 'activeJobIds');
+        const allRelatedJobIds = unique([...current.execution.allRelatedJobIds, ...newRelated]);
+        for (const id of [...validationJobIds, ...activeJobIds]) if (!allRelatedJobIds.includes(id)) throw serviceError('transaction_phase_result_invalid', 'validation job subsets are not bound to allRelatedJobIds');
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'VALIDATING', this.details('babyx.transaction.reconcile', 'validation-resumed', prelude.requestDigest, context, { jobIds: validationJobIds }), {
+          execution: { allRelatedJobIds, validationJobIds, activeJobIds, validationSubmitted: true, jobTerminalityStatus: activeJobIds.length > 0 ? 'active' : 'all-terminal' },
+          code: { validationExecutions: result.validationExecutions },
+        });
+        return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+      }
+
+      if (current.lifecycle.persistedState === 'VALIDATING') {
+        const validationTruth = this.observeJobs(current, true, current.execution.validationJobIds);
+        if (validationTruth.ambiguous) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'AMBIGUOUS', this.details('babyx.transaction.reconcile', 'validation-ambiguous', prelude.requestDigest, context), { execution: { activeJobIds: validationTruth.activeJobIds, jobTerminalityStatus: 'ambiguous' }, error: errorBinding('transaction_validation_ambiguous', 'validation job ownership or result is ambiguous', false, 'validation') });
+          return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        }
+        if (!validationTruth.allTerminal) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false, deferred: true };
+        if (!validationTruth.allSuccessful) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'validation-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' }, error: errorBinding('transaction_validation_failed', 'required validation failed or was lost', false, 'validation', { jobs: validationTruth.records.map((job) => ({ id: job.id, status: job.status, exitCode: job.exitCode ?? null, signal: job.signal ?? null })) }) });
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+        }
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'PREPARING_CANDIDATE', this.details('babyx.transaction.reconcile', 'resume-candidate-intent', prelude.requestDigest, context), { execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' } });
+      }
+
+      if (current.lifecycle.persistedState === 'PREPARING_CANDIDATE') {
+        const driver = this.options.codeDriver;
+        if (driver === undefined) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'candidate-driver-unavailable', prelude.requestDigest, context), { error: errorBinding('transaction_phase_unavailable', 'disposable code transaction driver is unavailable', true, 'candidate') });
+          return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        }
+        let candidate: TransactionCandidateResult;
+        try { candidate = await driver.finalize(current, context); }
+        catch (error) {
+          current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'candidate-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, error: errorBinding('transaction_candidate_failed', error instanceof Error ? error.message : String(error), false, 'candidate', error) });
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+        }
+        const artifactIds = stringList(candidate.artifactIds, 'artifactIds');
+        for (const requiredId of [candidate.patchArtifactId, candidate.candidateArchiveArtifactId, candidate.candidateManifestArtifactId]) {
+          if (!artifactIds.includes(requiredId)) throw serviceError('transaction_candidate_invalid', 'required candidate artifact is not bound in artifactIds', { artifactId: requiredId });
+        }
+        for (const artifactId of artifactIds) {
+          const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
+          if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'candidate artifact is not finalized and digest-verified', { artifactId });
+        }
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CANDIDATE_READY', this.details('babyx.transaction.reconcile', 'candidate-recovered', prelude.requestDigest, context, { candidateId: candidate.candidateId, candidateTree: candidate.candidateTree }), {
+          candidate: {
+            candidateId: candidate.candidateId, candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, pathChanges: candidate.pathChanges,
+            addedFiles: candidate.addedFiles, deletedFiles: candidate.deletedFiles, modifiedFiles: candidate.modifiedFiles,
+            fileModeChanges: candidate.fileModeChanges, symlinkChanges: candidate.symlinkChanges,
+            patchArtifactId: candidate.patchArtifactId, candidateArchiveArtifactId: candidate.candidateArchiveArtifactId,
+            candidateManifestArtifactId: candidate.candidateManifestArtifactId, validationDigest: candidate.validationDigest, validationPassed: true,
+          },
+          execution: { allRelatedJobIds: unique([...current.execution.allRelatedJobIds, ...candidate.candidateJobIds]), activeJobIds: [], jobTerminalityStatus: 'all-terminal' },
+          code: { candidateJobIds: candidate.candidateJobIds, validationExecutions: candidate.validationExecutions },
+          evidence: { artifactIds: unique([...current.evidence.artifactIds, ...artifactIds]), receiptReferences: unique([...current.evidence.receiptReferences, ...candidate.receiptReferences]) },
+        });
+      }
+
+      if (current.lifecycle.persistedState === 'CANDIDATE_READY') {
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CLEANING', this.details('babyx.transaction.reconcile', 'resume-cleanup-intent', prelude.requestDigest, context), { cleanup: { requested: true } });
+      }
+
+      if (current.lifecycle.persistedState === 'RECOVERY_REQUIRED' && current.lifecycle.desiredState === 'COMMITTED') {
+        if (!current.candidate.validationPassed || current.candidate.candidateTree === null) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false, deferred: true };
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'CLEANING', this.details('babyx.transaction.reconcile', 'resume-cleaning', prelude.requestDigest, context));
+      }
+
+      if (current.lifecycle.persistedState === 'CLEANING') {
         const cleaned = await this.cleanupResources(current, prelude.requestDigest, context);
         current = cleaned.record;
+        if (!cleaned.complete) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+        if (current.evidence.finalEvidenceIndexArtifactId === null || current.evidence.finalEvidenceIndexDigest === null) {
+          const driver = this.options.codeDriver;
+          if (driver?.completeEvidence === undefined) {
+            current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'evidence-incomplete', prelude.requestDigest, context), { error: errorBinding('transaction_evidence_incomplete', 'final evidence index has not been completed', true, 'evidence') });
+            return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+          }
+          let evidence: TransactionEvidenceResult;
+          try { evidence = await driver.completeEvidence(current, context); }
+          catch (error) {
+            current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'evidence-persistence-failed', prelude.requestDigest, context), { error: errorBinding('transaction_evidence_incomplete', error instanceof Error ? error.message : String(error), true, 'evidence', error) });
+            return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
+          }
+          const evidenceArtifacts = stringList(evidence.artifactIds, 'evidence.artifactIds');
+          if (!evidenceArtifacts.includes(evidence.finalEvidenceIndexArtifactId)) throw serviceError('transaction_evidence_incomplete', 'final evidence index is not bound in artifactIds');
+          for (const artifactId of evidenceArtifacts) {
+            const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
+            if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'evidence artifact is not finalized and digest-verified', { artifactId });
+          }
+          current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'evidence-durable', prelude.requestDigest, context), { evidence: { artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]), receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]), finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest } });
+        }
+        current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'COMMITTED', this.details('babyx.transaction.reconcile', 'transaction-committed', prelude.requestDigest, context, { candidateId: current.candidate.candidateId, candidateTree: current.candidate.candidateTree }));
       }
       return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
     } finally { this.releaseLease(prelude.record, lease); }

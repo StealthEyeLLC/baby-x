@@ -379,6 +379,10 @@ export class MachineExecutionController {
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       metadata: {
         machineService: true, kind: 'exec', machineId: record.machineId, machineName: record.machineName,
+        ownerPrincipal: record.ownerPrincipal,
+        ...(typeof record.authorityReference === 'string' && /^transaction:tx_[a-z0-9][a-z0-9_-]{11,124}$/u.test(record.authorityReference)
+          ? { transactionId: record.authorityReference.slice('transaction:'.length) }
+          : {}),
         requestDigest, idempotencyKey: authenticated.idempotencyKey, captureStreams,
         ...(outputLimitBytes === undefined ? {} : { outputLimitBytes }),
       },

@@ -13,6 +13,7 @@ import { MachineServiceError } from './errors.ts';
 import {
   assertMachineId,
   assertMachineName,
+  assertZfsName,
   machineCreationDigest,
   machineLaunchDigest,
   newMachineId,
@@ -294,6 +295,33 @@ export class DisposableMachineService {
       limits: { defaultListLimit: this.config.defaultListLimit, maximumListLimit: this.config.maximumListLimit, maximumEventLimit: this.config.maximumEventLimit, readinessTimeoutMs: this.config.readinessTimeoutMs, readinessPollIntervalMs: this.config.readinessPollIntervalMs, stopGracefulTimeoutMs: this.config.stopGracefulTimeoutMs, stopPollIntervalMs: this.config.stopPollIntervalMs, startupReconcileLimit: this.config.startupReconcileLimit, startupReconcileTimeBudgetMs: this.config.startupReconcileTimeBudgetMs, garbageCollectionLimit: this.config.garbageCollectionLimit, retryBackoffMs: this.config.retryBackoffMs },
       configuredRoots: { sourceSnapshotRoots: [...this.config.sourceSnapshotRoots], cloneDatasetRoots: [...this.config.cloneDatasetRoots], machineRoot: this.config.machineRoot },
     };
+  }
+
+  async verifySourceSnapshot(payload: JsonObject, context: MachineOperationContext): Promise<JsonObject> {
+    assertReadKeys(payload, ['snapshot', 'expectedGuid']);
+    if (context.authorityClass !== 'unrestricted-owner' && (typeof context.subject !== 'string' || context.subject.length === 0 || context.subject.includes('\0'))) {
+      throw new MachineServiceError('machine_invalid_request', 'authenticated subject is required');
+    }
+    const snapshot = assertZfsName(payload.snapshot, 'snapshot');
+    const separator = snapshot.indexOf('@');
+    if (separator <= 0 || separator !== snapshot.lastIndexOf('@') || separator === snapshot.length - 1) {
+      throw new MachineServiceError('machine_invalid_request', 'snapshot must contain exactly one non-empty @ separator');
+    }
+    const dataset = snapshot.slice(0, separator);
+    if (!this.config.sourceSnapshotRoots.some((root) => dataset === root || dataset.startsWith(`${root}/`))) {
+      throw new MachineServiceError('machine_source_not_allowed', 'source snapshot is outside configured roots', { snapshot });
+    }
+    const expectedGuid = payload.expectedGuid === undefined ? undefined : optionalReadText(payload.expectedGuid, 'expectedGuid');
+    const source = this.observer.requireProviderObservation(await this.observer.source(snapshot), 'source snapshot');
+    if (source.status === 'absent') throw new MachineServiceError('machine_source_not_found', 'source snapshot does not exist', { snapshot });
+    if (source.guid === undefined || source.creationTxg === undefined) {
+      throw new MachineServiceError('machine_readback_mismatch', 'source snapshot identity readback is incomplete', { snapshot });
+    }
+    if (expectedGuid !== undefined && source.guid !== expectedGuid) {
+      throw new MachineServiceError('machine_source_mismatch', 'source snapshot GUID differs from the requested identity', { expectedGuid, actualGuid: source.guid });
+    }
+    const observation = { snapshot, guid: source.guid, creationTxg: source.creationTxg, observedAt: source.observedAt };
+    return { operation: 'babyx.machine.source.verify', ...observation, observationDigest: sha256(canonicalize(observation)) };
   }
 
   async create(payload: unknown, context: MachineOperationContext): Promise<JsonObject> {

@@ -56,3 +56,31 @@
 ## Prohibited implementation boundaries
 
 No transaction source may import provider, ZFS, nspawn, direct child-process, merge, deployment, release, or production-mutation authority. No second scheduler, worker, artifact store, proof store, cleanup mechanism, or operation catalog is permitted.
+
+## V2-A anchored checkpoint
+
+- Commit: `b36050849f33380326a6c8de62694869a759a418`
+- Tree: `39e475f6bd05c99352ee4a799f787dada90ec936`
+- Parent: `b8dcc150ddc175b2ad00099df405b8a3bf0e843a`
+- Message: `feat: define Baby-X core compatibility manifest`
+- Remote verification: normal push, exact remote commit/tree, `ahead 1 / behind 0` from the frozen evidence base, no merge commit.
+- Gate: Node `v24.18.0`, npm `11.16.0`, 151/151 tests passed; build, strict lint, shell syntax, diff check, and tracked-secret scan passed.
+
+## V2-B durable transaction service
+
+- Strict record and lifecycle schema: `runtime/src/transactions/schemas.ts`.
+- Authoritative per-record store, pending-write recovery, append-only per-transaction events, derived indexes, and controller leases: `runtime/src/transactions/store.ts`.
+- Transaction coordination and owner-scoped operations: `runtime/src/transactions/service.ts`.
+- Single-registry routing and one lazy startup-reconciliation promise: `runtime/src/core.ts`, `runtime/src/operations/definitions.ts`.
+- Public operations added: `babyx.transaction.create`, `get`, `list`, `events`, `status`, `execute`, `validate`, `finalize`, `rollback`, `reconcile`, `expire`, and `gc`.
+- The transaction layer delegates process truth to durable jobs, machine cleanup to the Disposable Machine Service, artifact truth to the artifact authority, and provider compatibility to the frozen core manifest.
+- It contains no provider, ZFS, nspawn, direct process, Git-ref, merge, deployment, release, or production-mutation implementation.
+
+### V2-B verification
+
+- Focused transaction tests: 42/42 passed, 0 failed/cancelled/skipped/todo.
+- Complete repository suite: 193/193 passed, 0 failed/cancelled/skipped/todo.
+- Covered strict schemas, unknown kinds, illegal transitions, direct `EXECUTING` to `COMMITTED` rejection, terminal invariants, deterministic digests, event continuity, bounded listings, owner isolation, idempotent replay/conflicts, stale sequences, per-record corruption isolation, index reconstruction, failed-write recovery, live/stale leases, response loss, startup restart, duplicate suppression, active-child blocking, ambiguous ownership, expiration, dry-run GC, truthful lost jobs, canonical rollback, cleanup obstruction, evidence durability, and positive cleanup.
+- Build passed; strict lint passed (`176` files, `72` TypeScript syntax checks); shell syntax passed; `git diff --check` passed; tracked-secret scan passed.
+- Gate jobs: focused `9b4223f0-396a-472f-8037-86355bdbd34c`; complete `e48cdaf6-191e-41e9-8fcb-efd7d45ca54d`.
+- No required test was skipped, cancelled, todo, or quarantined.

@@ -12,6 +12,18 @@ const operations = `
 babyx.describe
 babyx.health
 babyx.core.compatibility
+babyx.transaction.create
+babyx.transaction.get
+babyx.transaction.list
+babyx.transaction.events
+babyx.transaction.status
+babyx.transaction.execute
+babyx.transaction.validate
+babyx.transaction.finalize
+babyx.transaction.rollback
+babyx.transaction.reconcile
+babyx.transaction.expire
+babyx.transaction.gc
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -226,6 +238,67 @@ babyx.counterexample.remove
 
 const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate']);
 
+const transactionIdProperty = { type: 'string', pattern: '^tx_[a-z0-9][a-z0-9_-]{11,124}$' };
+const expectedSequenceProperty = { type: 'integer', minimum: 1 };
+const transactionMutationInput = {
+  type: 'object', additionalProperties: false,
+  properties: { transactionId: transactionIdProperty, expectedSequence: expectedSequenceProperty, reason: { type: 'string', maxLength: 4096 } },
+  required: ['transactionId', 'expectedSequence'],
+};
+const transactionInputSchemas: Record<string, Record<string, unknown>> = {
+  'babyx.transaction.create': {
+    type: 'object', additionalProperties: false,
+    properties: {
+      schemaVersion: { const: '1.0.0' },
+      transactionKind: { enum: ['CODE_MUTATION'] },
+      repository: { type: 'string', minLength: 1, maxLength: 1024 },
+      branch: { type: 'string', minLength: 1, maxLength: 1024 },
+      commit: { type: 'string', pattern: '^[a-f0-9]{40,64}$' },
+      tree: { type: 'string', pattern: '^[a-f0-9]{40,64}$' },
+      sourceArchiveArtifactId: { type: 'string', minLength: 1, maxLength: 256 },
+      immutableSourceReference: { type: 'string', minLength: 1, maxLength: 2048 },
+      sourceManifestDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      packageLockDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      protectedSnapshot: { type: 'string', minLength: 1, maxLength: 256 },
+      expectedSnapshotGuid: { type: 'string', minLength: 1, maxLength: 64 },
+      snapshotCreationTxg: { type: 'string', minLength: 1, maxLength: 64 },
+      policyDecisionDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      selectedEnvironmentClass: { enum: ['disposable', 'parallel-disposable'] },
+      providerId: { type: 'string', minLength: 1, maxLength: 256 },
+      providerVersion: { type: 'string', minLength: 1, maxLength: 128 },
+      networkMode: { const: 'none' },
+      resourceBoundIdentity: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          machineName: { type: 'string', minLength: 1, maxLength: 256 },
+          cloneDataset: { type: 'string', minLength: 1, maxLength: 256 },
+          mountpoint: { type: 'string', minLength: 2, maxLength: 4096 },
+          expectedRootPrefix: { type: 'string', minLength: 2, maxLength: 4096 },
+        },
+        required: ['machineName', 'cloneDataset', 'mountpoint', 'expectedRootPrefix'],
+      },
+      normalizedEnvironment: {
+        type: 'array', maxItems: 1000,
+        items: { type: 'object', additionalProperties: false, properties: { name: { type: 'string', minLength: 1, maxLength: 128 }, value: { type: 'string', maxLength: 4096 } }, required: ['name', 'value'] },
+      },
+      credentialReferenceIds: { type: 'array', maxItems: 1000, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 4096 } },
+      credentialPresence: { type: 'boolean' },
+    },
+    required: ['schemaVersion', 'transactionKind', 'repository', 'commit', 'tree', 'immutableSourceReference', 'sourceManifestDigest', 'protectedSnapshot', 'expectedSnapshotGuid', 'snapshotCreationTxg', 'policyDecisionDigest', 'selectedEnvironmentClass', 'providerId', 'providerVersion', 'networkMode', 'resourceBoundIdentity'],
+  },
+  'babyx.transaction.get': { type: 'object', additionalProperties: false, properties: { transactionId: transactionIdProperty }, required: ['transactionId'] },
+  'babyx.transaction.list': { type: 'object', additionalProperties: false, properties: { ownerPrincipal: { type: 'string', minLength: 1, maxLength: 512 }, state: { type: 'string' }, terminal: { type: 'boolean' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 0, maximum: 1000 } } },
+  'babyx.transaction.events': { type: 'object', additionalProperties: false, properties: { transactionId: transactionIdProperty, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 0, maximum: 1000 } }, required: ['transactionId'] },
+  'babyx.transaction.status': { type: 'object', additionalProperties: false, properties: { transactionId: transactionIdProperty }, required: ['transactionId'] },
+  'babyx.transaction.execute': transactionMutationInput,
+  'babyx.transaction.validate': transactionMutationInput,
+  'babyx.transaction.finalize': transactionMutationInput,
+  'babyx.transaction.rollback': transactionMutationInput,
+  'babyx.transaction.reconcile': transactionMutationInput,
+  'babyx.transaction.expire': transactionMutationInput,
+  'babyx.transaction.gc': { type: 'object', additionalProperties: false, properties: { dryRun: { type: 'boolean' }, ownerPrincipal: { type: 'string', minLength: 1, maxLength: 512 }, state: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 0, maximum: 1000 } } },
+};
+
 function familyOf(operation: string): string {
   const segments = operation.split('.');
   return segments[1] ?? 'core';
@@ -238,10 +311,10 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     family: familyOf(operation),
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
-    mutation: !readSuffixes.has(suffix),
-    input: operation === 'babyx.core.compatibility'
+    mutation: operation.startsWith('babyx.transaction.') ? !['get', 'list', 'events', 'status'].includes(suffix) : !readSuffixes.has(suffix),
+    input: transactionInputSchemas[operation] ?? (operation === 'babyx.core.compatibility'
       ? { type: 'object', additionalProperties: false, properties: {} }
-      : { type: 'object', additionalProperties: true },
+      : { type: 'object', additionalProperties: true }),
     output: { type: 'object', additionalProperties: true },
   };
 });

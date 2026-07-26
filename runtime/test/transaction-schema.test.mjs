@@ -1,0 +1,166 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  assertTransactionRecord,
+  assertTransactionTransition,
+  createTransactionEvent,
+  normalizeTransactionCreateRequest,
+  redactTransactionDetails,
+  transactionRecordDigest,
+} from '../../dist/runtime/transactions/schemas.js';
+import { createRequest, makeRecord } from './_transaction-fixture.mjs';
+
+function committedRecord() {
+  const base = makeRecord();
+  return {
+    ...base,
+    lifecycle: {
+      ...base.lifecycle,
+      persistedState: 'COMMITTED',
+      desiredState: 'COMMITTED',
+      stateSequence: 20,
+      terminal: true,
+      updatedAt: '2026-07-25T12:20:00.000Z',
+      completedAt: '2026-07-25T12:20:00.000Z',
+    },
+    source: {
+      ...base.source,
+      observedSnapshotGuid: base.source.expectedSnapshotGuid,
+      sourceVerifiedAt: '2026-07-25T12:01:00.000Z',
+    },
+    execution: {
+      ...base.execution,
+      allRelatedJobIds: ['job-1'],
+      mutationJobIds: ['job-1'],
+      jobTerminalityStatus: 'all-terminal',
+      mutationSubmitted: true,
+      validationSubmitted: true,
+    },
+    candidate: {
+      ...base.candidate,
+      candidateId: 'candidate-1',
+      candidateTree: 'c'.repeat(40),
+      changedPaths: ['docs/fixture.md'],
+      patchArtifactId: 'patch-1',
+      candidateArchiveArtifactId: 'archive-1',
+      candidateManifestArtifactId: 'manifest-1',
+      validationDigest: '7'.repeat(64),
+      validationPassed: true,
+    },
+    evidence: {
+      artifactIds: ['archive-1', 'evidence-1', 'manifest-1', 'patch-1'],
+      receiptReferences: ['receipt-1'],
+      eventTailDigest: '8'.repeat(64),
+      finalEvidenceIndexArtifactId: 'evidence-1',
+      finalEvidenceIndexDigest: '9'.repeat(64),
+    },
+    cleanup: {
+      required: true,
+      requested: true,
+      completed: true,
+      machineAbsenceVerified: true,
+      processAbsenceVerified: true,
+      mountAbsenceVerified: true,
+      rootPathAbsenceVerified: true,
+      datasetAbsenceVerified: true,
+      sourcePreserved: true,
+      completedAt: '2026-07-25T12:19:00.000Z',
+    },
+  };
+}
+
+test('transaction record schema is strict and rejects unknown fields', () => {
+  const record = makeRecord();
+  assert.deepEqual(assertTransactionRecord(record), record);
+  assert.throws(() => assertTransactionRecord({ ...record, unknown: true }), /incompatible schema/u);
+  assert.throws(() => assertTransactionRecord({ ...record, schemaVersion: '2.0.0' }), /schema version is unsupported/u);
+});
+
+test('unknown transaction kinds fail closed at request and durable-record boundaries', () => {
+  assert.throws(() => normalizeTransactionCreateRequest(createRequest({ transactionKind: 'BROWSER_TRANSACTION' }), 'owner-a', 'create-key-0001'), /unknown transaction kind/u);
+  assert.throws(() => assertTransactionRecord({ ...makeRecord(), transactionKind: 'DEPLOYMENT' }), /transaction kind is unsupported/u);
+});
+
+test('raw secret-bearing environment values are rejected and only references are retained', () => {
+  assert.throws(() => normalizeTransactionCreateRequest(createRequest({ normalizedEnvironment: [{ name: 'API_TOKEN', value: 'raw-secret' }] }), 'owner-a', 'create-key-0001'), /secret-bearing environment/u);
+  const request = normalizeTransactionCreateRequest(createRequest({ credentialReferenceIds: ['credential-ref-1'], credentialPresence: true }), 'owner-a', 'create-key-0001');
+  const record = makeRecord({ request });
+  assert.deepEqual(record.environment.credentialReferenceIds, ['credential-ref-1']);
+  assert.equal(record.environment.credentialPresence, true);
+  assert.doesNotMatch(JSON.stringify(record), /raw-secret/u);
+});
+
+test('illegal state transitions and direct EXECUTING-to-COMMITTED transitions are rejected', () => {
+  assert.throws(() => assertTransactionTransition('REQUESTED', 'VALIDATING'), /illegal transaction transition/u);
+  assert.throws(() => assertTransactionTransition('EXECUTING', 'COMMITTED'), /illegal transaction transition/u);
+  assert.doesNotThrow(() => assertTransactionTransition('REQUESTED', 'CHECKPOINTING'));
+});
+
+test('COMMITTED requires candidate tree, validation, terminal jobs, cleanup, and complete evidence', () => {
+  const valid = committedRecord();
+  assert.doesNotThrow(() => assertTransactionRecord(valid));
+  assert.throws(() => assertTransactionRecord({ ...valid, candidate: { ...valid.candidate, candidateTree: null } }), /durable validated candidate/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, execution: { ...valid.execution, activeJobIds: ['job-1'], jobTerminalityStatus: 'active' } }), /all related jobs terminal/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, cleanup: { ...valid.cleanup, completed: false, completedAt: null } }), /completed positive cleanup/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, evidence: { ...valid.evidence, finalEvidenceIndexArtifactId: null } }), /complete evidence/u);
+});
+
+test('FAILED, ROLLED_BACK, and EXPIRED cannot hide unresolved cleanup', () => {
+  for (const state of ['FAILED', 'ROLLED_BACK', 'EXPIRED']) {
+    const base = makeRecord();
+    const value = {
+      ...base,
+      lifecycle: { ...base.lifecycle, persistedState: state, desiredState: state, terminal: true, completedAt: '2026-07-25T12:02:00.000Z' },
+      cleanup: { ...base.cleanup, required: true },
+    };
+    assert.throws(() => assertTransactionRecord(value), /cannot hide|cannot bypass/u);
+  }
+});
+
+test('transaction record digest is stable across equivalent canonical values', () => {
+  const first = makeRecord();
+  const second = JSON.parse(JSON.stringify(first));
+  assert.equal(transactionRecordDigest(first), transactionRecordDigest(second));
+  assert.match(transactionRecordDigest(first), /^[a-f0-9]{64}$/u);
+});
+
+test('transaction event digest is deterministic across equivalent drafts', () => {
+  const draft = {
+    transactionId: `tx_${'1'.repeat(32)}`,
+    ownerPrincipal: 'owner-a',
+    operation: 'babyx.transaction.create',
+    phase: 'request',
+    priorState: null,
+    nextState: 'REQUESTED',
+    priorSequence: 0,
+    nextSequence: 1,
+    requestDigest: '4'.repeat(64),
+    idempotencyKey: 'create-key-0001',
+    occurredAt: '2026-07-25T12:00:00.000Z',
+    previousEventDigest: null,
+  };
+  const first = createTransactionEvent(draft);
+  const second = createTransactionEvent({ ...draft });
+  assert.equal(first.eventDigest, second.eventDigest);
+  assert.equal(first.eventId, second.eventId);
+});
+
+test('event sequence discontinuity is rejected', () => {
+  assert.throws(() => createTransactionEvent({
+    transactionId: `tx_${'1'.repeat(32)}`,
+    ownerPrincipal: 'owner-a',
+    operation: 'babyx.transaction.reconcile',
+    phase: 'test',
+    priorState: 'REQUESTED',
+    nextState: 'CHECKPOINTING',
+    priorSequence: 1,
+    nextSequence: 3,
+    requestDigest: '4'.repeat(64),
+    occurredAt: '2026-07-25T12:00:00.000Z',
+  }), /sequence is discontinuous/u);
+});
+
+test('structured error details are bounded and redact secret-bearing keys', () => {
+  const redacted = redactTransactionDetails({ token: 'secret', nested: { password: 'secret', safe: 'value' } });
+  assert.deepEqual(redacted, { token: '[REDACTED]', nested: { password: '[REDACTED]', safe: 'value' } });
+});

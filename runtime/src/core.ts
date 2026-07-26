@@ -534,7 +534,7 @@ export class BabyXRuntime {
         machine,
         jobs: this.jobs,
         artifacts,
-        codeDriver: new DisposableCodeTransactionDriver({ stateRoot: this.stateRoot, machine, artifacts }),
+        codeDriver: new DisposableCodeTransactionDriver({ machine, jobs: this.jobs, artifacts }),
       });
       this.transactionServiceInitializePromise = this.transactionServiceInstance.initialize().catch((error: unknown) => ({
         operation: 'babyx.transaction.reconcile', startup: true, processed: 0, deferred: true,

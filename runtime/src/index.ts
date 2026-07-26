@@ -16,3 +16,6 @@ export * from './racing/service.ts';
 export * from './release/schemas.ts';
 export * from './release/compatibility.ts';
 export * from './release/store.ts';
+export * from './artifacts/manager.ts';
+export * from './release/tar.ts';
+export * from './release/content.ts';

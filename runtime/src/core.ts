@@ -615,6 +615,8 @@ export class BabyXRuntime {
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   private rootAuthorityServiceInstance?: import('./root-authority/service.ts').TransactionalRootAuthorityService;
   private rootFabricServiceInstance?: import('./root-fabric/service.ts').RootFabricService;
+  private transactionServiceInstance?: import('./transactions/service.ts').TransactionService;
+  private transactionServiceInitializePromise?: Promise<JsonObject>;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -847,6 +849,22 @@ export class BabyXRuntime {
       });
     }
     return this.rootFabricServiceInstance;
+  private async transactionService(): Promise<import('./transactions/service.ts').TransactionService> {
+    if (this.transactionServiceInstance === undefined) {
+      const { TransactionService } = await import('./transactions/service.ts');
+      this.transactionServiceInstance = new TransactionService({
+        stateRoot: this.stateRoot,
+        machine: await this.machineService(),
+        jobs: this.jobs,
+        artifacts: await this.artifactManager(),
+      });
+      this.transactionServiceInitializePromise = this.transactionServiceInstance.initialize().catch((error: unknown) => ({
+        operation: 'babyx.transaction.reconcile', startup: true, processed: 0, deferred: true,
+        error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'transaction_startup_reconcile_failed') : 'transaction_startup_reconcile_failed', message: error instanceof Error ? error.message : 'transaction startup reconciliation failed' },
+      }));
+    }
+    await this.transactionServiceInitializePromise;
+    return this.transactionServiceInstance;
   }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
@@ -871,6 +889,21 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.transaction.events') return service.events(payload);
       if (operation === 'babyx.root.transaction.verify') return service.verify(payload);
       return (await this.rootFabricService()).execute(operation, payload, context);
+    if (operation.startsWith('babyx.transaction.')) {
+      const service = await this.transactionService();
+      if (operation === 'babyx.transaction.create') return service.create(payload, context);
+      if (operation === 'babyx.transaction.get') return service.get(payload, context);
+      if (operation === 'babyx.transaction.list') return service.list(payload, context);
+      if (operation === 'babyx.transaction.events') return service.events(payload, context);
+      if (operation === 'babyx.transaction.status') return service.status(payload, context);
+      if (operation === 'babyx.transaction.execute') return service.execute(payload, context);
+      if (operation === 'babyx.transaction.validate') return service.validate(payload, context);
+      if (operation === 'babyx.transaction.finalize') return service.finalize(payload, context);
+      if (operation === 'babyx.transaction.rollback') return service.rollback(payload, context);
+      if (operation === 'babyx.transaction.reconcile') return service.reconcile(payload, context);
+      if (operation === 'babyx.transaction.expire') return service.expire(payload, context);
+      if (operation === 'babyx.transaction.gc') return service.gc(payload, context);
+      throw new Error('unsupported transaction operation');
     }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;

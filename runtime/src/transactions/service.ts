@@ -226,6 +226,29 @@ function bootId(): string {
   return existsSync('/proc/sys/kernel/random/boot_id') ? readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : sha256(hostname());
 }
 
+function jobIdentityMatches(record: DurableTransactionRecordV1, job: JobRecord): boolean {
+  const metadata = job.metadata ?? {};
+  if (metadata.transactionId !== undefined && metadata.transactionId !== record.transactionId) return false;
+  if (metadata.ownerPrincipal !== undefined && metadata.ownerPrincipal !== record.ownerPrincipal) return false;
+
+  const legacyBinding = metadata.transactionId === record.transactionId
+    && metadata.ownerPrincipal === record.ownerPrincipal;
+  const machineId = typeof metadata.machineId === 'string' ? metadata.machineId : null;
+  const machineBound = machineId !== null && record.execution.machineIds.includes(machineId);
+  if (machineId !== null && !machineBound) return false;
+
+  const machineService = metadata.machineService === true;
+  const kind = typeof metadata.kind === 'string' ? metadata.kind : '';
+  const idempotencyKey = typeof metadata.idempotencyKey === 'string' ? metadata.idempotencyKey : '';
+  const transactionNamespace = `transaction:${record.transactionId}:`;
+  const genericExecutionBinding = machineService
+    && machineBound
+    && metadata.ownerPrincipal === record.ownerPrincipal
+    && idempotencyKey.startsWith(transactionNamespace);
+  const genericLaunchBinding = machineService && machineBound && kind === 'start';
+  return legacyBinding || genericExecutionBinding || genericLaunchBinding;
+}
+
 export class TransactionService {
   readonly store: DurableTransactionStore;
   private readonly now: () => string;
@@ -445,8 +468,7 @@ export class TransactionService {
       let job: JobRecord;
       try { job = reconcile ? this.options.jobs.reconcile(jobId) : this.options.jobs.get(jobId); }
       catch { ambiguous = true; allSuccessful = false; continue; }
-      const metadata = job.metadata ?? {};
-      if (metadata.transactionId !== record.transactionId || metadata.ownerPrincipal !== record.ownerPrincipal) { ambiguous = true; allSuccessful = false; continue; }
+      if (!jobIdentityMatches(record, job)) { ambiguous = true; allSuccessful = false; continue; }
       records.push(job);
       if (job.status === 'running') activeJobIds.push(jobId);
       if (job.status !== 'completed' || job.exitCode !== 0 || job.signal !== null && job.signal !== undefined) allSuccessful = false;
@@ -654,7 +676,21 @@ export class TransactionService {
     const prelude = this.mutationRequest('babyx.transaction.reconcile', payload, context);
     if (prelude.replayed) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(prelude.record), replayed: true };
     if (prelude.record.lifecycle.terminal) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(prelude.record), replayed: false, noOp: true };
-    if (prelude.record.lifecycle.persistedState === 'AMBIGUOUS') return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(prelude.record), replayed: false, deferred: true };
+    if (prelude.record.lifecycle.persistedState === 'AMBIGUOUS') {
+      const ambiguityLease = this.acquireLease(prelude.record, 'babyx.transaction.reconcile');
+      try {
+        const jobs = this.observeJobs(prelude.record, true);
+        if (jobs.ambiguous) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(prelude.record), replayed: false, deferred: true };
+        const recovered = this.store.transition(
+          prelude.record.transactionId,
+          prelude.record.lifecycle.stateSequence,
+          'RECOVERY_REQUIRED',
+          this.details('babyx.transaction.reconcile', 'ambiguity-resolved', prelude.requestDigest, context, { jobIds: jobs.records.map((job) => job.id) }),
+          { execution: { activeJobIds: jobs.activeJobIds, jobTerminalityStatus: jobs.allTerminal ? 'all-terminal' : 'active' } },
+        );
+        return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(recovered), replayed: false, recovered: true };
+      } finally { this.releaseLease(prelude.record, ambiguityLease); }
+    }
     const lease = this.acquireLease(prelude.record, 'babyx.transaction.reconcile');
     let current = prelude.record;
     try {

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from 'node:fs';
-import { dirname, extname, join, relative } from 'node:path';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
 
 const root = process.cwd();
-const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0 };
+const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, copiedDeploymentFiles: 0 };
 if (process.version !== 'v24.18.0') throw new Error(`Node.js 24.18.0 required, found ${process.version}`);
 rmSync(join(root, 'dist'), { recursive: true, force: true });
 
@@ -26,8 +26,27 @@ function walk(sourceRoot, destinationRoot) {
     } else { copyFileSync(source, destination); report.copiedJavaScript += 1; }
   }
 }
+
+function copyDeploymentFile(path) {
+  const source = join(root, path);
+  const destination = join(root, 'dist', path);
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+  chmodSync(destination, statSync(source).mode & 0o777);
+  report.copiedDeploymentFiles += 1;
+}
+
 walk(join(root, 'runtime/src'), join(root, 'dist/runtime'));
 walk(join(root, 'gateway/src'), join(root, 'dist/gateway'));
+for (const path of [
+  'scripts/install-local.sh',
+  'scripts/rollback-local.sh',
+  'scripts/verify-local.sh',
+  'ops/systemd/baby-x.service',
+  'ops/systemd/baby-x.socket',
+  'ops/systemd/baby-x-gateway.service',
+  'ops/tmpfiles/baby-x.conf',
+]) copyDeploymentFile(path);
 
 const compiler = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v c++'], { encoding: 'utf8' }).stdout.trim();
 const includeCandidates = ['/opt/node-v24.18.0-linux-x64/include/node', '/usr/include/node'];

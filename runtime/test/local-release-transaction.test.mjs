@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -52,6 +52,23 @@ function run(path, workspace, root, extra = {}) {
 function target(root, name) {
   return realpathSync(join(root, name));
 }
+
+test('build output contains exact immutable deployment assets', () => {
+  for (const path of [
+    'scripts/install-local.sh',
+    'scripts/rollback-local.sh',
+    'scripts/verify-local.sh',
+    'ops/systemd/baby-x.service',
+    'ops/systemd/baby-x.socket',
+    'ops/systemd/baby-x-gateway.service',
+    'ops/tmpfiles/baby-x.conf',
+  ]) {
+    const source = join(repository, path);
+    const built = join(repository, 'dist', path);
+    assert.equal(readFileSync(built).equals(readFileSync(source)), true, path);
+    assert.equal(statSync(built).mode & 0o777, statSync(source).mode & 0o777, path);
+  }
+});
 
 test('local release activation and rollback preserve only verified pointer state', () => {
   const temporary = mkdtempSync(join(tmpdir(), 'baby-x-local-release-'));

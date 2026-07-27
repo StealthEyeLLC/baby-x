@@ -101,7 +101,10 @@ test('release record inventory is complete, recursively frozen, and versioned', 
     'CredentialSetReferenceV1', 'DeploymentRecordV1', 'EventRecordV1', 'EvidenceIndexV1',
     'GitHubInboxRecordV1', 'GitHubOutboxRecordV1', 'MaintenanceRecordV1', 'MigrationRunV1',
     'ObservationRecordV1', 'PendingMutationV1', 'ReleaseArtifactManifestV1', 'ReleaseRecordV1',
-    'RetentionDecisionV1', 'RetentionEvictionV1', 'RouteRecordV1', 'ServiceDefinitionV1', 'SlotRecordV1', 'SourceIdentityV1',
+    'RetentionDecisionV1', 'RetentionEvictionV1', 'RouteRecordV1',
+    'ServiceCredentialBootstrapPlanV1', 'ServiceCredentialBootstrapTransactionV1', 'ServiceCredentialDefinitionV1',
+    'ServiceCredentialGenerationV1', 'ServiceCredentialProfileStateV1', 'ServiceCredentialVerificationV1',
+    'ServiceDefinitionV1', 'SlotRecordV1', 'SourceIdentityV1',
   ];
   assert.deepEqual(Object.keys(RELEASE_RECORD_SCHEMAS).sort(), requiredSchemas);
   assert.equal(Object.isFrozen(RELEASE_RECORD_SCHEMAS), true);

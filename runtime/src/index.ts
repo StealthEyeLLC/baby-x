@@ -28,5 +28,6 @@ export * from './release/access.ts';
 export * from './release/service-credentials.ts';
 export * from './release/service-credential-bootstrap.ts';
 export * from './release/service-credential-issuer.ts';
+export * from './release/service-credential-activation.ts';
 export * from './release/github-transport.ts';
 export * from './release/maintenance.ts';

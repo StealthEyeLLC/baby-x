@@ -2,13 +2,16 @@
 Description=Baby-X unprivileged private gateway
 After=network.target baby-x.socket
 Requires=baby-x.socket
+ConditionPathExists=/etc/baby-x/credential-generation.json
+ConditionPathExists=/etc/baby-x/proof-public.pem
 [Service]
 Type=simple
 User=fix-mcp
 Group=horsey
+ExecStartPre=/usr/bin/test -r /etc/baby-x/credential-generation.json
+ExecStartPre=/usr/bin/test -r /etc/baby-x/proof-public.pem
 ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/gateway/src/main.js
 Environment=NODE_ENV=production
-EnvironmentFile=-/etc/baby-x/gateway-environment
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

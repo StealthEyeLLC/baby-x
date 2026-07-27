@@ -429,6 +429,7 @@ export interface RuntimeOptions {
   serviceCredentialBootstrapService?: import('./release/service-credential-bootstrap.ts').ServiceCredentialBootstrapService;
   serviceCredentialFilesystemAuthority?: import('./release/service-credential-issuer.ts').ServiceCredentialFilesystemAuthority;
   serviceCredentialAccountLookup?: import('./release/service-credential-issuer.ts').ServiceAccountLookupRunner;
+  serviceCredentialAuthority?: import('./release/service-credential-activation.ts').ServiceCredentialAuthority;
   releaseGitHubIntegrationService?: import('./release/access.ts').GitHubIntegrationService;
   maintenanceAuthorityService?: import('./release/maintenance.ts').MaintenanceAuthorityService;
   maintenanceProvider?: import('./release/maintenance.ts').HostMaintenanceProvider;
@@ -733,6 +734,7 @@ export class BabyXRuntime {
     if (operation.startsWith('babyx.release.credential-bootstrap.')) {
       const contract = await import('./release/service-credentials.ts');
       const issuerModule = await import('./release/service-credential-issuer.ts');
+      const authority = this.options.serviceCredentialAuthority;
       const bootstrap = this.options.serviceCredentialBootstrapService;
       const issuer = this.options.serviceCredentialFilesystemAuthority;
       const lookup = this.options.serviceCredentialAccountLookup;
@@ -746,35 +748,48 @@ export class BabyXRuntime {
         return context.idempotencyKey;
       };
       if (operation === 'babyx.release.credential-bootstrap.describe') {
+        if (authority !== undefined) return { ...authority.describe(), configured: true };
         return bootstrap === undefined
           ? { ...contract.describeServiceCredentialProfile(), configured: false, issuer: { configured: false, rawMaterialReturned: false } }
           : { ...bootstrap.describe(payload), configured: true, issuer: issuer?.describe() ?? { configured: false, rawMaterialReturned: false } };
       }
-      if (operation === 'babyx.release.credential-bootstrap.profiles') return bootstrap?.profiles(payload) ?? { profiles: [{ profileId: contract.BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID, profileDigest: contract.serviceCredentialProfileDigest(), compatibilityDigest: contract.serviceCredentialCompatibilityDigest() }], total: 1, bounded: true, configured: false };
-      if (operation === 'babyx.release.credential-bootstrap.compatibility') return { readOnly: true, compatibilityIdentity: contract.SERVICE_CREDENTIAL_COMPATIBILITY_IDENTITY, compatibilityDigest: contract.serviceCredentialCompatibilityDigest(), configured: bootstrap !== undefined };
+      if (operation === 'babyx.release.credential-bootstrap.profiles') return authority?.profiles() ?? bootstrap?.profiles(payload) ?? { profiles: [{ profileId: contract.BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID, profileDigest: contract.serviceCredentialProfileDigest(), compatibilityDigest: contract.serviceCredentialCompatibilityDigest() }], total: 1, bounded: true, configured: false };
+      if (operation === 'babyx.release.credential-bootstrap.compatibility') return authority?.compatibility() ?? { readOnly: true, compatibilityIdentity: contract.SERVICE_CREDENTIAL_COMPATIBILITY_IDENTITY, compatibilityDigest: contract.serviceCredentialCompatibilityDigest(), configured: bootstrap !== undefined };
       if (operation === 'babyx.release.credential-bootstrap.plan') {
+        if (authority !== undefined) return authority.plan(payload, { ...context, ownerPrincipal: ownerPrincipal(), idempotencyKey: idempotencyKey() });
         const input = { ...payload, ownerPrincipal: ownerPrincipal(), idempotencyKey: idempotencyKey() } as contract.ServiceCredentialBootstrapPlanInput;
         return bootstrap?.plan(input) ?? contract.createServiceCredentialBootstrapPlan(input);
       }
-      if (operation === 'babyx.release.credential-bootstrap.list') return bootstrap?.list(payload as { offset?: number; limit?: number; state?: string; profileId?: string }) ?? { transactions: [], offset: Number(payload.offset ?? 0), limit: Number(payload.limit ?? 50), total: 0, isolated: [], bounded: true, configured: false };
-      if (operation === 'babyx.release.credential-bootstrap.active') return bootstrap?.active(requiredString(payload, 'profileId')) ?? { profileId: requiredString(payload, 'profileId'), state: 'EMPTY', activeGenerationId: null, bounded: true, configured: false };
-      if (operation === 'babyx.release.credential-bootstrap.get') return bootstrap === undefined ? unavailable('service credential bootstrap transaction authority is not configured') : bootstrap.get(requiredString(payload, 'transactionId'));
-      if (operation === 'babyx.release.credential-bootstrap.events') return bootstrap === undefined ? unavailable('service credential bootstrap event authority is not configured') : bootstrap.events(requiredString(payload, 'transactionId'), Number(payload.offset ?? 0), Number(payload.limit ?? 100));
-      if (operation === 'babyx.release.credential-bootstrap.verify') return issuer === undefined ? unavailable('service credential issuance authority is not configured') : issuer.verifyGeneration(requiredString(payload, 'generationId'));
+      if (operation === 'babyx.release.credential-bootstrap.list') return authority?.list(payload) ?? bootstrap?.list(payload as { offset?: number; limit?: number; state?: string; profileId?: string }) ?? { transactions: [], offset: Number(payload.offset ?? 0), limit: Number(payload.limit ?? 50), total: 0, isolated: [], bounded: true, configured: false };
+      if (operation === 'babyx.release.credential-bootstrap.active') {
+        const profileId = requiredString(payload, 'profileId');
+        if (profileId !== contract.BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID) throw new issuerModule.ServiceCredentialIssuanceError('release_credential_bootstrap_invalid_request', 'unsupported service credential profile');
+        return authority?.active() ?? bootstrap?.active(profileId) ?? { profileId, state: 'EMPTY', activeGenerationId: null, bounded: true, configured: false };
+      }
+      if (operation === 'babyx.release.credential-bootstrap.get') return authority?.get(payload) ?? (bootstrap === undefined ? unavailable('service credential bootstrap transaction authority is not configured') : bootstrap.get(requiredString(payload, 'transactionId')));
+      if (operation === 'babyx.release.credential-bootstrap.events') return authority?.events(payload) ?? (bootstrap === undefined ? unavailable('service credential bootstrap event authority is not configured') : bootstrap.events(requiredString(payload, 'transactionId'), Number(payload.offset ?? 0), Number(payload.limit ?? 100)));
+      if (operation === 'babyx.release.credential-bootstrap.verify') return authority?.verify(payload) ?? (issuer === undefined ? unavailable('service credential issuance authority is not configured') : issuer.verifyGeneration(requiredString(payload, 'generationId')));
       if (operation === 'babyx.release.credential-bootstrap.ensure') {
+        if (authority !== undefined) return authority.ensure(payload, { ...context, ownerPrincipal: ownerPrincipal(), idempotencyKey: idempotencyKey() });
         if (bootstrap === undefined || issuer === undefined || lookup === undefined) unavailable('service credential bootstrap, issuance, and durable account lookup authorities must all be configured');
         const input = { profileId: payload.profileId, expectedCompatibilityIdentity: payload.expectedCompatibilityIdentity, policyDecision: payload.policyDecision, ownerPrincipal: ownerPrincipal(), idempotencyKey: idempotencyKey() } as contract.ServiceCredentialBootstrapPlanInput;
         const plan = bootstrap.plan(input);
         if (canonicalize(payload.declaredEffects) !== canonicalize(plan.declaredEffects)) throw new issuerModule.ServiceCredentialIssuanceError('release_credential_bootstrap_invalid_request', 'declared effects do not exactly match the immutable repository-generated bootstrap plan');
         const transaction = bootstrap.requestBootstrap(input);
-        return issuer.issueWithAuthoritativeAccountLookup({
-          transactionId: String(transaction.transactionId),
-          ownerPrincipal: ownerPrincipal(),
-          expectedSequence: Number(transaction.sequence),
-          idempotencyKey: idempotencyKey(),
-        }, lookup);
+        return issuer.issueWithAuthoritativeAccountLookup({ transactionId: String(transaction.transactionId), ownerPrincipal: ownerPrincipal(), expectedSequence: Number(transaction.sequence), idempotencyKey: idempotencyKey() }, lookup);
       }
-      unavailable(`credential bootstrap operation ${operation} is not available before Checkpoint K.5-D`);
+      if (authority === undefined) unavailable(`credential bootstrap operation ${operation} requires the unified Checkpoint K.5-D authority`);
+      const authorityContext = { ...context, ownerPrincipal: ownerPrincipal(), idempotencyKey: idempotencyKey() };
+      if (operation === 'babyx.release.credential-bootstrap.reconcile') return authority.reconcile(payload, authorityContext);
+      if (operation === 'babyx.release.credential-bootstrap.rotate') return authority.rotate(payload, authorityContext);
+      if (operation === 'babyx.release.credential-bootstrap.rollback') return authority.rollback(payload, authorityContext);
+      if (operation === 'babyx.release.credential-bootstrap.revoke') return authority.revoke(payload, authorityContext);
+      if (operation === 'babyx.release.credential-bootstrap.clean') {
+        const transaction = authority.get(payload);
+        if (transaction.ownerPrincipal !== ownerPrincipal() || Number(transaction.sequence) !== Number(payload.expectedSequence)) throw new issuerModule.ServiceCredentialIssuanceError('release_credential_bootstrap_identity_mismatch', 'cleanup transaction ownership or sequence does not match');
+        return authority.clean();
+      }
+      unavailable(`unsupported credential bootstrap operation ${operation}`);
     }
     if (operation === 'babyx.release.credentials.describe') {
       const service = this.releaseCredentialAccessService();

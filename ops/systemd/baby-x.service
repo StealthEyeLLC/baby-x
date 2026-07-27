@@ -2,13 +2,14 @@
 Description=Baby-X unrestricted sovereign runtime
 Requires=baby-x.socket
 After=local-fs.target network.target
+ConditionPathExists=/etc/baby-x/credential-generation.json
 [Service]
 Type=simple
 User=root
 Group=root
+ExecStartPre=/usr/bin/test -r /etc/baby-x/credential-generation.json
 ExecStart=/opt/baby-x/current/runtime/src/cli/main.ts serve
 Environment=NODE_ENV=production
-EnvironmentFile=-/etc/baby-x/environment
 Restart=on-failure
 RestartSec=2
 KillMode=mixed

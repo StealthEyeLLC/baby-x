@@ -66,7 +66,7 @@ export function startRuntimeServer(runtime = new BabyXRuntime()): ReturnType<typ
   const publicKey = readFileSync(publicKeyPath);
   const nonces = new Map<string, number>();
   const server = createServer((socket) => {
-    if (peerUid(socket) !== config.gatewayUid) { socket.destroy(new Error('peer uid mismatch')); return; }
+    if (peerUid(socket) !== config.gatewayUid) { socket.destroy(); return; }
     let pending = Buffer.alloc(0);
     let processing = false;
     socket.on('data', async (chunk) => {

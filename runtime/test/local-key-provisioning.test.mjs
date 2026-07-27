@@ -51,6 +51,7 @@ test('key provisioning is durable, idempotent, private, and complete', (context)
     const first = run(temporary);
     assert.equal(first.status, 0, first.stderr);
     assert.doesNotMatch(first.stdout, /PRIVATE KEY/u);
+    assert.match(first.stdout, new RegExp(`gateway_uid=${fixUid}\\n`, 'u'));
 
     const expected = new Map([
       ['gateway-authority-private.pem', { mode: 0o600, uid: fixUid, gid: horseyGid }],
@@ -70,7 +71,7 @@ test('key provisioning is durable, idempotent, private, and complete', (context)
 
     assert.equal(
       readFileSync(join(temporary, 'runtime-key-environment'), 'utf8'),
-      `BABY_X_GATEWAY_PUBLIC_KEY=${temporary}/gateway-authority-public.pem\nBABY_X_PROOF_PRIVATE_KEY=${temporary}/proof-private.pem\nBABY_X_PROOF_KEY_ID=baby-x-proof-v1\n`,
+      `BABY_X_GATEWAY_UID=${fixUid}\nBABY_X_GATEWAY_PUBLIC_KEY=${temporary}/gateway-authority-public.pem\nBABY_X_PROOF_PRIVATE_KEY=${temporary}/proof-private.pem\nBABY_X_PROOF_KEY_ID=baby-x-proof-v1\n`,
     );
     assert.equal(
       readFileSync(join(temporary, 'gateway-key-environment'), 'utf8'),

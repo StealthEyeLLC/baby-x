@@ -13,6 +13,8 @@ gateway_environment="$config_root/gateway-key-environment"
 [[ $(id -u) == 0 ]] || { echo 'root authority is required to provision Baby-X keys' >&2; exit 1; }
 getent passwd fix-mcp >/dev/null
 getent group horsey >/dev/null
+gateway_uid=$(id -u fix-mcp)
+[[ "$gateway_uid" =~ ^[0-9]+$ ]]
 [[ -x "$node_bin" ]]
 install -d -o root -g horsey -m 0750 "$config_root"
 exec 9>"$config_root/.keys.lock"
@@ -83,6 +85,7 @@ write_environment() {
 }
 
 write_environment "$runtime_environment" <<EOF_RUNTIME
+BABY_X_GATEWAY_UID=$gateway_uid
 BABY_X_GATEWAY_PUBLIC_KEY=$gateway_public
 BABY_X_PROOF_PRIVATE_KEY=$proof_private
 BABY_X_PROOF_KEY_ID=baby-x-proof-v1
@@ -93,5 +96,6 @@ BABY_X_GATEWAY_PRIVATE_KEY=$gateway_private
 BABY_X_PROOF_PUBLIC_KEY=$proof_public
 EOF_GATEWAY
 
+printf 'gateway_uid=%s\n' "$gateway_uid"
 printf 'gateway_public_sha256=%s\n' "$(sha256sum "$gateway_public" | awk '{print $1}')"
 printf 'proof_public_sha256=%s\n' "$(sha256sum "$proof_public" | awk '{print $1}')"

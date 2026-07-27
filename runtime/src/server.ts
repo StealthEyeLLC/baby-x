@@ -15,6 +15,14 @@ interface Envelope extends JsonObject {
   signature: string;
 }
 
+export function appendBoundedRuntimeFrameChunk(pending: Buffer, chunk: Buffer, maximum: number): Buffer {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('maximum frame size must be a positive safe integer');
+  if (chunk.length > maximum + 8 - pending.length) throw new Error('request frame exceeds configured maximum');
+  const next = Buffer.concat([pending, chunk], pending.length + chunk.length);
+  if (next.length >= 8 && next.readUInt32BE(4) > maximum) throw new Error('request frame exceeds configured maximum');
+  return next;
+}
+
 function unsigned(envelope: Envelope): JsonObject {
   const { signature: _signature, ...value } = envelope;
   return value;
@@ -41,26 +49,34 @@ export function startRuntimeServer(runtime = new BabyXRuntime()): ReturnType<typ
   const server = createServer((socket) => {
     if (peerUid(socket) !== config.gatewayUid) { socket.destroy(new Error('peer uid mismatch')); return; }
     let pending = Buffer.alloc(0);
+    let processing = false;
     socket.on('data', async (chunk) => {
-      pending = Buffer.concat([pending, chunk]);
-      while (pending.length >= 8) {
-        const length = pending.readUInt32BE(4);
-        if (pending.length < length + 8) return;
-        const frame = pending.subarray(0, length + 8); pending = pending.subarray(length + 8);
-        const startedAt = new Date().toISOString();
-        try {
-          const envelope = decodeFrame(frame) as Envelope;
-          if (envelope.subject !== config.ownerSubject || envelope.authorityClass !== config.authorityClass) throw new Error('owner identity mismatch');
-          const age = Math.abs(Date.now() - Date.parse(envelope.timestamp)); if (!Number.isFinite(age) || age > config.requestMaxAgeMs) throw new Error('stale request');
-          const seen = nonces.get(envelope.nonce); if (seen && Date.now() - seen < config.nonceRetentionMs) throw new Error('nonce replay'); nonces.set(envelope.nonce, Date.now());
-          if (!verifyCanonical(publicKey, unsigned(envelope), envelope.signature)) throw new Error('invalid signature');
-          const result = await runtime.execute(envelope.operation, envelope.payload ?? {}, { idempotencyKey: envelope.idempotencyKey, subject: envelope.subject, authorityClass: envelope.authorityClass });
-          const proof = runtime.createProof(envelope.requestId, envelope.operation, true, startedAt, result);
-          socket.write(encodeFrame({ requestId: envelope.requestId, ok: true, result, proof }));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          socket.write(encodeFrame({ ok: false, error: message, digest: canonicalize(message) }));
-        }
+      if (processing) { socket.destroy(new Error('multiple concurrent request frames are not supported')); return; }
+      try { pending = appendBoundedRuntimeFrameChunk(pending, chunk, config.maxFrameSize); }
+      catch (error) { socket.destroy(error instanceof Error ? error : new Error(String(error))); return; }
+      if (pending.length < 8) return;
+      const length = pending.readUInt32BE(4);
+      if (pending.length < length + 8) return;
+      if (pending.length !== length + 8) { socket.destroy(new Error('exactly one request frame is required')); return; }
+      processing = true;
+      const frame = pending;
+      pending = Buffer.alloc(0);
+      const startedAt = new Date().toISOString();
+      try {
+        const envelope = decodeFrame(frame, config.maxFrameSize) as Envelope;
+        if (envelope.subject !== config.ownerSubject || envelope.authorityClass !== config.authorityClass) throw new Error('owner identity mismatch');
+        const age = Math.abs(Date.now() - Date.parse(envelope.timestamp));
+        if (!Number.isFinite(age) || age > config.requestMaxAgeMs) throw new Error('stale request');
+        const seen = nonces.get(envelope.nonce);
+        if (seen && Date.now() - seen < config.nonceRetentionMs) throw new Error('nonce replay');
+        nonces.set(envelope.nonce, Date.now());
+        if (!verifyCanonical(publicKey, unsigned(envelope), envelope.signature)) throw new Error('invalid signature');
+        const result = await runtime.execute(envelope.operation, envelope.payload ?? {}, { idempotencyKey: envelope.idempotencyKey, subject: envelope.subject, authorityClass: envelope.authorityClass });
+        const proof = runtime.createProof(envelope.requestId, envelope.operation, true, startedAt, result);
+        socket.end(encodeFrame({ requestId: envelope.requestId, ok: true, result, proof }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        socket.end(encodeFrame({ ok: false, error: message, digest: canonicalize(message) }));
       }
     });
   });

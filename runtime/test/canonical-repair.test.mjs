@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BabyXRuntime, FileManager, JobManager, sha256 } from '../../dist/runtime/core.js';
+import { appendBoundedRuntimeFrameChunk } from '../../dist/runtime/server.js';
 
 test('spec validation rejects malformed statements and accepts complete statements', async () => {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-spec-repair-'));
@@ -89,4 +90,15 @@ test('catalog and dispatcher agree on artifact verification and machine authorit
     for (const operation of ['babyx.machine.raw', 'babyx.machine.clone', 'babyx.machine.network.set', 'babyx.pty.create', 'babyx.artifact.begin']) assert.equal(names.includes(operation), false);
     await assert.rejects(() => runtime.execute('babyx.machine.raw', {}), /unknown operation/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('runtime frame accumulation rejects oversized chunks and declared frames before concatenation', () => {
+  assert.throws(() => appendBoundedRuntimeFrameChunk(Buffer.alloc(0), Buffer.alloc(33), 24), /exceeds configured maximum/u);
+  const header = Buffer.alloc(8);
+  header.write('QRT1', 0);
+  header.writeUInt32BE(25, 4);
+  assert.throws(() => appendBoundedRuntimeFrameChunk(Buffer.alloc(0), header, 24), /exceeds configured maximum/u);
+  const partial = appendBoundedRuntimeFrameChunk(Buffer.alloc(0), Buffer.from('QRT1'), 24);
+  assert.equal(partial.length, 4);
 });

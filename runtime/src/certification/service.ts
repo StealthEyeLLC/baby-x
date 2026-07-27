@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
 import {
-  AtomicStore,
   canonicalize,
   sha256,
   type JobRecord,
@@ -11,6 +10,7 @@ import {
 } from '../core.ts';
 import { canonicalMachineEvidence } from '../machines/schemas.ts';
 import { decideExecutionPolicy, type ExecutionPolicyDecision } from '../policy/execution.ts';
+import { DurableClaimStore, DurableRecordStore } from '../storage/record-store.ts';
 
 export const CERTIFICATION_SCHEMA_VERSION = '1.0.0' as const;
 
@@ -399,57 +399,65 @@ function publicRecord(record: CertificationRecord): JsonObject {
 }
 
 class CertificationStore {
-  private readonly store: AtomicStore<CertificationStoreState>;
+  private readonly records: DurableRecordStore<CertificationRecord>;
+  private readonly claims: DurableClaimStore<CertificationRecord>;
 
   constructor(root: string) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
-    this.store = new AtomicStore(join(root, 'certifications.json'), { records: {}, byIdempotencyKey: {} });
+    this.records = new DurableRecordStore(join(root, 'record-store-v1'));
+    this.claims = new DurableClaimStore(join(root, 'idempotency-v1'));
+    this.importLegacy(join(root, 'certifications.json'));
+  }
+
+  private importLegacy(path: string): void {
+    if (!existsSync(path)) return;
+    let legacy: CertificationStoreState;
+    try { legacy = JSON.parse(readFileSync(path, 'utf8')) as CertificationStoreState; }
+    catch (error) { throw new CertificationError('certification_store_corrupt', 'legacy certification store is corrupt', { cause: error instanceof Error ? error.message : String(error) }); }
+    for (const [id, record] of Object.entries(legacy.records ?? {})) if (!this.records.has(id)) this.records.create(id, record);
+    for (const [key, id] of Object.entries(legacy.byIdempotencyKey ?? {})) {
+      const record = legacy.records?.[id];
+      if (record !== undefined) this.claims.claim(key, record.requestDigest, id, record);
+    }
   }
 
   createOrReplay(idempotencyKey: string, requestDigest: string, factory: () => CertificationRecord): CertificationRecord {
-    let result: CertificationRecord | undefined;
-    this.store.update((current) => {
-      const existingId = current.byIdempotencyKey[idempotencyKey];
-      if (existingId !== undefined) {
-        const existing = current.records[existingId];
-        if (existing === undefined) throw new CertificationError('certification_store_corrupt', 'certification idempotency index points to a missing record');
-        if (existing.requestDigest !== requestDigest) throw new CertificationError('certification_idempotency_conflict', 'idempotency key was already used with a different certification request digest');
-        result = existing;
-        return current;
-      }
-      const record = factory();
-      if (current.records[record.certificationId] !== undefined) throw new CertificationError('certification_store_conflict', 'certification ID already exists');
-      result = record;
-      return {
-        records: { ...current.records, [record.certificationId]: record },
-        byIdempotencyKey: { ...current.byIdempotencyKey, [idempotencyKey]: record.certificationId },
-      };
-    });
-    if (result === undefined) throw new CertificationError('certification_store_corrupt', 'certification create did not produce a record');
-    return structuredClone(result);
+    const existingClaim = this.claims.get(idempotencyKey);
+    if (existingClaim !== undefined) {
+      if (existingClaim.requestDigest !== requestDigest) throw new CertificationError('certification_idempotency_conflict', 'idempotency key was already used with a different certification request digest');
+      if (!this.records.has(existingClaim.recordId)) this.records.create(existingClaim.recordId, existingClaim.record);
+      const existing = this.records.get(existingClaim.recordId);
+      if (existing.requestDigest !== requestDigest) throw new CertificationError('certification_store_corrupt', 'certification claim points to a conflicting record');
+      return structuredClone(existing);
+    }
+    const proposed = factory();
+    if (this.records.has(proposed.certificationId)) throw new CertificationError('certification_store_conflict', 'certification ID already exists');
+    const claim = this.claims.claim(idempotencyKey, requestDigest, proposed.certificationId, proposed);
+    if (claim.requestDigest !== requestDigest) throw new CertificationError('certification_idempotency_conflict', 'idempotency key was already used with a different certification request digest');
+    if (!this.records.has(claim.recordId)) this.records.create(claim.recordId, claim.record);
+    return structuredClone(this.records.get(claim.recordId));
   }
 
   get(id: string): CertificationRecord {
-    const record = this.store.read().records[id];
-    if (record === undefined) throw new CertificationError('certification_not_found', 'certification was not found');
-    return structuredClone(record);
+    try { return structuredClone(this.records.get(id)); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'record not found') throw new CertificationError('certification_not_found', 'certification was not found');
+      throw new CertificationError('certification_store_corrupt', error instanceof Error ? error.message : 'certification record is corrupt');
+    }
   }
 
-  list(): CertificationRecord[] {
-    return Object.values(this.store.read().records).map((record) => structuredClone(record));
+  list(predicate: (record: CertificationRecord) => boolean, offset: number, limit: number) {
+    return this.records.scan(predicate, offset, limit);
   }
 
   update(id: string, updater: (record: CertificationRecord) => CertificationRecord): CertificationRecord {
-    let result: CertificationRecord | undefined;
-    this.store.update((current) => {
-      const existing = current.records[id];
-      if (existing === undefined) throw new CertificationError('certification_not_found', 'certification was not found');
-      const next = updater(structuredClone(existing));
-      result = { ...next, revision: existing.revision + 1, updatedAt: new Date().toISOString() };
-      return { ...current, records: { ...current.records, [id]: result } };
-    });
-    if (result === undefined) throw new CertificationError('certification_store_corrupt', 'certification update did not produce a record');
-    return structuredClone(result);
+    try {
+      return this.records.update(id, (existing) => ({ ...updater(existing), revision: existing.revision + 1, updatedAt: new Date().toISOString() }));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'record not found') throw new CertificationError('certification_not_found', 'certification was not found');
+      if (error instanceof CertificationError) throw error;
+      throw new CertificationError('certification_store_corrupt', error instanceof Error ? error.message : 'certification update failed');
+    }
   }
 }
 
@@ -549,12 +557,12 @@ export class CertificationService {
     if (state !== undefined && !['REQUESTED', 'CREATING', 'STARTING', 'RUNNING', 'CLEANING', 'SUCCEEDED', 'FAILED', 'PRESERVED', 'RECOVERY_REQUIRED'].includes(state)) throw new CertificationError('certification_invalid_request', 'state filter is invalid');
     const offset = payload.offset === undefined ? 0 : integer(payload.offset, 'offset', 0, Number.MAX_SAFE_INTEGER);
     const limit = payload.limit === undefined ? 50 : integer(payload.limit, 'limit', 1, 200);
-    const filtered = this.store.list()
-      .filter((record) => subject === undefined || record.ownerPrincipal === subject)
-      .filter((record) => state === undefined || record.state === state)
-      .sort((left, right) => left.certificationId.localeCompare(right.certificationId));
-    const records = filtered.slice(offset, offset + limit).map(publicRecord);
-    return { operation: 'babyx.certification.list', certifications: records, offset, limit, total: filtered.length, nextOffset: offset + records.length < filtered.length ? offset + records.length : null };
+    const page = this.store.list(
+      (record) => (subject === undefined || record.ownerPrincipal === subject) && (state === undefined || record.state === state),
+      offset,
+      limit,
+    );
+    return { operation: 'babyx.certification.list', certifications: page.records.sort((left, right) => left.certificationId.localeCompare(right.certificationId)).map(publicRecord), offset, limit, total: page.total, nextOffset: page.nextOffset, corruptRecordIds: page.corruptRecordIds };
   }
 
   async cleanup(payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {

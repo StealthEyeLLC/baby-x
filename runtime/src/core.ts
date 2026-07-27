@@ -739,9 +739,7 @@ export class BabyXRuntime {
     if (operation === 'babyx.artifact.list') {
       const manager = await this.artifactManager();
       const { offset, limit } = pageArguments(payload);
-      const artifacts = manager.list(offset, limit);
-      const total = manager.count();
-      return { artifacts, offset, limit, total, nextOffset: offset + artifacts.length < total ? offset + artifacts.length : null };
+      return manager.listPage(offset, limit);
     }
     if (operation === 'babyx.artifact.verify') return (await this.artifactManager()).verify(requiredString(payload, 'id'));
     if (operation.startsWith('babyx.file.')) return this.fileOperation(operation, payload);

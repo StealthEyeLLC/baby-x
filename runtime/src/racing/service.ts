@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AtomicStore, canonicalize, sha256, type JsonObject, type RuntimeExecutionContext } from '../core.ts';
+import { canonicalize, sha256, type JsonObject, type RuntimeExecutionContext } from '../core.ts';
 import type { CertificationService } from '../certification/service.ts';
 import { canonicalMachineEvidence } from '../machines/schemas.ts';
 import { decideExecutionPolicy, type ExecutionPolicyDecision } from '../policy/execution.ts';
+import { DurableClaimStore, DurableRecordStore } from '../storage/record-store.ts';
 
 export const CANDIDATE_RACE_SCHEMA_VERSION = '1.0.0' as const;
 export type CandidateRaceState = 'REQUESTED' | 'RUNNING' | 'SCORING' | 'COMPLETED' | 'NO_WINNER' | 'RECOVERY_REQUIRED';
@@ -263,43 +264,62 @@ function publicRecord(record: RaceRecord): JsonObject {
 }
 
 class RaceStore {
-  private readonly store: AtomicStore<RaceStoreState>;
+  private readonly records: DurableRecordStore<RaceRecord>;
+  private readonly claims: DurableClaimStore<RaceRecord>;
+
   constructor(root: string) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
-    this.store = new AtomicStore(join(root, 'races.json'), { records: {}, byIdempotencyKey: {} });
+    this.records = new DurableRecordStore(join(root, 'record-store-v1'));
+    this.claims = new DurableClaimStore(join(root, 'idempotency-v1'));
+    this.importLegacy(join(root, 'races.json'));
   }
+
+  private importLegacy(path: string): void {
+    if (!existsSync(path)) return;
+    let legacy: RaceStoreState;
+    try { legacy = JSON.parse(readFileSync(path, 'utf8')) as RaceStoreState; }
+    catch (error) { throw new CandidateRaceError('candidate_race_store_corrupt', 'legacy race store is corrupt', { cause: error instanceof Error ? error.message : String(error) }); }
+    for (const [id, record] of Object.entries(legacy.records ?? {})) if (!this.records.has(id)) this.records.create(id, record);
+    for (const [key, id] of Object.entries(legacy.byIdempotencyKey ?? {})) {
+      const record = legacy.records?.[id];
+      if (record !== undefined) this.claims.claim(key, record.requestDigest, id, record);
+    }
+  }
+
   createOrReplay(key: string, requestDigest: string, factory: () => RaceRecord): RaceRecord {
-    let result: RaceRecord | undefined;
-    this.store.update((current) => {
-      const existingId = current.byIdempotencyKey[key];
-      if (existingId !== undefined) {
-        const existing = current.records[existingId];
-        if (existing === undefined) throw new CandidateRaceError('candidate_race_store_corrupt', 'idempotency index points to a missing race');
-        if (existing.requestDigest !== requestDigest) throw new CandidateRaceError('candidate_race_idempotency_conflict', 'idempotency key was used with a different race request');
-        result = existing; return current;
-      }
-      const record = factory(); result = record;
-      return { records: { ...current.records, [record.raceId]: record }, byIdempotencyKey: { ...current.byIdempotencyKey, [key]: record.raceId } };
-    });
-    if (result === undefined) throw new CandidateRaceError('candidate_race_store_corrupt', 'race creation produced no record');
-    return structuredClone(result);
+    const existingClaim = this.claims.get(key);
+    if (existingClaim !== undefined) {
+      if (existingClaim.requestDigest !== requestDigest) throw new CandidateRaceError('candidate_race_idempotency_conflict', 'idempotency key was used with a different race request');
+      if (!this.records.has(existingClaim.recordId)) this.records.create(existingClaim.recordId, existingClaim.record);
+      const existing = this.records.get(existingClaim.recordId);
+      if (existing.requestDigest !== requestDigest) throw new CandidateRaceError('candidate_race_store_corrupt', 'race claim points to a conflicting record');
+      return structuredClone(existing);
+    }
+    const proposed = factory();
+    if (this.records.has(proposed.raceId)) throw new CandidateRaceError('candidate_race_store_conflict', 'candidate race ID already exists');
+    const claim = this.claims.claim(key, requestDigest, proposed.raceId, proposed);
+    if (claim.requestDigest !== requestDigest) throw new CandidateRaceError('candidate_race_idempotency_conflict', 'idempotency key was used with a different race request');
+    if (!this.records.has(claim.recordId)) this.records.create(claim.recordId, claim.record);
+    return structuredClone(this.records.get(claim.recordId));
   }
+
   get(id: string): RaceRecord {
-    const record = this.store.read().records[id];
-    if (record === undefined) throw new CandidateRaceError('candidate_race_not_found', 'candidate race was not found');
-    return structuredClone(record);
+    try { return structuredClone(this.records.get(id)); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'record not found') throw new CandidateRaceError('candidate_race_not_found', 'candidate race was not found');
+      throw new CandidateRaceError('candidate_race_store_corrupt', error instanceof Error ? error.message : 'candidate race record is corrupt');
+    }
   }
-  list(): RaceRecord[] { return Object.values(this.store.read().records).map((record) => structuredClone(record)); }
+
+  list(predicate: (record: RaceRecord) => boolean, offset: number, limit: number) { return this.records.scan(predicate, offset, limit); }
+
   update(id: string, now: string, updater: (record: RaceRecord) => RaceRecord): RaceRecord {
-    let result: RaceRecord | undefined;
-    this.store.update((current) => {
-      const record = current.records[id];
-      if (record === undefined) throw new CandidateRaceError('candidate_race_not_found', 'candidate race was not found');
-      result = { ...updater(structuredClone(record)), revision: record.revision + 1, updatedAt: now };
-      return { ...current, records: { ...current.records, [id]: result } };
-    });
-    if (result === undefined) throw new CandidateRaceError('candidate_race_store_corrupt', 'race update produced no record');
-    return structuredClone(result);
+    try { return this.records.update(id, (record) => ({ ...updater(record), revision: record.revision + 1, updatedAt: now })); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'record not found') throw new CandidateRaceError('candidate_race_not_found', 'candidate race was not found');
+      if (error instanceof CandidateRaceError) throw error;
+      throw new CandidateRaceError('candidate_race_store_corrupt', error instanceof Error ? error.message : 'race update failed');
+    }
   }
 }
 
@@ -381,9 +401,9 @@ export class CandidateRaceService {
     if (state !== undefined && !['REQUESTED', 'RUNNING', 'SCORING', 'COMPLETED', 'NO_WINNER', 'RECOVERY_REQUIRED'].includes(state)) throw new CandidateRaceError('candidate_race_invalid_request', 'state filter is invalid');
     const offset = payload.offset === undefined ? 0 : integer(payload.offset, 'offset', 0, Number.MAX_SAFE_INTEGER);
     const limit = payload.limit === undefined ? 50 : integer(payload.limit, 'limit', 1, 200);
-    const records = this.store.list().filter((record) => subject === undefined || record.ownerPrincipal === subject).filter((record) => state === undefined || record.state === state).sort((a, b) => a.raceId.localeCompare(b.raceId));
-    const selected = records.slice(offset, offset + limit).map(publicRecord);
-    return { operation: 'babyx.race.list', races: selected, offset, limit, total: records.length, nextOffset: offset + selected.length < records.length ? offset + selected.length : null };
+    const page = this.store.list((record) => (subject === undefined || record.ownerPrincipal === subject) && (state === undefined || record.state === state), offset, limit);
+    const selected = page.records.sort((a, b) => a.raceId.localeCompare(b.raceId)).map(publicRecord);
+    return { operation: 'babyx.race.list', races: selected, offset, limit, total: page.total, nextOffset: page.nextOffset, corruptRecordIds: page.corruptRecordIds };
   }
   private authorize(record: RaceRecord, context: RuntimeExecutionContext): void {
     const subject = readSubject(context); if (subject !== undefined && subject !== record.ownerPrincipal) throw new CandidateRaceError('candidate_race_not_found', 'candidate race was not found');

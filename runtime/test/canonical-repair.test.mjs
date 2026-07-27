@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BabyXRuntime, FileManager, JobManager, sha256 } from '../../dist/runtime/core.js';
 import { appendBoundedRuntimeFrameChunk } from '../../dist/runtime/server.js';
 import { ArtifactManager } from '../../dist/runtime/artifacts/manager.js';
+import { DurableRecordStore } from '../../dist/runtime/storage/record-store.js';
 
 test('spec validation rejects malformed statements and accepts complete statements', async () => {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-spec-repair-'));
@@ -178,5 +179,38 @@ test('artifact writes are durable and artifact reads are bounded and paginated',
     const downloaded = manager.download(String(records[0].id), 0, 4);
     assert.equal(Buffer.from(downloaded.data, 'base64').toString('utf8'), 'arti');
     assert.equal(downloaded.eof, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('durable record scans isolate a corrupt record without hiding healthy records', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-record-isolation-'));
+  try {
+    const store = new DurableRecordStore(root);
+    assert.equal(store.create('good-a', { id: 'good-a', value: 1 }), true);
+    assert.equal(store.create('bad', { id: 'bad', value: 2 }), true);
+    assert.equal(store.create('good-b', { id: 'good-b', value: 3 }), true);
+    writeFileSync(join(root, 'records', 'bad.json'), '{not-json', 'utf8');
+    const page = store.scan(() => true, 0, 10);
+    assert.deepEqual(page.records.map((record) => record.id), ['good-a', 'good-b']);
+    assert.deepEqual(page.corruptRecordIds, ['bad']);
+    assert.equal(page.total, 2);
+    assert.throws(() => store.get('bad'), /corrupt/u);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('artifact metadata listing isolates one corrupt record and remains bounded', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-artifact-isolation-'));
+  try {
+    const manager = new ArtifactManager(root);
+    const first = manager.begin('first');
+    const corrupt = manager.begin('corrupt');
+    const third = manager.begin('third');
+    writeFileSync(join(root, 'record-store-v1', 'records', `${corrupt.id}.json`), '{broken', 'utf8');
+    const page = manager.listPage(0, 10);
+    assert.deepEqual(new Set(page.artifacts.map((record) => record.id)), new Set([first.id, third.id]));
+    assert.deepEqual(page.corruptRecordIds, [corrupt.id]);
+    assert.equal(page.total, 2);
+    assert.throws(() => manager.listPage(0, 1_001), /limit must be between 1 and 1000/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

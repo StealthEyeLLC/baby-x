@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -293,9 +293,12 @@ test('durable running step resumes after service restart without duplicate execu
   void f.service.run(request({ profile: { id: 'resume-profile', version: '1', steps: [{ id: 'build', phase: 'build', argv: ['/usr/bin/printf', 'build'], cwd: '/', required: true }] } }), { ...context, idempotencyKey: 'cert-interrupted-run-0001' });
   for (let attempts = 0; attempts < 20 && f.machine.calls.filter(([name]) => name === 'exec').length === 0; attempts += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(f.machine.calls.filter(([name]) => name === 'exec').length, 1);
-  const persisted = JSON.parse(readFileSync(join(f.root, 'certification', 'certifications.json'), 'utf8'));
-  const certificationId = Object.keys(persisted.records)[0];
-  assert.equal(persisted.records[certificationId].steps[0].state, 'running');
+  const recordsRoot = join(f.root, 'certification', 'record-store-v1', 'records');
+  const recordName = readdirSync(recordsRoot).find((name) => name.endsWith('.json'));
+  assert.ok(recordName);
+  const certificationId = recordName.slice(0, -5);
+  const persisted = JSON.parse(readFileSync(join(recordsRoot, recordName), 'utf8'));
+  assert.equal(persisted.steps[0].state, 'running');
   holdRunning = false;
   const restarted = new CertificationService({ stateRoot: f.root, machine: f.machine, jobs: f.jobs, artifacts: f.artifacts, sleep: async () => {}, jobPollIntervalMs: 1, machineSettleTimeoutMs: 5 });
   const resumed = await restarted.resume({ certificationId, reason: 'process restarted' }, { ...context, idempotencyKey: 'cert-interrupted-resume-0001' });

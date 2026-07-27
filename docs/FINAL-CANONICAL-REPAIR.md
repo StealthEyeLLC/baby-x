@@ -8,12 +8,13 @@ Status: **implementation verified; source-only; not deployed**
 - Branch: `build/baby-x-canonical-repair-v1`
 - Audited base commit: `b8dcc150ddc175b2ad00099df405b8a3bf0e843a`
 - Audited base tree: `2045a746e0c6d928cf3354fd0ef9544918fbf514`
-- Verified implementation commit: `1b68ca6808716385141537296a8a204486d3d54a`
-- Verified implementation tree: `0b76bb4767817769a27c6a38863cd51874229892`
-- Repair commits above audited base: `6`
-- Changed tracked paths relative to audited base: `24`
+- Verified implementation commit: `702a6254984775e20d16700fa1e1990f32a24660`
+- Verified implementation tree: `02fa0ec672efcebf9b7359a23299d49ed1fa59d0`
+- Source-changing repair commits above audited base: `7`
+- Preliminary evidence commits before final implementation: `1`
+- Changed tracked paths relative to audited base: `25`
 
-This document is evidence for the exact implementation identity above. The commit adding this document must differ from the implementation commit by this file only.
+This document is evidence for the exact implementation identity above. Every evidence commit after the implementation commit changes only this file; `git diff 702a6254984775e20d16700fa1e1990f32a24660..HEAD` must therefore contain only `docs/FINAL-CANONICAL-REPAIR.md`.
 
 ## Verified checkpoints
 
@@ -22,8 +23,14 @@ This document is evidence for the exact implementation identity above. The commi
 | 1 | `7df9ce6824a75942f4586b5dc722430feff80e30` | `fa949ce238e71376588445d7ceee1c53a76f7af9` | Repair false contracts, durable job safety, file CAS, catalog/dispatcher mismatch, and machine-authority bypasses. |
 | 2 | `be340900242367d64a1483d3da6d92f682b67a0a` | `d942bb440c59035439088cf116da26239908bf76` | Bound gateway HTTP bodies and QRT1 frame accumulation before concatenation. |
 | 3 | `6e174b376d1537755d666337b940c806ccad8fe1` | `374697e9d81ad2009581979d6dbf0c47d7b8ef21` | Publish finite operation schemas and execution metadata with a deterministic catalog digest. |
-| 4 | `a74d0621d027383b2605beca068105ecc18fa4d7` | `86981606832a4f5f56cb691be76512bd4f7250bf` | Isolate artifact, certification, and racing records; add bounded evidence reads and corruption isolation. |
-| 5 | `1b68ca6808716385141537296a8a204486d3d54a` | `0b76bb4767817769a27c6a38863cd51874229892` | Consolidate canonical truth and remove unused duplicate facades. |
+| 4 | `6f04cb72d45b1810bc3562fb0240d61864ce7224` | `043b6b8ac06e337536a97147916826992a2055aa` | Enforce the sole machine authority and bounded state/list surfaces. |
+| 5 | `a74d0621d027383b2605beca068105ecc18fa4d7` | `86981606832a4f5f56cb691be76512bd4f7250bf` | Isolate artifact, certification, and racing records; add bounded evidence reads and corruption isolation. |
+| 6 | `1b68ca6808716385141537296a8a204486d3d54a` | `0b76bb4767817769a27c6a38863cd51874229892` | Consolidate canonical truth and remove unused duplicate facades. |
+| 7 | `702a6254984775e20d16700fa1e1990f32a24660` | `02fa0ec672efcebf9b7359a23299d49ed1fa59d0` | Confine artifact content to the artifact authority root and remove temporary files after failed record serialization. |
+
+## Evidence-ledger correction
+
+Preliminary evidence commit `529c4291bda01281e05cde04e3448ca096952844` omitted checkpoint `6f04cb72d45b1810bc3562fb0240d61864ce7224` from its table. A later hardening checkpoint, `702a6254984775e20d16700fa1e1990f32a24660`, then confined artifact paths and cleaned failed temporary record writes. This corrected evidence supersedes the preliminary ledger and binds the final verified implementation identity above. No deployment claim changed.
 
 ## Audit findings closed
 
@@ -40,12 +47,14 @@ This document is evidence for the exact implementation identity above. The commi
 - Job, file, artifact, specification, generic object, certification, and race reads are bounded or paginated.
 - File patching is compare-and-swap and atomic at exact offsets.
 - Canonical documentation defers generated facts to source, and unused duplicate facades are removed.
+- Artifact content paths are confined to the artifact authority root, including legacy and symlinked records.
+- Failed record serialization removes its temporary file before returning failure.
 
 ## Verification
 
 The implementation gate used exactly Node.js `24.18.0` and produced:
 
-- tests: `155 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo`;
+- tests: `157 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo`;
 - lint: passed;
 - shell syntax: passed;
 - `git diff --check`: passed;

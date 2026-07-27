@@ -34,6 +34,7 @@ import {
   BABY_X_PRODUCTION_GATEWAY_ACCOUNT,
   BABY_X_PRODUCTION_GATEWAY_UID,
   SERVICE_CREDENTIAL_ALGORITHM,
+  serviceCredentialCompatibilityDigest,
   SERVICE_CREDENTIAL_PRIVATE_ENCODING,
   SERVICE_CREDENTIAL_PUBLIC_ENCODING,
 } from './service-credentials.ts';
@@ -438,6 +439,97 @@ export class ServiceCredentialFilesystemAuthority {
     };
   }
 
+  verifyGeneration(generationIdValue: string): JsonObject {
+    const generationId = identifier(generationIdValue, 'generationId');
+    const generation = this.options.store.getRecord(GENERATION_SCHEMA, generationId);
+    const state = String(generation.state);
+    if (state === 'REVOKED') throw new ServiceCredentialIssuanceError('release_credential_bootstrap_revoked', 'revoked credential generations cannot be verified for consumption');
+    if (!['READY', 'ACTIVE', 'RETIRED'].includes(state)) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_invalid_state', `credential generation ${generationId} is not verified and consumable`);
+    if (generation.compatibilityDigest !== serviceCredentialCompatibilityDigest()) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_incompatible', 'credential generation compatibility identity no longer matches the certified controller');
+
+    const privateReferences = Array.isArray(generation.privateReferences) ? generation.privateReferences as JsonObject[] : [];
+    const credentialSetIds = [...new Set(privateReferences.map((entry) => String(entry.credentialSetId ?? '')).filter((value) => value.length > 0))];
+    if (credentialSetIds.length !== 1) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'credential generation does not resolve to exactly one private credential set');
+    const credentialReference = this.options.store.getRecord(CREDENTIAL_REFERENCE_SCHEMA, credentialSetIds[0]!);
+    const entries = Array.isArray(credentialReference.entries) ? credentialReference.entries as JsonObject[] : [];
+    const gatewayEntry = entries.find((entry) => entry.name === 'baby-x-gateway-authority-private');
+    const proofEntry = entries.find((entry) => entry.name === 'baby-x-proof-private');
+    if (gatewayEntry === undefined || proofEntry === undefined) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'private credential reference set is incomplete');
+
+    const publicMaterials = Array.isArray(generation.publicMaterials) ? generation.publicMaterials as JsonObject[] : [];
+    const proofPublic = publicMaterials.find((entry) => entry.name === 'proof-public');
+    if (proofPublic === undefined || typeof proofPublic.path !== 'string') throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'proof public material reference is incomplete');
+
+    const gatewayPath = String(gatewayEntry.sourceRef ?? '');
+    const proofPath = String(proofEntry.sourceRef ?? '');
+    assertRegularSingleLink(gatewayPath, this.privateUid, this.privateGid, PRIVATE_MODE);
+    assertRegularSingleLink(proofPath, this.privateUid, this.privateGid, PRIVATE_MODE);
+    assertRegularSingleLink(proofPublic.path, this.publicUid, this.publicGid, PUBLIC_MODE);
+
+    const gatewayBytes = readFileSync(gatewayPath);
+    const proofBytes = readFileSync(proofPath);
+    const publicBytes = readFileSync(proofPublic.path);
+    try {
+      if (sha256(gatewayBytes) !== gatewayEntry.objectDigest || sha256(proofBytes) !== proofEntry.objectDigest || sha256(publicBytes) !== proofPublic.objectDigest) {
+        throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'credential object digest readback mismatch');
+      }
+      const gatewayPrivate = privateKeyFromPem(gatewayBytes);
+      const proofPrivate = privateKeyFromPem(proofBytes);
+      const gatewayDerived = publicPemFromPrivate(gatewayPrivate);
+      const proofDerived = publicPemFromPrivate(proofPrivate);
+      const observedPublic = createPublicKey(publicBytes);
+      if (observedPublic.asymmetricKeyType !== 'ed25519') throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'proof public material algorithm is not Ed25519');
+      const observedDer = Buffer.from(observedPublic.export({ type: 'spki', format: 'der' }));
+      try {
+        verifyPair(gatewayPrivate, gatewayDerived.der);
+        verifyPair(proofPrivate, observedDer);
+        if (!proofDerived.der.equals(observedDer)) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'proof private and public material do not correspond');
+        const expectedFingerprints = new Map((Array.isArray(generation.publicFingerprints) ? generation.publicFingerprints as JsonObject[] : []).map((entry) => [String(entry.name), String(entry.fingerprintSha256)]));
+        if (expectedFingerprints.get('gateway-authority-public') !== gatewayDerived.fingerprint || expectedFingerprints.get('proof-public') !== sha256(observedDer)) {
+          throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'public fingerprint readback mismatch');
+        }
+        const identity = validateServiceIdentityObservation(generation.serviceIdentityBinding as ServiceIdentityObservation);
+        const temporaryNames = [
+          ...readdirSync(dirname(gatewayPath)),
+          ...readdirSync(dirname(proofPublic.path)),
+        ].filter((name) => name.includes('.tmp-'));
+        if (temporaryNames.length !== 0) throw new ServiceCredentialIssuanceError('release_credential_bootstrap_verification_failed', 'temporary credential material remains after issuance');
+        const observation = {
+          generationId,
+          state,
+          profileId: generation.profileId,
+          publicFingerprints: generation.publicFingerprints,
+          serviceIdentity: identity,
+          ownershipChecks: [
+            { name: 'gateway-authority-private', uid: this.privateUid, gid: this.privateGid, mode: '0400', verified: true },
+            { name: 'proof-private', uid: this.privateUid, gid: this.privateGid, mode: '0400', verified: true },
+            { name: 'proof-public', uid: this.publicUid, gid: this.publicGid, mode: '0640', verified: true },
+          ],
+          modeChecks: { privateMode: '0400', publicMode: '0640', verified: true },
+          keyRelationships: [
+            { name: 'gateway-authority', algorithm: SERVICE_CREDENTIAL_ALGORITHM, verified: true },
+            { name: 'proof', algorithm: SERVICE_CREDENTIAL_ALGORITHM, verified: true },
+          ],
+          temporaryMaterialCleanup: { temporaryMaterialAbsent: true, positiveAbsenceVerified: true },
+          forbiddenAuthorityChecks: [{ path: FORBIDDEN_AUTHORITY_PATH, accessed: false, verified: true }],
+          compatibilityDigest: generation.compatibilityDigest,
+          verifiedAt: this.now(),
+        };
+        return {
+          verificationId: `scv-${sha256(canonicalize(observation)).slice(0, 40)}`,
+          ...observation,
+          observationDigest: sha256(canonicalize(observation)),
+          rawPrivateMaterialReturned: false,
+        };
+      } finally {
+        gatewayDerived.pem.fill(0); gatewayDerived.der.fill(0);
+        proofDerived.pem.fill(0); proofDerived.der.fill(0); observedDer.fill(0);
+      }
+    } finally {
+      gatewayBytes.fill(0); proofBytes.fill(0); publicBytes.fill(0);
+    }
+  }
+
   private inject(stage: ServiceCredentialIssuerFaultStage, context: JsonObject): void {
     this.options.faultInjector?.(stage, structuredClone(context));
   }
@@ -592,6 +684,7 @@ export class ServiceCredentialFilesystemAuthority {
       profileDigest: transaction.profileDigest,
       ordinal,
       state: 'READY',
+      ...(transaction.rotationPredecessorGenerationId === undefined ? {} : { predecessorGenerationId: transaction.rotationPredecessorGenerationId }),
       privateReferences: material.privateReferences,
       publicMaterials: material.publicMaterials,
       publicFingerprints: material.publicFingerprints,

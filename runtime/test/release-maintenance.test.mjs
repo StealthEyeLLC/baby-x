@@ -173,8 +173,8 @@ test('J03 soft reboot truth is userspace-only and never satisfies a kernel updat
 
 test('J04 six maintenance operations are exact, unique, and mutation-classified', () => {
   const definitions=operationDefinitions();
-  assert.equal(definitions.length,252);
-  assert.equal(new Set(definitions.map((entry)=>entry.operation)).size,252);
+  assert.equal(definitions.length,267);
+  assert.equal(new Set(definitions.map((entry)=>entry.operation)).size,267);
   const expected={
     'babyx.maintenance.describe':false,
     'babyx.maintenance.plan':true,

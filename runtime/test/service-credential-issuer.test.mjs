@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+  BabyXRuntime,
   ReleaseApplianceStore,
   ServiceCredentialBootstrapService,
   ServiceCredentialFilesystemAuthority,
@@ -325,5 +326,95 @@ test('public transaction, generation, event, and authority results redact privat
     assert.doesNotMatch(exposed, /MC4CAQAwBQYDK2Vw/u);
     assert.equal(exposed.includes('/etc/stealtheye-quirt/authority.key'), true);
     assert.equal(exposed.includes('rawPrivateMaterialReturned":false'), true);
+  } finally { fx.close(); }
+});
+
+
+test('unconfigured runtime credential-bootstrap discovery is pure and mutations fail closed', async () => {
+  const root = scratch();
+  try {
+    const runtime = new BabyXRuntime({ stateRoot: join(root, 'runtime') });
+    const before = JSON.stringify(readdirSync(join(root, 'runtime'), { recursive: true }).sort());
+    const described = await runtime.execute('babyx.release.credential-bootstrap.describe', {});
+    const profiles = await runtime.execute('babyx.release.credential-bootstrap.profiles', {});
+    const compatibility = await runtime.execute('babyx.release.credential-bootstrap.compatibility', {});
+    const listed = await runtime.execute('babyx.release.credential-bootstrap.list', {});
+    assert.equal(described.configured, false);
+    assert.equal(described.issuer.configured, false);
+    assert.equal(profiles.total, 1);
+    assert.equal(compatibility.readOnly, true);
+    assert.equal(listed.total, 0);
+    assert.equal(JSON.stringify(readdirSync(join(root, 'runtime'), { recursive: true }).sort()), before);
+    await assert.rejects(runtime.execute('babyx.release.credential-bootstrap.ensure', {
+      profileId: BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+      expectedCompatibilityIdentity: serviceCredentialCompatibilityDigest(),
+      policyDecision: request().policyDecision,
+      declaredEffects: [{}],
+    }, { subject: OWNER, idempotencyKey: 'unconfigured-ensure' }), (error) => error?.code === 'release_provider_unavailable');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('public Baby-X operation surface plans, ensures, reads, and verifies one generation', async () => {
+  const fx = fixture();
+  try {
+    const lookup = { authority: 'durable-job-authority', async lookup() { return identity({ lookupSource: 'DURABLE_JOB_AUTHORITY_GETENT' }); } };
+    const runtime = new BabyXRuntime({
+      stateRoot: join(fx.root, 'runtime'),
+      serviceCredentialBootstrapService: fx.bootstrap,
+      serviceCredentialFilesystemAuthority: fx.authority,
+      serviceCredentialAccountLookup: lookup,
+    });
+    const context = { subject: OWNER, idempotencyKey: 'runtime-k5c-ensure' };
+    const planPayload = {
+      profileId: BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+      expectedCompatibilityIdentity: serviceCredentialCompatibilityDigest(),
+      policyDecision: request().policyDecision,
+    };
+    const plan = await runtime.execute('babyx.release.credential-bootstrap.plan', planPayload, context);
+    const ensured = await runtime.execute('babyx.release.credential-bootstrap.ensure', { ...planPayload, declaredEffects: plan.declaredEffects }, context);
+    assert.equal(ensured.transaction.state, 'READY');
+    assert.equal(ensured.rawPrivateMaterialReturned, false);
+    const fetched = await runtime.execute('babyx.release.credential-bootstrap.get', { transactionId: ensured.transaction.transactionId });
+    assert.equal(fetched.state, 'READY');
+    const events = await runtime.execute('babyx.release.credential-bootstrap.events', { transactionId: ensured.transaction.transactionId, limit: 100 });
+    assert.ok(events.events.length >= 8);
+    const verification = await runtime.execute('babyx.release.credential-bootstrap.verify', { generationId: ensured.generation.generationId });
+    assert.equal(verification.rawPrivateMaterialReturned, false);
+    assert.equal(verification.keyRelationships.every((entry) => entry.verified === true), true);
+    assert.equal(verification.temporaryMaterialCleanup.positiveAbsenceVerified, true);
+    assert.doesNotMatch(JSON.stringify({ ensured, fetched, events, verification }), /BEGIN PRIVATE KEY/u);
+  } finally { fx.close(); }
+});
+
+test('public ensure rejects declared effects that differ from the immutable plan before durable intent', async () => {
+  const fx = fixture();
+  try {
+    const runtime = new BabyXRuntime({
+      stateRoot: join(fx.root, 'runtime'),
+      serviceCredentialBootstrapService: fx.bootstrap,
+      serviceCredentialFilesystemAuthority: fx.authority,
+      serviceCredentialAccountLookup: { authority: 'durable-job-authority', async lookup() { return identity(); } },
+    });
+    const before = fx.store.listRecordIdentities().length;
+    await assert.rejects(runtime.execute('babyx.release.credential-bootstrap.ensure', {
+      profileId: BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+      expectedCompatibilityIdentity: serviceCredentialCompatibilityDigest(),
+      policyDecision: request().policyDecision,
+      declaredEffects: [{ authority: 'unapproved-parallel-vault', effect: 'MINT_RAW_SECRET' }],
+    }, { subject: OWNER, idempotencyKey: 'runtime-effects-conflict' }), (error) => error?.code === 'release_credential_bootstrap_invalid_request');
+    assert.equal(fx.store.listRecordIdentities().length, before);
+  } finally { fx.close(); }
+});
+
+test('generation verification detects public material corruption without exposing private bytes', () => {
+  const fx = fixture();
+  try {
+    const result = issue(fx);
+    const verified = fx.authority.verifyGeneration(result.generation.generationId);
+    assert.equal(verified.rawPrivateMaterialReturned, false);
+    const publicPath = join(publicDirectory(fx), 'proof-public.pem');
+    chmodSync(publicPath, 0o640);
+    writeFileSync(publicPath, 'corrupt-public-material\n', { mode: 0o640 });
+    assert.throws(() => fx.authority.verifyGeneration(result.generation.generationId), code('release_credential_bootstrap_verification_failed'));
   } finally { fx.close(); }
 });

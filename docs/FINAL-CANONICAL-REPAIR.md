@@ -58,10 +58,11 @@ The implementation gate used exactly Node.js `24.18.0` and produced:
 - lint: passed;
 - shell syntax: passed;
 - `git diff --check`: passed;
-- test-log SHA-256: `d8be74bbb2c060078b63d7da258e64b027a27b8a0613741694f53cd8ee2b0b00`;
-- lint-log SHA-256: `7dcca0967482356ad6bc8abb34386632e68f0057b72b8400c118b4ce37c61cd9`.
+- exact detached implementation worktree status: clean;
+- test-log SHA-256: `d49369b67ab5b892673f877363b0445f4f2b49a561294e375f3bba7854b568f2`;
+- lint-log SHA-256: `bc56e8f162b2b18feccef720a29970d09321185d5c18e5d8361b60177f3b79ee`.
 
-Negative and recovery coverage includes malformed specifications, real job waiting, failed spawn reservation, terminal cancellation replay, PID identity conflict, compare-and-swap patch conflict, unknown/removed operations, oversized HTTP bodies and QRT1 frames, bounded reads, paginated listings, and isolated corrupt records.
+Negative and recovery coverage includes malformed specifications, real job waiting, failed spawn reservation, terminal cancellation replay, PID identity conflict, compare-and-swap patch conflict, unknown/removed operations, oversized HTTP bodies and QRT1 frames, bounded reads, paginated listings, isolated corrupt records, failed temporary-write cleanup, and direct and symlink artifact-path escape attempts.
 
 ## Non-mutation statement
 

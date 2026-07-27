@@ -1,4 +1,5 @@
 import { canonicalize, sha256, type JsonObject } from '../core.ts';
+import { SERVICE_CREDENTIAL_BOOTSTRAP_STATES } from './service-credentials.ts';
 
 export const RELEASE_SCHEMA_VERSION = '1.0.0' as const;
 export const MAX_RELEASE_STRING_BYTES = 65_536;
@@ -107,6 +108,13 @@ export const RELEASE_FAILURE_CODES = [
   'release_maintenance_approval_required', 'release_maintenance_provider_unavailable', 'release_maintenance_simulation_failed',
   'release_maintenance_verification_failed', 'release_maintenance_apply_failed', 'release_maintenance_certification_failed',
   'release_maintenance_reboot_forbidden', 'release_maintenance_recovery_required',
+  'release_credential_bootstrap_invalid_request', 'release_credential_bootstrap_policy_denied',
+  'release_credential_bootstrap_profile_unsupported', 'release_credential_bootstrap_incompatible',
+  'release_credential_bootstrap_invalid_state', 'release_credential_bootstrap_illegal_transition',
+  'release_credential_bootstrap_not_ready', 'release_credential_bootstrap_generation_failed',
+  'release_credential_bootstrap_identity_mismatch', 'release_credential_bootstrap_materialization_failed',
+  'release_credential_bootstrap_verification_failed', 'release_credential_bootstrap_cleanup_failed',
+  'release_credential_bootstrap_revoked', 'release_credential_bootstrap_ambiguous',
 ] as const;
 
 const structuredError = (): ReleaseFieldSchema => ({
@@ -234,6 +242,43 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
     identityBindings: jsonField(true), healthSummaries: objectArray(), cutoverConfigDigests: stringArray(), rollbackConfigDigests: stringArray(), credentialSetDigest: stringField(true, 'digest'),
     capacitySnapshotIds: stringArray(), githubReferences: objectArray(), cleanupProof: jsonField(true), signerIdentity: jsonField(true), signedReceiptIds: stringArray(true),
     evidenceIndexDigest: stringField(true, 'digest'), createdAt: stringField(true, 'timestamp'),
+  }),
+  ServiceCredentialDefinitionV1: schema('ServiceCredentialDefinitionV1', {
+    definitionId: stringField(true, 'identifier'), profileId: stringField(true, 'identifier'), name: stringField(true, 'identifier'), purpose: stringField(true, 'identifier'),
+    confidentiality: enumField(['PRIVATE', 'PUBLIC'], true), algorithm: enumField(['ED25519'], true), privateEncoding: enumField(['PKCS8_PEM'], true), publicEncoding: enumField(['SPKI_PEM'], true),
+    permittedConsumers: stringArray(true, 32), materializationContract: jsonField(true), rotationContract: jsonField(true), definitionDigest: stringField(true, 'digest'),
+  }),
+  ServiceCredentialBootstrapPlanV1: schema('ServiceCredentialBootstrapPlanV1', {
+    planId: stringField(true, 'identifier'), transactionId: stringField(true, 'identifier'), generationId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'),
+    idempotencyKey: stringField(true, 'identifier'), profileId: stringField(true, 'identifier'), profileDigest: stringField(true, 'digest'), compatibilityDigest: stringField(true, 'digest'),
+    requestDigest: stringField(true, 'digest'), policyDecision: jsonField(true), declaredEffects: objectArray(true, 32), materialization: jsonField(true), verificationRequirements: stringArray(true, 64),
+    rotationPredecessorGenerationId: stringField(false, 'identifier'), planDigest: stringField(true, 'digest'), createdAt: stringField(true, 'timestamp'),
+  }),
+  ServiceCredentialBootstrapTransactionV1: schema('ServiceCredentialBootstrapTransactionV1', {
+    transactionId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), idempotencyKey: stringField(true, 'identifier'), creationRequestDigest: stringField(true, 'digest'),
+    profileId: stringField(true, 'identifier'), profileDigest: stringField(true, 'digest'), compatibilityDigest: stringField(true, 'digest'), planDigest: stringField(true, 'digest'),
+    policyDecision: jsonField(true), declaredEffects: objectArray(true, 32), state: enumField(SERVICE_CREDENTIAL_BOOTSTRAP_STATES, true), sequence: integerField(true),
+    generationId: stringField(true, 'identifier'), allGenerationIds: stringArray(true, 256), activeJobIds: stringArray(true, 256), allJobIds: stringArray(true, 10_000),
+    credentialReferenceIds: stringArray(true, 32), publicMaterialReferences: objectArray(true, 32), serviceIdentityBinding: jsonField(), verification: jsonField(), cleanup: jsonField(true),
+    rotationPredecessorGenerationId: stringField(false, 'identifier'), rollbackTargetGenerationId: stringField(false, 'identifier'), evidenceReferences: objectArray(), error: structuredError(),
+    createdAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'), completedAt: stringField(false, 'timestamp'),
+  }),
+  ServiceCredentialGenerationV1: schema('ServiceCredentialGenerationV1', {
+    generationId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), profileId: stringField(true, 'identifier'), profileDigest: stringField(true, 'digest'), ordinal: integerField(true),
+    state: enumField(['ISSUING', 'READY', 'ACTIVE', 'RETIRED', 'REVOKED', 'FAILED', 'AMBIGUOUS'], true), predecessorGenerationId: stringField(false, 'identifier'), successorGenerationId: stringField(false, 'identifier'),
+    privateReferences: objectArray(true, 16), publicMaterials: objectArray(true, 16), publicFingerprints: objectArray(true, 16), serviceIdentityBinding: jsonField(true),
+    compatibilityDigest: stringField(true, 'digest'), verificationDigest: stringField(false, 'digest'), revocationReasonDigest: stringField(false, 'digest'), sequence: integerField(true),
+    createdAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'), activatedAt: stringField(false, 'timestamp'), retiredAt: stringField(false, 'timestamp'), revokedAt: stringField(false, 'timestamp'),
+  }),
+  ServiceCredentialProfileStateV1: schema('ServiceCredentialProfileStateV1', {
+    profileStateId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), profileId: stringField(true, 'identifier'), profileDigest: stringField(true, 'digest'),
+    state: enumField(['EMPTY', 'ACTIVE', 'ROTATING', 'ROLLBACK_READY', 'AMBIGUOUS', 'REVOKED'], true), activeGenerationId: stringField(false, 'identifier'), previousGenerationId: stringField(false, 'identifier'),
+    generationIds: stringArray(true, 256), compatibilityDigest: stringField(true, 'digest'), sequence: integerField(true), createdAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'),
+  }),
+  ServiceCredentialVerificationV1: schema('ServiceCredentialVerificationV1', {
+    verificationId: stringField(true, 'identifier'), generationId: stringField(true, 'identifier'), profileId: stringField(true, 'identifier'), publicFingerprints: objectArray(true, 16),
+    keyRelationships: objectArray(true, 16), serviceIdentity: jsonField(true), ownershipChecks: objectArray(true, 32), modeChecks: objectArray(true, 32), temporaryMaterialCleanup: jsonField(true),
+    forbiddenAuthorityChecks: objectArray(true, 16), compatibilityDigest: stringField(true, 'digest'), observationDigest: stringField(true, 'digest'), verifiedAt: stringField(true, 'timestamp'),
   }),
   CredentialSetReferenceV1: schema('CredentialSetReferenceV1', {
     credentialSetId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), serviceId: stringField(true, 'identifier'), version: integerField(true),

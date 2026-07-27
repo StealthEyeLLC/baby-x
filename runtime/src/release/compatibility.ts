@@ -12,6 +12,13 @@ import {
   ReleaseSchemaError,
   releaseSchemaDigest,
 } from './schemas.ts';
+import {
+  BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+  SERVICE_CREDENTIAL_BOOTSTRAP_STATES,
+  SERVICE_CREDENTIAL_COMPATIBILITY_IDENTITY,
+  serviceCredentialCompatibilityDigest,
+  serviceCredentialProfileDigest,
+} from './service-credentials.ts';
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -236,8 +243,17 @@ export const RELEASE_COMPATIBILITY_MANIFEST: Readonly<JsonObject> = deepFreeze({
     systemdAdapter: { provider: 'systemd', minimumVersion: '255', authority: 'release-transaction-only' },
     routeAdapter: { provider: 'caddy', minimumVersion: '2.6.2', authority: 'release-transaction-only' },
     sourceResolver: { provider: 'github', mutableRefIsIdentity: false, exactCommitAndTreeRequired: true },
-    credentialAuthority: { preferred: 'systemd-credentials', rawValuesInRecords: false },
+    credentialAuthority: { preferred: 'systemd-credentials', rawValuesInRecords: false, soleAuthority: true, serviceCredentialIssuanceExtension: '1.0.0' },
     maintenanceAuthority: { separateFromReleaseAuthority: true, schema: 'MaintenanceRecordV1' },
+  },
+  serviceCredentialBootstrap: {
+    profileId: BABY_X_PRODUCTION_CONTROLLER_PROFILE_ID,
+    profileDigest: serviceCredentialProfileDigest(),
+    compatibilityIdentity: SERVICE_CREDENTIAL_COMPATIBILITY_IDENTITY,
+    compatibilityDigest: serviceCredentialCompatibilityDigest(),
+    states: SERVICE_CREDENTIAL_BOOTSTRAP_STATES,
+    productionMaterializationEnabled: false,
+    checkpoint: 'K.5',
   },
   operations: [
     { operation: 'babyx.release.describe', mutation: false, inputSchema: { type: 'object', additionalProperties: false } },
@@ -288,7 +304,7 @@ export function describeReleaseAppliance(payload: JsonObject = {}): JsonObject {
     recordSchemas: structuredClone(RELEASE_RECORD_SCHEMAS),
     recordSchemaDigest: releaseSchemaDigest(),
     stateMachines: {
-      states: { deployment: DEPLOYMENT_STATES, slot: SLOT_STATES, route: ROUTE_STATES, build: BUILD_STATES, certification: CERTIFICATION_STATES },
+      states: { deployment: DEPLOYMENT_STATES, slot: SLOT_STATES, route: ROUTE_STATES, build: BUILD_STATES, certification: CERTIFICATION_STATES, serviceCredentialBootstrap: SERVICE_CREDENTIAL_BOOTSTRAP_STATES },
       transitions: structuredClone(RELEASE_STATE_TRANSITIONS),
       terminalStates: structuredClone(TERMINAL_STATES),
       deploymentSuccessRequirements: DEPLOYMENT_SUCCESS_REQUIREMENTS,

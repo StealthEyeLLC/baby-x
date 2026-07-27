@@ -226,6 +226,21 @@ babyx.release.capabilities
 babyx.release.capacity
 babyx.release.credentials.describe
 babyx.release.credentials.rotate
+babyx.release.credential-bootstrap.describe
+babyx.release.credential-bootstrap.profiles
+babyx.release.credential-bootstrap.plan
+babyx.release.credential-bootstrap.get
+babyx.release.credential-bootstrap.list
+babyx.release.credential-bootstrap.events
+babyx.release.credential-bootstrap.verify
+babyx.release.credential-bootstrap.active
+babyx.release.credential-bootstrap.compatibility
+babyx.release.credential-bootstrap.ensure
+babyx.release.credential-bootstrap.reconcile
+babyx.release.credential-bootstrap.rotate
+babyx.release.credential-bootstrap.rollback
+babyx.release.credential-bootstrap.revoke
+babyx.release.credential-bootstrap.clean
 babyx.release.github.status
 babyx.release.github.reconcile
 babyx.release.github.webhook.ingest
@@ -265,6 +280,17 @@ babyx.maintenance.reboot
 
 const readSuffixes = new Set(['capacity', 'describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate', 'plan', 'live', 'evidence', 'failures']);
 const forcedMutations = new Set(['babyx.maintenance.plan']);
+const forcedReads = new Set([
+  'babyx.release.credential-bootstrap.describe',
+  'babyx.release.credential-bootstrap.profiles',
+  'babyx.release.credential-bootstrap.plan',
+  'babyx.release.credential-bootstrap.get',
+  'babyx.release.credential-bootstrap.list',
+  'babyx.release.credential-bootstrap.events',
+  'babyx.release.credential-bootstrap.verify',
+  'babyx.release.credential-bootstrap.active',
+  'babyx.release.credential-bootstrap.compatibility',
+]);
 const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   'babyx.release.describe': { type: 'object', additionalProperties: false },
   'babyx.release.capabilities': { type: 'object', additionalProperties: false },
@@ -293,6 +319,29 @@ const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
       expectedProcessIdentity: { type: 'object', additionalProperties: true }, endpointMode: { enum: ['UNIX_SOCKET', 'LOOPBACK_TCP'] },
     },
   },
+  'babyx.release.credential-bootstrap.describe': { type: 'object', additionalProperties: false },
+  'babyx.release.credential-bootstrap.profiles': { type: 'object', additionalProperties: false },
+  'babyx.release.credential-bootstrap.compatibility': { type: 'object', additionalProperties: false },
+  'babyx.release.credential-bootstrap.plan': {
+    type: 'object', additionalProperties: false, required: ['profileId', 'expectedCompatibilityIdentity', 'policyDecision'], properties: {
+      profileId: { type: 'string', enum: ['baby-x.production-controller.v1'] }, expectedCompatibilityIdentity: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      policyDecision: { type: 'object', additionalProperties: false, required: ['decision', 'decisionDigest', 'policyIdentity', 'environmentClass'], properties: {
+        decision: { enum: ['ALLOW'] }, decisionDigest: { type: 'string', pattern: '^[a-f0-9]{64}$' }, policyIdentity: { type: 'string' }, environmentClass: { type: 'string' },
+        reasonCodes: { type: 'array', maxItems: 64, items: { type: 'string' } },
+      } }, rotationPredecessorGenerationId: { type: 'string' },
+    },
+  },
+  'babyx.release.credential-bootstrap.get': { type: 'object', additionalProperties: false, required: ['transactionId'], properties: { transactionId: { type: 'string' } } },
+  'babyx.release.credential-bootstrap.list': { type: 'object', additionalProperties: false, properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 200 }, state: { type: 'string' }, profileId: { type: 'string' } } },
+  'babyx.release.credential-bootstrap.events': { type: 'object', additionalProperties: false, required: ['transactionId'], properties: { transactionId: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 1000 } } },
+  'babyx.release.credential-bootstrap.verify': { type: 'object', additionalProperties: false, required: ['generationId'], properties: { generationId: { type: 'string' } } },
+  'babyx.release.credential-bootstrap.active': { type: 'object', additionalProperties: false, required: ['profileId'], properties: { profileId: { type: 'string', enum: ['baby-x.production-controller.v1'] } } },
+  'babyx.release.credential-bootstrap.ensure': { type: 'object', additionalProperties: false, required: ['profileId', 'expectedCompatibilityIdentity', 'policyDecision', 'declaredEffects'], properties: { profileId: { type: 'string', enum: ['baby-x.production-controller.v1'] }, expectedCompatibilityIdentity: { type: 'string', pattern: '^[a-f0-9]{64}$' }, policyDecision: { type: 'object', additionalProperties: true }, declaredEffects: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', additionalProperties: true } } } },
+  'babyx.release.credential-bootstrap.reconcile': { type: 'object', additionalProperties: false, required: ['transactionId', 'expectedSequence'], properties: { transactionId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 } } },
+  'babyx.release.credential-bootstrap.rotate': { type: 'object', additionalProperties: false, required: ['profileId', 'expectedCompatibilityIdentity', 'policyDecision', 'declaredEffects'], properties: { profileId: { type: 'string', enum: ['baby-x.production-controller.v1'] }, expectedCompatibilityIdentity: { type: 'string', pattern: '^[a-f0-9]{64}$' }, policyDecision: { type: 'object', additionalProperties: true }, declaredEffects: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', additionalProperties: true } } } },
+  'babyx.release.credential-bootstrap.rollback': { type: 'object', additionalProperties: false, required: ['profileId', 'targetGenerationId', 'expectedSequence'], properties: { profileId: { type: 'string', enum: ['baby-x.production-controller.v1'] }, targetGenerationId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, reason: { type: 'string', maxLength: 1024 } } },
+  'babyx.release.credential-bootstrap.revoke': { type: 'object', additionalProperties: false, required: ['generationId', 'expectedSequence', 'reason'], properties: { generationId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 }, reason: { type: 'string', minLength: 1, maxLength: 1024 } } },
+  'babyx.release.credential-bootstrap.clean': { type: 'object', additionalProperties: false, required: ['transactionId', 'expectedSequence'], properties: { transactionId: { type: 'string' }, expectedSequence: { type: 'integer', minimum: 0 } } },
   'babyx.release.github.status': {
     type: 'object', additionalProperties: false, properties: { repository: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 200 } },
   },
@@ -405,7 +454,7 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     family: familyOf(operation),
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
-    mutation: forcedMutations.has(operation) || !readSuffixes.has(suffix),
+    mutation: forcedMutations.has(operation) || (!forcedReads.has(operation) && !readSuffixes.has(suffix)),
     input: exactInputs[operation] ?? { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };

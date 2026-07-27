@@ -22,15 +22,18 @@ test('canonical Ed25519 verification detects alterations', () => {
   assert.equal(verifyCanonical(publicKey, { ...value, operation: 'babyx.exec' }, signature), false);
 });
 
-test('describe exposes the complete unrestricted operation catalog without ceremony fields', () => {
+test('describe exposes only implemented operations without duplicate authority paths', () => {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-core-'));
   try {
     const description = new BabyXRuntime({ stateRoot: root }).describe();
     const operations = description.operations;
     assert.ok(Array.isArray(operations));
-    assert.ok(operations.length >= 180);
-    assert.ok(operations.some((item) => item.operation === 'babyx.machine.raw'));
+    assert.equal(operations.length, 179);
+    assert.ok(operations.some((item) => item.operation === 'babyx.artifact.verify'));
     assert.ok(operations.some((item) => item.operation === 'babyx.syscall.inject.fd'));
+    assert.equal(operations.some((item) => item.operation === 'babyx.machine.raw'), false);
+    assert.equal(operations.some((item) => item.operation === 'babyx.pty.create'), false);
+    assert.equal(operations.some((item) => item.operation === 'babyx.artifact.begin'), false);
     for (const definition of operations) {
       assert.equal('risk' in definition, false);
       assert.equal('confirmation' in definition, false);

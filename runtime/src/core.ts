@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID, sign as cryptoSign, verify as cryptoVerify } from 'node:crypto';
-import { constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync, readdirSync, copyFileSync } from 'node:fs';
+import { constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, fsyncSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync, readdirSync, copyFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { processIdentity as readProcessIdentity } from './process/identity.ts';
@@ -117,8 +117,14 @@ export class AtomicStore<T extends JsonObject> {
   }
   write(value: T): void {
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${canonicalize(value)}\n`, { mode: 0o600 });
+    const file = openSync(temporary, 'wx', 0o600);
+    try {
+      writeFileSync(file, `${canonicalize(value)}\n`);
+      fsyncSync(file);
+    } finally { closeSync(file); }
     renameSync(temporary, this.path);
+    const directory = openSync(dirname(this.path), 'r');
+    try { fsyncSync(directory); } finally { closeSync(directory); }
   }
   update(mutator: (current: T) => T): T { const next = mutator(this.read()); this.write(next); return next; }
 }
@@ -147,6 +153,27 @@ function sameCompleteIdentity(expected: CompleteProcessIdentity, actual: Process
     && expected.executablePath === actual.executablePath
     && expected.bootId === actual.bootId
     && (expected.pgid === undefined || expected.pgid === actual.pgid);
+}
+
+function sameJobIdentity(expected: CompleteProcessIdentity, actual: ProcessIdentity): boolean {
+  return expected.pid === actual.pid
+    && expected.processStartTime === actual.processStartTime
+    && expected.bootId === actual.bootId
+    && (expected.pgid === undefined || expected.pgid === actual.pgid);
+}
+
+function isCompleteProcessIdentity(identity: ProcessIdentity | undefined): identity is CompleteProcessIdentity {
+  return identity !== undefined
+    && typeof identity.processStartTime === 'string'
+    && identity.processStartTime.length > 0
+    && typeof identity.executablePath === 'string'
+    && identity.executablePath.length > 0
+    && typeof identity.bootId === 'string'
+    && identity.bootId.length > 0;
+}
+
+function isTerminalJob(record: JobRecord): boolean {
+  return ['completed', 'failed', 'cancelled', 'lost'].includes(record.status);
 }
 
 function assertMachineProcessTarget(target: ExecutionTarget, resolver: (pid: number) => ProcessIdentity): void {
@@ -233,7 +260,7 @@ export class Executor {
 export interface JobRecord extends JsonObject {
   id: string;
   operation: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'lost';
+  status: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'lost';
   target: ExecutionTarget;
   argv: string[];
   cwd: string;
@@ -274,7 +301,7 @@ export class JobManager {
     this.processIdentity = options.processIdentity ?? readProcessIdentity;
     this.now = options.now ?? (() => new Date().toISOString());
   }
-  list(): JobRecord[] { return Object.values(this.store.read().jobs); }
+  list(limit = 1_000, status?: JobRecord['status']): JobRecord[] { if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('job list limit must be between 1 and 10000'); return Object.values(this.store.read().jobs).filter((record) => status === undefined || record.status === status).sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit); }
   get(id: string): JobRecord { const record = this.store.read().jobs[id]; if (!record) throw new Error('job not found'); return record; }
   onChange(listener: JobChangeListener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private notify(record: JobRecord): void {
@@ -295,44 +322,95 @@ export class JobManager {
     if (!executable) throw new Error('empty executable');
     const stdoutPath = join(this.root, 'streams', `${id}.stdout`);
     const stderrPath = join(this.root, 'streams', `${id}.stderr`);
-    const stdoutFd = openSync(stdoutPath, 'a', 0o600);
-    const stderrFd = openSync(stderrPath, 'a', 0o600);
-    const child = spawn(executable, effective.slice(1), { cwd: target.kind === 'host' ? cwd : '/', env: { ...process.env, ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])) }, detached: true, stdio: ['ignore', stdoutFd, stderrFd] });
-    child.unref(); closeSync(stdoutFd); closeSync(stderrFd);
-    let identity: ProcessIdentity | undefined;
-    if (child.pid !== undefined) {
-      try { identity = readProcessIdentity(child.pid); } catch { identity = { pid: child.pid, pgid: child.pid }; }
-    }
-    const record: JobRecord = {
-      id, operation, status: 'running', target, argv, cwd, createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
-      pid: child.pid, pgid: child.pid, stdoutPath, stderrPath,
+    const createdAt = this.now();
+    const reserved: JobRecord = {
+      id, operation, status: 'starting', target, argv, cwd, createdAt, stdoutPath, stderrPath,
       ...(metadata === undefined ? {} : { metadata }),
-      ...(identity === undefined ? {} : { processIdentity: identity }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     };
-    this.store.update((current) => ({ jobs: { ...current.jobs, [id]: record } }));
-    this.notify(record);
+    this.store.update((current) => ({ jobs: { ...current.jobs, [id]: reserved } }));
+    this.notify(reserved);
+    const stdoutFd = openSync(stdoutPath, 'a', 0o600);
+    const stderrFd = openSync(stderrPath, 'a', 0o600);
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(executable, effective.slice(1), { cwd: target.kind === 'host' ? cwd : '/', env: { ...process.env, ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])) }, detached: true, stdio: ['ignore', stdoutFd, stderrFd] });
+    } catch (error) {
+      closeSync(stdoutFd); closeSync(stderrFd);
+      const failed: JobRecord = { ...reserved, status: 'failed', completedAt: this.now(), metadata: { ...(reserved.metadata ?? {}), spawnError: error instanceof Error ? error.message : String(error) } };
+      this.store.update((current) => ({ jobs: { ...current.jobs, [id]: failed } }));
+      this.notify(failed);
+      throw error;
+    }
+    closeSync(stdoutFd); closeSync(stderrFd);
+    if (child.pid === undefined) {
+      child.once('error', () => undefined);
+      const failed: JobRecord = { ...reserved, status: 'failed', completedAt: this.now(), metadata: { ...(reserved.metadata ?? {}), spawnError: 'spawn returned no pid' } };
+      this.store.update((current) => ({ jobs: { ...current.jobs, [id]: failed } }));
+      this.notify(failed);
+      throw new Error('spawn returned no pid');
+    }
+    let identity: ProcessIdentity;
+    try { identity = this.processIdentity(child.pid); } catch { identity = { pid: child.pid, pgid: child.pid }; }
+    const running: JobRecord = { ...reserved, status: 'running', startedAt: this.now(), pid: child.pid, pgid: child.pid, processIdentity: identity };
+    this.store.update((current) => ({ jobs: { ...current.jobs, [id]: running } }));
+    this.notify(running);
     let timeout: NodeJS.Timeout | undefined;
     if (timeoutMs !== undefined) {
-      timeout = setTimeout(() => { try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGTERM'); } catch {} }, timeoutMs);
+      timeout = setTimeout(() => {
+        try {
+          const current = this.get(id);
+          if (current.status !== 'running' || current.pid === undefined || current.pgid === undefined || !isCompleteProcessIdentity(current.processIdentity)) return;
+          let actual: ProcessIdentity;
+          try { actual = this.processIdentity(current.pid); } catch { this.reconcile(id); return; }
+          if (!sameJobIdentity(current.processIdentity, actual)) { this.reconcile(id); return; }
+          this.store.update((state) => {
+            const existing = state.jobs[id];
+            if (!existing || isTerminalJob(existing)) return state;
+            return { jobs: { ...state.jobs, [id]: { ...existing, metadata: { ...(existing.metadata ?? {}), timeoutTriggeredAt: this.now() } } } };
+          });
+          process.kill(-current.pgid, 'SIGTERM');
+        } catch {}
+      }, timeoutMs);
       timeout.unref();
     }
-    child.on('exit', (code, signal) => {
+    child.once('error', (error) => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      let failed: JobRecord | undefined;
+      this.store.update((current) => {
+        const existing = current.jobs[id];
+        if (!existing || isTerminalJob(existing)) return current;
+        failed = { ...existing, status: 'failed', completedAt: this.now(), metadata: { ...(existing.metadata ?? {}), spawnError: error.message } };
+        return { jobs: { ...current.jobs, [id]: failed } };
+      });
+      if (failed !== undefined) this.notify(failed);
+    });
+    child.once('exit', (code, signal) => {
       if (timeout !== undefined) clearTimeout(timeout);
       let completed: JobRecord | undefined;
       this.store.update((current) => {
         const existing = current.jobs[id];
-        if (!existing) return current;
-        completed = { ...existing, status: signal ? 'failed' : code === 0 ? 'completed' : 'failed', exitCode: code, signal, completedAt: new Date().toISOString() };
+        if (!existing || isTerminalJob(existing)) return current;
+        completed = { ...existing, status: signal ? 'failed' : code === 0 ? 'completed' : 'failed', exitCode: code, signal, completedAt: this.now() };
         return { jobs: { ...current.jobs, [id]: completed } };
       });
       if (completed !== undefined) this.notify(completed);
     });
-    return record;
+    child.unref();
+    return running;
+  }
+  async wait(id: string, timeoutMs = 30_000): Promise<JobRecord> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 300_000) throw new Error('job wait timeoutMs must be between 0 and 300000');
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const record = this.get(id);
+      if (isTerminalJob(record) || Date.now() >= deadline) return record;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+    }
   }
   reconcile(id: string): JobRecord {
     const record = this.get(id);
-    if (record.status !== 'running') return record;
+    if (record.status !== 'starting' && record.status !== 'running') return record;
     const observedAt = this.now();
     const expected = record.processIdentity;
     let classification: NonNullable<JobRecord['reconciliation']>['classification'];
@@ -341,11 +419,7 @@ export class JobManager {
     else {
       try { actual = this.processIdentity(record.pid); } catch { classification = 'process-absent'; }
       if (actual !== undefined) {
-        classification = actual.pid === expected.pid
-          && actual.processStartTime === expected.processStartTime
-          && actual.executablePath === expected.executablePath
-          && actual.bootId === expected.bootId
-          && (expected.pgid === undefined || actual.pgid === expected.pgid)
+        classification = isCompleteProcessIdentity(expected) && sameJobIdentity(expected, actual)
           ? 'running-exact' : 'identity-conflict';
       }
     }
@@ -357,17 +431,38 @@ export class JobManager {
   }
   reconcileRunning(limit = 1_000): JobRecord[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('job reconcile limit must be between 1 and 10000');
-    return this.list().filter((record) => record.status === 'running').sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit).map((record) => this.reconcile(record.id));
+    return this.list(10_000).filter((record) => record.status === 'starting' || record.status === 'running').sort((left, right) => left.id.localeCompare(right.id)).slice(0, limit).map((record) => this.reconcile(record.id));
   }
   cancel(id: string, signal = 'SIGTERM'): JobRecord {
     const record = this.get(id);
-    if (record.pgid) process.kill(-record.pgid, signal as NodeJS.Signals);
-    const next = { ...record, status: 'cancelled' as const, signal, completedAt: new Date().toISOString() };
-    this.store.update((current) => ({ jobs: { ...current.jobs, [id]: next } }));
-    this.notify(next);
+    if (isTerminalJob(record)) return record;
+    if (record.status === 'starting') {
+      const next: JobRecord = { ...record, status: 'cancelled', signal, completedAt: this.now() };
+      this.store.update((current) => ({ jobs: { ...current.jobs, [id]: next } }));
+      this.notify(next);
+      return next;
+    }
+    if (record.pid === undefined || record.pgid === undefined || !isCompleteProcessIdentity(record.processIdentity)) return this.reconcile(id);
+    let actual: ProcessIdentity;
+    try { actual = this.processIdentity(record.pid); } catch { return this.reconcile(id); }
+    if (!sameJobIdentity(record.processIdentity, actual)) return this.reconcile(id);
+    try { process.kill(-record.pgid, signal as NodeJS.Signals); } catch (error) {
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ESRCH') return this.reconcile(id);
+      throw error;
+    }
+    let next: JobRecord = record;
+    this.store.update((current) => {
+      const existing = current.jobs[id];
+      if (!existing || isTerminalJob(existing)) { if (existing) next = existing; return current; }
+      next = { ...existing, status: 'cancelled', signal, completedAt: this.now() };
+      return { jobs: { ...current.jobs, [id]: next } };
+    });
+    if (next.status === 'cancelled') this.notify(next);
     return next;
   }
   read(id: string, stream: 'stdout' | 'stderr', offset = 0, limit = 65_536): JsonObject {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('stream offset must be a non-negative safe integer');
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_INLINE) throw new Error(`stream limit must be between 0 and ${MAX_INLINE}`);
     const record = this.get(id);
     const path = stream === 'stdout' ? record.stdoutPath : record.stderrPath;
     const size = statSync(path).size;
@@ -381,13 +476,65 @@ export class JobManager {
 
 export class FileManager {
   stat(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); const stat = statSync(path); return { path, size: stat.size, mode: stat.mode, uid: stat.uid, gid: stat.gid, isFile: stat.isFile(), isDirectory: stat.isDirectory(), sha256: stat.isFile() ? sha256(readFileSync(path)) : undefined }; }
-  read(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); const offset = typeof payload.offset === 'number' ? payload.offset : 0; const limit = typeof payload.limit === 'number' ? payload.limit : 65_536; const size = statSync(path).size; const count = Math.max(0, Math.min(limit, size - offset)); const buffer = Buffer.alloc(count); const fd = openSync(path, 'r'); try { if (count > 0) readSync(fd, buffer, 0, count, offset); } finally { closeSync(fd); } return { data: payload.encoding === 'utf8' ? buffer.toString('utf8') : buffer.toString('base64'), encoding: payload.encoding === 'utf8' ? 'utf8' : 'base64', offset: offset + count, eof: offset + count >= size, sha256: sha256(readFileSync(path)) }; }
-  write(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); const data = requiredString(payload, 'data'); const buffer = Buffer.from(data, payload.encoding === 'base64' ? 'base64' : 'utf8'); mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); const fd = openSync(path, payload.create === false ? 'r+' : 'a+', 0o600); try { writeSync(fd, buffer, 0, buffer.length, typeof payload.offset === 'number' ? payload.offset : null); } finally { closeSync(fd); } return this.stat({ path }); }
-  replace(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); if (typeof payload.expectedSha256 === 'string' && existsSync(path) && sha256(readFileSync(path)) !== payload.expectedSha256) throw new Error('compare-and-swap mismatch'); const data = Buffer.from(requiredString(payload, 'data'), payload.encoding === 'base64' ? 'base64' : 'utf8'); mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); const temporary = `${path}.${randomUUID()}.tmp`; writeFileSync(temporary, data, { mode: 0o600 }); renameSync(temporary, path); return this.stat({ path }); }
+  read(payload: JsonObject): JsonObject {
+    const path = requiredString(payload, 'path');
+    const offset = payload.offset === undefined ? 0 : Number(payload.offset);
+    const limit = payload.limit === undefined ? MAX_INLINE : Number(payload.limit);
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('file offset must be a non-negative safe integer');
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_INLINE) throw new Error(`file limit must be between 0 and ${MAX_INLINE}`);
+    const size = statSync(path).size; const count = Math.max(0, Math.min(limit, size - offset)); const buffer = Buffer.alloc(count); const fd = openSync(path, 'r');
+    try { if (count > 0) readSync(fd, buffer, 0, count, offset); } finally { closeSync(fd); }
+    return { data: payload.encoding === 'utf8' ? buffer.toString('utf8') : buffer.toString('base64'), encoding: payload.encoding === 'utf8' ? 'utf8' : 'base64', offset: offset + count, eof: offset + count >= size, sha256: sha256(readFileSync(path)) };
+  }
+  write(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); const data = requiredString(payload, 'data'); const buffer = Buffer.from(data, payload.encoding === 'base64' ? 'base64' : 'utf8'); if (buffer.length > MAX_INLINE) throw new Error(`file write is limited to ${MAX_INLINE} bytes`); mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); const offset = payload.offset === undefined ? null : Number(payload.offset); if (offset !== null && (!Number.isSafeInteger(offset) || offset < 0)) throw new Error('file offset must be a non-negative safe integer'); const fd = openSync(path, payload.create === false ? 'r+' : 'a+', 0o600); try { writeSync(fd, buffer, 0, buffer.length, offset); fsyncSync(fd); } finally { closeSync(fd); } return this.stat({ path }); }
+  replace(payload: JsonObject): JsonObject {
+    const path = requiredString(payload, 'path');
+    if (typeof payload.expectedSha256 === 'string' && (!existsSync(path) || sha256(readFileSync(path)) !== payload.expectedSha256)) throw new Error('compare-and-swap mismatch');
+    const data = Buffer.from(requiredString(payload, 'data'), payload.encoding === 'base64' ? 'base64' : 'utf8');
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); const temporary = `${path}.${randomUUID()}.tmp`; const fd = openSync(temporary, 'wx', 0o600);
+    try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, path); const directory = openSync(dirname(path), 'r'); try { fsyncSync(directory); } finally { closeSync(directory); }
+    return this.stat({ path });
+  }
+  patch(payload: JsonObject): JsonObject {
+    const path = requiredString(payload, 'path');
+    const expectedSha256 = requiredString(payload, 'expectedSha256');
+    const current = readFileSync(path);
+    if (sha256(current) !== expectedSha256) throw new Error('compare-and-swap mismatch');
+    if (!Array.isArray(payload.patches) || payload.patches.length < 1 || payload.patches.length > 1_024) throw new Error('patches must contain between 1 and 1024 entries');
+    const patches = payload.patches.map((value, index) => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`patch ${index} must be an object`);
+      const patch = value as JsonObject; const offset = Number(patch.offset); const data = patch.data;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`patch ${index} offset must be a non-negative safe integer`);
+      if (typeof data !== 'string') throw new Error(`patch ${index} data must be a string`);
+      const bytes = Buffer.from(data, patch.encoding === 'base64' ? 'base64' : 'utf8');
+      return { offset, bytes };
+    }).sort((left, right) => left.offset - right.offset);
+    for (let index = 1; index < patches.length; index += 1) if (patches[index]!.offset < patches[index - 1]!.offset + patches[index - 1]!.bytes.length) throw new Error('patch ranges must not overlap');
+    const size = Math.max(current.length, ...patches.map((patch) => patch.offset + patch.bytes.length));
+    if (size > 64 * 1024 * 1024) throw new Error('patched file exceeds 64 MiB');
+    const next = Buffer.alloc(size); current.copy(next); for (const patch of patches) patch.bytes.copy(next, patch.offset);
+    return this.replace({ path, data: next.toString('base64'), encoding: 'base64', expectedSha256 });
+  }
   copy(payload: JsonObject): JsonObject { const source = requiredString(payload, 'source'); const destination = requiredString(payload, 'destination'); mkdirSync(dirname(destination), { recursive: true, mode: 0o700 }); copyFileSync(source, destination, payload.overwrite === false ? fsConstants.COPYFILE_EXCL : 0); return this.stat({ path: destination }); }
-  move(payload: JsonObject): JsonObject { renameSync(requiredString(payload, 'source'), requiredString(payload, 'destination')); return { moved: true }; }
+  move(payload: JsonObject): JsonObject { const destination = requiredString(payload, 'destination'); mkdirSync(dirname(destination), { recursive: true, mode: 0o700 }); renameSync(requiredString(payload, 'source'), destination); return { moved: true }; }
   remove(payload: JsonObject): JsonObject { rmSync(requiredString(payload, 'path'), { recursive: payload.recursive === true, force: true }); return { removed: true }; }
-  list(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); return { path, entries: readdirSync(path, { withFileTypes: true }).slice(0, typeof payload.maxEntries === 'number' ? payload.maxEntries : 10_000).map((entry) => ({ name: entry.name, directory: entry.isDirectory(), symbolicLink: entry.isSymbolicLink() })) }; }
+  list(payload: JsonObject): JsonObject { const path = requiredString(payload, 'path'); const maxEntries = payload.maxEntries === undefined ? 1_000 : Number(payload.maxEntries); if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 10_000) throw new Error('maxEntries must be between 1 and 10000'); return { path, entries: readdirSync(path, { withFileTypes: true }).slice(0, maxEntries).map((entry) => ({ name: entry.name, directory: entry.isDirectory(), symbolicLink: entry.isSymbolicLink() })) }; }
+}
+
+const SPECIFICATION_CLASSIFICATIONS = new Set<SpecificationStatement['classification']>(['declared-requirement', 'static-fact', 'observed-invariant', 'hypothesis', 'falsified-hypothesis']);
+
+function validateSpecificationStatement(value: unknown): string[] {
+  const errors: string[] = [];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return ['statement must be an object'];
+  const statement = value as JsonObject;
+  for (const key of ['id', 'subject', 'predicate']) if (typeof statement[key] !== 'string' || String(statement[key]).length === 0) errors.push(`${key} must be a non-empty string`);
+  if (typeof statement.classification !== 'string' || !SPECIFICATION_CLASSIFICATIONS.has(statement.classification as SpecificationStatement['classification'])) errors.push('classification is invalid');
+  if (!('value' in statement)) errors.push('value is required');
+  if (!Array.isArray(statement.provenance) || statement.provenance.length === 0 || statement.provenance.some((item) => item === null || typeof item !== 'object' || Array.isArray(item))) errors.push('provenance must be a non-empty array of objects');
+  if (statement.confidence !== undefined && (typeof statement.confidence !== 'number' || !Number.isFinite(statement.confidence) || statement.confidence < 0 || statement.confidence > 1)) errors.push('confidence must be between 0 and 1');
+  if (statement.classification === 'falsified-hypothesis' && (!Array.isArray(statement.falsifiedBy) || statement.falsifiedBy.some((item) => typeof item !== 'string'))) errors.push('falsifiedBy must be a string array for falsified hypotheses');
+  return errors;
 }
 
 export class ObjectStore {
@@ -527,8 +674,9 @@ export class BabyXRuntime {
     if (operation === 'babyx.health') return this.health();
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;
-    if (operation === 'babyx.job.list') return { jobs: this.jobs.list() };
-    if (operation === 'babyx.job.get' || operation === 'babyx.job.wait') return this.jobs.get(requiredString(payload, 'jobId'));
+    if (operation === 'babyx.job.list') return { jobs: this.jobs.list(payload.limit === undefined ? 1_000 : Number(payload.limit), typeof payload.status === 'string' ? payload.status as JobRecord['status'] : undefined) };
+    if (operation === 'babyx.job.get') return this.jobs.get(requiredString(payload, 'jobId'));
+    if (operation === 'babyx.job.wait') return this.jobs.wait(requiredString(payload, 'jobId'), payload.timeoutMs === undefined ? 30_000 : Number(payload.timeoutMs));
     if (operation === 'babyx.job.reconcile') return this.jobs.reconcile(requiredString(payload, 'jobId'));
     if (operation === 'babyx.job.cancel') return this.jobs.cancel(requiredString(payload, 'jobId'), typeof payload.signal === 'string' ? payload.signal : 'SIGTERM');
     if (operation === 'babyx.job.stream.read') return this.jobs.read(requiredString(payload, 'jobId'), payload.stream === 'stderr' ? 'stderr' : 'stdout', typeof payload.offset === 'number' ? payload.offset : 0, typeof payload.limit === 'number' ? payload.limit : 65_536);
@@ -588,7 +736,7 @@ export class BabyXRuntime {
   private fileOperation(operation: string, payload: JsonObject): JsonObject {
     const suffix = operation.slice('babyx.file.'.length);
     if (suffix === 'stat') return this.files.stat(payload); if (suffix === 'read') return this.files.read(payload); if (suffix === 'write') return this.files.write(payload); if (suffix === 'replace') return this.files.replace(payload); if (suffix === 'copy') return this.files.copy(payload); if (suffix === 'move') return this.files.move(payload); if (suffix === 'remove') return this.files.remove(payload); if (suffix === 'list') return this.files.list(payload);
-    if (suffix === 'patch') { const patches = Array.isArray(payload.patches) ? payload.patches : []; for (const patch of patches) this.files.write({ path: payload.path, ...(patch as JsonObject) }); return this.files.stat({ path: payload.path }); }
+    if (suffix === 'patch') return this.files.patch(payload);
     throw new Error('unsupported file operation');
   }
   private specOperation(operation: string, payload: JsonObject): JsonObject {
@@ -598,7 +746,7 @@ export class BabyXRuntime {
     if (suffix === 'promote') return this.specs.update(requiredString(payload, 'id'), { classification: 'declared-requirement', promotedAt: new Date().toISOString() });
     if (suffix === 'falsify') return this.specs.update(requiredString(payload, 'id'), { classification: 'falsified-hypothesis', falsifiedBy: payload.counterexamples ?? [], lastObservedAt: new Date().toISOString() });
     if (suffix === 'scan' || suffix === 'observe' || suffix === 'generate') { const statement: SpecificationStatement = { id: randomUUID(), classification: suffix === 'scan' ? 'static-fact' : suffix === 'observe' ? 'observed-invariant' : 'hypothesis', subject: typeof payload.subject === 'string' ? payload.subject : 'baby-x', predicate: typeof payload.predicate === 'string' ? payload.predicate : suffix, value: payload.value ?? payload, provenance: [{ operation, timestamp: new Date().toISOString(), source: payload.source ?? null }], firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() }; return this.specs.create(statement as unknown as JsonObject); }
-    if (suffix === 'diff') return { left: payload.left, right: payload.right, equal: canonicalize(payload.left) === canonicalize(payload.right) }; if (suffix === 'validate') return { valid: true, statement: payload.statement ?? null }; if (suffix === 'export') return { statements: this.specs.list(), sha256: sha256(canonicalize(this.specs.list())) }; if (suffix === 'raw') return this.rawOperation(operation, payload);
+    if (suffix === 'diff') return { left: payload.left, right: payload.right, equal: canonicalize(payload.left) === canonicalize(payload.right) }; if (suffix === 'validate') { const statement = payload.statement ?? null; const errors = validateSpecificationStatement(statement); return { valid: errors.length === 0, errors, statement }; } if (suffix === 'export') { const statements = this.specs.list(); return { statements, sha256: sha256(canonicalize(statements)) }; } if (suffix === 'raw') return this.rawOperation(operation, payload);
     throw new Error('unsupported specification operation');
   }
   private objectOperation(operation: string, payload: JsonObject, store: ObjectStore): JsonObject {

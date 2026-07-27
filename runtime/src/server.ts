@@ -15,6 +15,25 @@ interface Envelope extends JsonObject {
   signature: string;
 }
 
+export type RuntimeListenOptions = { path: string } | { fd: number };
+
+export function resolveRuntimeListenOptions(
+  socketPath: string,
+  environment: Record<string, string | undefined> = process.env,
+  processId = process.pid,
+): RuntimeListenOptions {
+  const listenPidValue = environment.LISTEN_PID;
+  const listenFdsValue = environment.LISTEN_FDS;
+  if (listenPidValue === undefined && listenFdsValue === undefined) return { path: socketPath };
+  if (listenPidValue === undefined || listenFdsValue === undefined) throw new Error('incomplete systemd socket activation environment');
+  if (!/^[1-9][0-9]*$/u.test(listenPidValue) || !/^[1-9][0-9]*$/u.test(listenFdsValue)) throw new Error('invalid systemd socket activation environment');
+  const listenPid = Number(listenPidValue);
+  const listenFds = Number(listenFdsValue);
+  if (!Number.isSafeInteger(listenPid) || listenPid !== processId) throw new Error('systemd socket activation pid mismatch');
+  if (!Number.isSafeInteger(listenFds) || listenFds !== 1) throw new Error('exactly one systemd socket is required');
+  return { fd: 3 };
+}
+
 export function appendBoundedRuntimeFrameChunk(pending: Buffer, chunk: Buffer, maximum: number): Buffer {
   if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('maximum frame size must be a positive safe integer');
   if (chunk.length > maximum + 8 - pending.length) throw new Error('request frame exceeds configured maximum');
@@ -80,6 +99,12 @@ export function startRuntimeServer(runtime = new BabyXRuntime()): ReturnType<typ
       }
     });
   });
-  server.listen({ path: config.socketPath });
+  const listenOptions = resolveRuntimeListenOptions(config.socketPath);
+  if ('fd' in listenOptions) {
+    delete process.env.LISTEN_PID;
+    delete process.env.LISTEN_FDS;
+    delete process.env.LISTEN_FDNAMES;
+  }
+  server.listen(listenOptions);
   return server;
 }

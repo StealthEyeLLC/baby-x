@@ -255,9 +255,16 @@ babyx.release.certification.certify
 babyx.release.certification.resume
 babyx.release.certification.get
 babyx.release.certification.list
+babyx.maintenance.describe
+babyx.maintenance.plan
+babyx.maintenance.apply
+babyx.maintenance.status
+babyx.maintenance.reconcile
+babyx.maintenance.reboot
 `.trim().split(/\s+/u);
 
 const readSuffixes = new Set(['capacity', 'describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'capabilities', 'check', 'diff', 'validate', 'plan', 'live', 'evidence', 'failures']);
+const forcedMutations = new Set(['babyx.maintenance.plan']);
 const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   'babyx.release.describe': { type: 'object', additionalProperties: false },
   'babyx.release.capabilities': { type: 'object', additionalProperties: false },
@@ -352,6 +359,38 @@ const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
     type: 'object', additionalProperties: false, required: ['serviceId'],
     properties: { serviceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' } },
   },
+  'babyx.maintenance.describe': { type: 'object', additionalProperties: false },
+  'babyx.maintenance.plan': {
+    type: 'object', additionalProperties: false, required: ['maintenanceKind'], properties: {
+      maintenanceKind: { enum: ['PACKAGE_UPDATE', 'SERVICE_RUNTIME_UPDATE', 'SOFT_REBOOT', 'FULL_REBOOT', 'KEXEC', 'LIVEPATCH', 'FILESYSTEM', 'OTHER_APPROVED'] },
+      targetPackages: { type: 'array', maxItems: 256, items: { type: 'string', minLength: 1, maxLength: 256 } },
+      scheduledFor: { type: 'string', maxLength: 64 }, reason: { type: 'string', maxLength: 1024 }, automaticAllowed: { type: 'boolean' },
+      metadata: { type: 'object', additionalProperties: true },
+    },
+  },
+  'babyx.maintenance.apply': {
+    type: 'object', additionalProperties: false, required: ['maintenanceId', 'expectedSequence'], properties: {
+      maintenanceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' }, expectedSequence: { type: 'integer', minimum: 0 },
+      approvalEvidence: { type: 'array', maxItems: 32, items: { type: 'object', additionalProperties: true } },
+    },
+  },
+  'babyx.maintenance.status': {
+    type: 'object', additionalProperties: false, properties: {
+      maintenanceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' }, state: { type: 'string', maxLength: 64 }, limit: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+  },
+  'babyx.maintenance.reconcile': {
+    type: 'object', additionalProperties: false, properties: {
+      maintenanceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' }, limit: { type: 'integer', minimum: 1, maximum: 100 },
+    },
+  },
+  'babyx.maintenance.reboot': {
+    type: 'object', additionalProperties: false, required: ['mode'], properties: {
+      maintenanceId: { type: 'string', pattern: '^[a-z0-9][a-z0-9._:-]{0,127}$' }, expectedSequence: { type: 'integer', minimum: 0 },
+      mode: { enum: ['SOFT', 'FULL', 'KEXEC'] }, approvalEvidence: { type: 'array', maxItems: 32, items: { type: 'object', additionalProperties: true } },
+      scheduledFor: { type: 'string', maxLength: 64 }, reason: { type: 'string', maxLength: 1024 },
+    },
+  },
 });
 
 function familyOf(operation: string): string {
@@ -366,7 +405,7 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     family: familyOf(operation),
     version: '1.0.0',
     description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
-    mutation: !readSuffixes.has(suffix),
+    mutation: forcedMutations.has(operation) || !readSuffixes.has(suffix),
     input: exactInputs[operation] ?? { type: 'object', additionalProperties: true },
     output: { type: 'object', additionalProperties: true },
   };

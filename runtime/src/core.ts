@@ -427,6 +427,8 @@ export interface RuntimeOptions {
   releasePriorityAuthority?: import('./release/governor.ts').PriorityEnforcementAuthority;
   releaseCredentialAccessService?: import('./release/access.ts').CredentialAccessService;
   releaseGitHubIntegrationService?: import('./release/access.ts').GitHubIntegrationService;
+  maintenanceAuthorityService?: import('./release/maintenance.ts').MaintenanceAuthorityService;
+  maintenanceProvider?: import('./release/maintenance.ts').HostMaintenanceProvider;
   releaseProductionRoots?: string[]; releaseApplianceVersion?: string;
 }
 
@@ -475,6 +477,7 @@ export class BabyXRuntime {
   private releaseResourceGovernorReconstructed = false;
   private releaseCredentialAccessServiceInstance?: import('./release/access.ts').CredentialAccessService;
   private releaseGitHubIntegrationServiceInstance?: import('./release/access.ts').GitHubIntegrationService;
+  private maintenanceAuthorityServiceInstance?: import('./release/maintenance.ts').MaintenanceAuthorityService;
   private releaseCoordinatorServiceInstance?: import('./release/coordinator.ts').ReleaseCoordinatorService;
   private releaseCoordinatorInitializePromise?: Promise<JsonObject>;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
@@ -548,6 +551,16 @@ export class BabyXRuntime {
       this.releaseStoreInstance.startupScan();
     }
     return this.releaseStoreInstance;
+  }
+  private async maintenanceAuthorityService(): Promise<import('./release/maintenance.ts').MaintenanceAuthorityService> {
+    if (this.maintenanceAuthorityServiceInstance === undefined) {
+      if (this.options.maintenanceAuthorityService !== undefined) this.maintenanceAuthorityServiceInstance = this.options.maintenanceAuthorityService;
+      else {
+        const { MaintenanceAuthorityService } = await import('./release/maintenance.ts');
+        this.maintenanceAuthorityServiceInstance = new MaintenanceAuthorityService({ store: await this.releaseStore(), provider: this.options.maintenanceProvider });
+      }
+    }
+    return this.maintenanceAuthorityServiceInstance;
   }
   private async slotRuntimeService(): Promise<import('./release/slot.ts').SlotRuntimeService> {
     if (this.slotRuntimeServiceInstance === undefined) {
@@ -744,6 +757,15 @@ export class BabyXRuntime {
         throw new ReleaseAccessError('release_provider_unavailable', 'GitHub webhook ingress is not configured');
       }
       return service.ingestGatewayWebhook(payload, context);
+    }
+    if (operation.startsWith('babyx.maintenance.')) {
+      const service = await this.maintenanceAuthorityService();
+      if (operation === 'babyx.maintenance.describe') return service.describe(payload, context);
+      if (operation === 'babyx.maintenance.plan') return service.plan(payload, context);
+      if (operation === 'babyx.maintenance.apply') return service.apply(payload, context);
+      if (operation === 'babyx.maintenance.status') return service.status(payload, context);
+      if (operation === 'babyx.maintenance.reconcile') return service.reconcile(payload, context);
+      if (operation === 'babyx.maintenance.reboot') return service.reboot(payload, context);
     }
     if (operation === 'babyx.release.plan') {
       const coordinator = await import('./release/coordinator.ts');

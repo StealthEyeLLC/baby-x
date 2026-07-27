@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { createConnection } from 'node:net';
 import {
   closeSync,
   existsSync,
@@ -27,6 +29,32 @@ export const SLOT_RUNTIME_CONTRACT_VERSION = '1.0.0' as const;
 export const SLOT_IDS = ['blue', 'green'] as const;
 export type SlotId = typeof SLOT_IDS[number];
 export type SlotEndpointType = 'UNIX_SOCKET' | 'LOOPBACK_TCP';
+export type ReadinessClassification =
+  | 'READY'
+  | 'NOT_READY'
+  | 'FAILED'
+  | 'TIMEOUT'
+  | 'UNKNOWN'
+  | 'IDENTITY_MISMATCH'
+  | 'ENDPOINT_ABSENT'
+  | 'ENDPOINT_OWNER_MISMATCH';
+
+export interface ReadinessProbeDefinition extends JsonObject {
+  schemaVersion: '1.0.0';
+  mode: 'NATIVE_NOTIFY' | 'POLL';
+  probeType: 'SYSTEMD_NOTIFY' | 'CONNECT' | 'HTTP';
+  endpointType?: SlotEndpointType;
+  timeoutMs: number;
+  intervalMs: number;
+  maximumSamples: number;
+  connectTimeoutMs: number;
+  responseTimeoutMs: number;
+  maxResponseBytes: number;
+  httpPath?: string;
+  expectedStatusCodes?: number[];
+  expectedResponseSha256?: string;
+  expectedResponseContains?: string;
+}
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9.-]{0,63}$/u;
 const USER = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
@@ -58,7 +86,7 @@ export interface SlotProcessIdentity extends JsonObject {
   endpointType: SlotEndpointType;
   endpoint: string;
   listenerOwner: JsonObject;
-  readinessState: 'READY' | 'NOT_READY' | 'UNKNOWN';
+  readinessState: ReadinessClassification;
   watchdogState: 'ACTIVE' | 'INACTIVE' | 'UNSUPPORTED' | 'UNKNOWN';
 }
 
@@ -83,6 +111,7 @@ export interface SlotUnitBundle extends JsonObject {
   executablePath: string;
   nativeReadiness: boolean;
   nativeWatchdog: boolean;
+  readinessProbe: ReadinessProbeDefinition;
   credentialSetId?: string;
   credentialBindingDigest?: string;
   credentialNames?: string[];
@@ -116,7 +145,13 @@ export interface SlotUnitObservation extends JsonObject {
   endpointOwner?: JsonObject;
   runtimePathExists: boolean;
   transientUnitExists: boolean;
-  readinessState: 'READY' | 'NOT_READY' | 'UNKNOWN';
+  readinessMode: 'NATIVE_NOTIFY' | 'POLL';
+  readinessState: ReadinessClassification;
+  readinessProbeDigest: string;
+  readinessDetailDigest?: string;
+  readinessLatencyMs?: number;
+  readinessHttpStatus?: number;
+  readinessResponseDigest?: string;
   watchdogState: 'ACTIVE' | 'INACTIVE' | 'UNSUPPORTED' | 'UNKNOWN';
 }
 
@@ -139,12 +174,7 @@ export interface SlotSystemdAdapter {
   waitReady(bundle: SlotUnitBundle, policy: ReadinessPolicy): Promise<SlotUnitObservation[]>;
 }
 
-export interface ReadinessPolicy extends JsonObject {
-  mode: 'NATIVE_NOTIFY' | 'POLL';
-  timeoutMs: number;
-  intervalMs: number;
-  maximumSamples: number;
-}
+export interface ReadinessPolicy extends ReadinessProbeDefinition {}
 
 export interface SlotJobAuthority {
   get(id: string): JobRecord;
@@ -293,6 +323,13 @@ function normalizeService(value: unknown): NormalizedService {
   const executableContract = object(record.executableContract, 'executableContract');
   const endpointPolicy = object(record.endpointPolicy, 'endpointPolicy');
   const readinessProbe = object(record.readinessProbe, 'readinessProbe');
+  const readinessAllowed = new Set([
+    'schemaVersion', 'mode', 'probeType', 'endpointType', 'timeoutMs', 'intervalMs', 'maximumSamples',
+    'connectTimeoutMs', 'responseTimeoutMs', 'maxResponseBytes', 'httpPath', 'expectedStatusCodes',
+    'expectedResponseSha256', 'expectedResponseContains',
+  ]);
+  for (const key of Object.keys(readinessProbe)) if (!readinessAllowed.has(key)) throw new SlotRuntimeError('release_invalid_request', `readinessProbe contains unsupported property ${key}`);
+  if (readinessProbe.schemaVersion !== undefined && readinessProbe.schemaVersion !== '1.0.0') throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.schemaVersion is unsupported');
   const resourceProfile = object(record.resourceProfile, 'resourceProfile');
   const argvValue = executableContract.argv;
   if (!Array.isArray(argvValue) || argvValue.length === 0 || argvValue.length > 128) throw new SlotRuntimeError('release_invalid_request', 'executableContract.argv must be a non-empty bounded array');
@@ -300,6 +337,35 @@ function normalizeService(value: unknown): NormalizedService {
   const executablePath = safeAbsolute(argv[0], 'executableContract.argv[0]');
   const endpointPreference = record.endpointPreference === 'UNIX_SOCKET' ? 'UNIX_SOCKET' : record.endpointPreference === 'LOOPBACK_TCP' ? 'LOOPBACK_TCP' : (() => { throw new SlotRuntimeError('release_invalid_request', 'endpointPreference is invalid'); })();
   const readinessMode = readinessProbe.mode === 'NATIVE_NOTIFY' ? 'NATIVE_NOTIFY' : readinessProbe.mode === 'POLL' ? 'POLL' : (() => { throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.mode is invalid'); })();
+  if (readinessMode === 'POLL' && readinessProbe.probeType === undefined) throw new SlotRuntimeError('release_invalid_request', 'compatibility readiness requires an explicit probeType');
+  const readinessProbeType = readinessProbe.probeType === undefined
+    ? 'SYSTEMD_NOTIFY'
+    : ['SYSTEMD_NOTIFY', 'CONNECT', 'HTTP'].includes(String(readinessProbe.probeType))
+      ? String(readinessProbe.probeType) as ReadinessProbeDefinition['probeType']
+      : (() => { throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.probeType is invalid'); })();
+  if (readinessMode === 'NATIVE_NOTIFY' && readinessProbeType !== 'SYSTEMD_NOTIFY') throw new SlotRuntimeError('release_invalid_request', 'native readiness requires SYSTEMD_NOTIFY');
+  if (readinessMode === 'POLL' && readinessProbeType === 'SYSTEMD_NOTIFY') throw new SlotRuntimeError('release_invalid_request', 'compatibility readiness requires CONNECT or HTTP');
+  const declaredEndpointType = readinessProbe.endpointType === undefined
+    ? undefined
+    : readinessProbe.endpointType === 'UNIX_SOCKET' || readinessProbe.endpointType === 'LOOPBACK_TCP'
+      ? readinessProbe.endpointType
+      : (() => { throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.endpointType is invalid'); })();
+  const timeoutMs = integer(readinessProbe.timeoutMs, 'readinessProbe.timeoutMs', 1, 300_000);
+  const intervalMs = integer(readinessProbe.intervalMs, 'readinessProbe.intervalMs', 1, 60_000);
+  const maximumSamples = integer(readinessProbe.maximumSamples, 'readinessProbe.maximumSamples', 1, MAX_OBSERVATIONS);
+  const connectTimeoutMs = readinessProbe.connectTimeoutMs === undefined ? Math.min(intervalMs, 5_000) : integer(readinessProbe.connectTimeoutMs, 'readinessProbe.connectTimeoutMs', 1, 30_000);
+  const responseTimeoutMs = readinessProbe.responseTimeoutMs === undefined ? Math.min(timeoutMs, 10_000) : integer(readinessProbe.responseTimeoutMs, 'readinessProbe.responseTimeoutMs', 1, 30_000);
+  const maxResponseBytes = readinessProbe.maxResponseBytes === undefined ? 65_536 : integer(readinessProbe.maxResponseBytes, 'readinessProbe.maxResponseBytes', 1, 1_048_576);
+  const httpPath = readinessProbe.httpPath === undefined ? '/' : text(readinessProbe.httpPath, 'readinessProbe.httpPath', 2_048);
+  if (!httpPath.startsWith('/') || httpPath.includes('\\') || httpPath.includes('\r') || httpPath.includes('\n')) throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.httpPath must be a bounded absolute HTTP path');
+  let expectedStatusCodes: number[] | undefined;
+  if (readinessProbe.expectedStatusCodes !== undefined) {
+    if (!Array.isArray(readinessProbe.expectedStatusCodes) || readinessProbe.expectedStatusCodes.length === 0 || readinessProbe.expectedStatusCodes.length > 32) throw new SlotRuntimeError('release_invalid_request', 'readinessProbe.expectedStatusCodes must be a bounded non-empty array');
+    expectedStatusCodes = [...new Set(readinessProbe.expectedStatusCodes.map((value, index) => integer(value, `readinessProbe.expectedStatusCodes[${index}]`, 100, 599)))].sort((left, right) => left - right);
+  } else if (readinessProbeType === 'HTTP') expectedStatusCodes = [200];
+  const expectedResponseSha256 = readinessProbe.expectedResponseSha256 === undefined ? undefined : digest(readinessProbe.expectedResponseSha256, 'readinessProbe.expectedResponseSha256');
+  const expectedResponseContains = readinessProbe.expectedResponseContains === undefined ? undefined : text(readinessProbe.expectedResponseContains, 'readinessProbe.expectedResponseContains', 1_024);
+  if (readinessProbeType !== 'HTTP' && (readinessProbe.httpPath !== undefined || expectedStatusCodes !== undefined || expectedResponseSha256 !== undefined || expectedResponseContains !== undefined)) throw new SlotRuntimeError('release_invalid_request', 'HTTP readiness predicates require probeType HTTP');
   const serviceUser = user(runtimeIdentity.serviceUser, 'runtimeIdentity.serviceUser');
   const serviceGroup = user(runtimeIdentity.serviceGroup, 'runtimeIdentity.serviceGroup');
   const nativeReadiness = executableContract.nativeReadiness === undefined ? false : boolean(executableContract.nativeReadiness, 'executableContract.nativeReadiness');
@@ -321,10 +387,19 @@ function normalizeService(value: unknown): NormalizedService {
     nativeReadiness,
     nativeWatchdog,
     readinessPolicy: {
+      schemaVersion: '1.0.0',
       mode: readinessMode,
-      timeoutMs: integer(readinessProbe.timeoutMs, 'readinessProbe.timeoutMs', 1, 300_000),
-      intervalMs: integer(readinessProbe.intervalMs, 'readinessProbe.intervalMs', 1, 60_000),
-      maximumSamples: integer(readinessProbe.maximumSamples, 'readinessProbe.maximumSamples', 1, MAX_OBSERVATIONS),
+      probeType: readinessProbeType,
+      ...(declaredEndpointType === undefined ? {} : { endpointType: declaredEndpointType }),
+      timeoutMs,
+      intervalMs,
+      maximumSamples,
+      connectTimeoutMs,
+      responseTimeoutMs,
+      maxResponseBytes,
+      ...(readinessProbeType === 'HTTP' ? { httpPath, expectedStatusCodes } : {}),
+      ...(expectedResponseSha256 === undefined ? {} : { expectedResponseSha256 }),
+      ...(expectedResponseContains === undefined ? {} : { expectedResponseContains }),
     },
     resourceClass,
     stateDirectories: stringArray(record.stateDirectories, 'stateDirectories'),
@@ -400,6 +475,8 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
       ? requestedEndpoint
       : (() => { throw new SlotRuntimeError('release_invalid_request', 'roots.endpointMode is invalid'); })();
   if (endpointType === 'LOOPBACK_TCP' && service.endpointPreference === 'UNIX_SOCKET' && !service.allowLoopbackFallback) throw new SlotRuntimeError('release_invalid_request', 'loopback fallback is not permitted by service policy');
+  if (service.readinessPolicy.endpointType !== undefined && service.readinessPolicy.endpointType !== endpointType) throw new SlotRuntimeError('release_invalid_request', 'readiness probe endpoint type does not match the exact slot endpoint');
+  const readinessProbe: ReadinessProbeDefinition = { ...service.readinessPolicy, endpointType };
   const endpoint = endpointType === 'UNIX_SOCKET'
     ? ensureUnder(runtimeRoot, join(runtimeRoot, 'application.sock'), 'endpoint')
     : `127.0.0.1:${stablePort(service.serviceId, slot)}`;
@@ -474,7 +551,7 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     dropInBytes,
     unitDigest,
     dropInDigest,
-    unitGenerationDigest: sha256(canonicalize({ contract: SLOT_RUNTIME_CONTRACT_VERSION, unitDigest, dropInDigest, releaseId, artifactDigest, endpointType, endpoint, credentialBindingDigest: credentialBinding?.bindingDigest ?? null })),
+    unitGenerationDigest: sha256(canonicalize({ contract: SLOT_RUNTIME_CONTRACT_VERSION, unitDigest, dropInDigest, releaseId, artifactDigest, endpointType, endpoint, readinessProbe, credentialBindingDigest: credentialBinding?.bindingDigest ?? null })),
     releaseRoot,
     runtimeRoot,
     stateRoot,
@@ -487,6 +564,7 @@ export function generateSlotUnit(serviceValue: unknown, slotValue: unknown, rele
     executablePath: service.executablePath,
     nativeReadiness: service.nativeReadiness,
     nativeWatchdog: service.nativeWatchdog,
+    readinessProbe: structuredClone(readinessProbe),
     ...(credentialBinding === undefined ? {} : { credentialSetId: credentialBinding.credentialSetId, credentialBindingDigest: credentialBinding.bindingDigest, credentialNames: credentialBinding.names }),
   };
 }
@@ -531,6 +609,19 @@ function processSocketInodes(pid: number): Set<string> {
   return result;
 }
 
+function unixSocketInodes(path: string): string[] {
+  let lines: string[] = [];
+  try { lines = readFileSync('/proc/net/unix', 'utf8').split(/\r?\n/u).slice(1, 65_537); } catch { return []; }
+  const result: string[] = [];
+  for (const line of lines) {
+    const fields = line.trim().split(/\s+/u);
+    if (fields.length < 8) continue;
+    const observedPath = fields.slice(7).join(' ');
+    if (observedPath === path) result.push(fields[6]);
+  }
+  return [...new Set(result)].sort();
+}
+
 function tcpListeners(port: number): string[] {
   const hexadecimalPort = port.toString(16).toUpperCase().padStart(4, '0');
   const result: string[] = [];
@@ -554,16 +645,18 @@ function observeEndpoint(bundle: SlotUnitBundle, mainPid: number): { exists: boo
   const ownedInodes = mainPid > 0 ? processSocketInodes(mainPid) : new Set<string>();
   if (bundle.endpointType === 'UNIX_SOCKET') {
     if (!existsSync(bundle.endpoint)) return { exists: false };
-    let inode = '';
+    let filesystemInode = '';
     let socket = false;
     try {
       const stat = lstatSync(bundle.endpoint);
-      inode = String(stat.ino);
+      filesystemInode = String(stat.ino);
       socket = stat.isSocket();
     } catch { return { exists: false }; }
-    if (!socket) return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', inode, kind: 'FOREIGN_PATH' } };
-    if (ownedInodes.has(inode)) return { exists: true, owner: { pid: mainPid, unitName: bundle.unitName, serviceId: bundle.serviceId, slotId: bundle.slotId, inode, kind: 'UNIX_SOCKET' } };
-    return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', inode, kind: 'FOREIGN_SOCKET' } };
+    if (!socket) return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', filesystemInode, kind: 'FOREIGN_PATH' } };
+    const socketInodes = unixSocketInodes(bundle.endpoint);
+    const owned = socketInodes.find((inode) => ownedInodes.has(inode));
+    if (owned !== undefined) return { exists: true, owner: { pid: mainPid, unitName: bundle.unitName, serviceId: bundle.serviceId, slotId: bundle.slotId, inode: owned, filesystemInode, kind: 'UNIX_SOCKET' } };
+    return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', filesystemInode, socketInodes, kind: socketInodes.length === 0 ? 'UNOBSERVED_UNIX_SOCKET' : 'FOREIGN_SOCKET' } };
   }
   const match = /^127\.0\.0\.1:([0-9]+)$/u.exec(bundle.endpoint);
   if (match === null) return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', kind: 'INVALID_LOOPBACK_ENDPOINT' } };
@@ -572,6 +665,137 @@ function observeEndpoint(bundle: SlotUnitBundle, mainPid: number): { exists: boo
   const owned = inodes.find((inode) => ownedInodes.has(inode));
   if (owned !== undefined) return { exists: true, owner: { pid: mainPid, unitName: bundle.unitName, serviceId: bundle.serviceId, slotId: bundle.slotId, inode: owned, kind: 'LOOPBACK_TCP' } };
   return { exists: true, owner: { pid: 0, unitName: 'UNKNOWN', serviceId: 'UNKNOWN', slotId: 'UNKNOWN', inodes, kind: 'FOREIGN_LOOPBACK_LISTENER' } };
+}
+
+
+interface ReadinessProbeResult extends JsonObject {
+  classification: ReadinessClassification;
+  latencyMs: number;
+  detailDigest: string;
+  httpStatus?: number;
+  responseDigest?: string;
+}
+
+function readinessResult(classification: ReadinessClassification, startedAt: number, details: JsonObject, extras: JsonObject = {}): ReadinessProbeResult {
+  return {
+    classification,
+    latencyMs: Math.max(0, Date.now() - startedAt),
+    detailDigest: sha256(canonicalize(details)),
+    ...extras,
+  };
+}
+
+function endpointOwnerMatches(bundle: SlotUnitBundle, mainPid: number, owner: JsonObject | undefined): boolean {
+  return owner !== undefined
+    && owner.pid === mainPid
+    && owner.unitName === bundle.unitName
+    && owner.serviceId === bundle.serviceId
+    && owner.slotId === bundle.slotId;
+}
+
+function loopbackPort(endpoint: string): number | undefined {
+  const match = /^127\.0\.0\.1:([0-9]+)$/u.exec(endpoint);
+  if (match === null) return undefined;
+  const port = Number(match[1]);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65_535 ? port : undefined;
+}
+
+async function connectReadinessProbe(bundle: SlotUnitBundle): Promise<ReadinessProbeResult> {
+  const probe = bundle.readinessProbe;
+  const startedAt = Date.now();
+  return await new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (classification: ReadinessClassification, details: JsonObject): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(readinessResult(classification, startedAt, details));
+    };
+    const port = bundle.endpointType === 'LOOPBACK_TCP' ? loopbackPort(bundle.endpoint) : undefined;
+    if (bundle.endpointType === 'LOOPBACK_TCP' && port === undefined) {
+      resolvePromise(readinessResult('FAILED', startedAt, { reason:'invalid-loopback-endpoint' }));
+      return;
+    }
+    const socket = bundle.endpointType === 'UNIX_SOCKET'
+      ? createConnection({ path:bundle.endpoint })
+      : createConnection({ host:'127.0.0.1', port:port as number });
+    socket.setTimeout(probe.connectTimeoutMs, () => finish('TIMEOUT', { reason:'connect-timeout', endpointType:bundle.endpointType }));
+    socket.once('connect', () => finish('READY', { reason:'connect-succeeded', endpointType:bundle.endpointType }));
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      const classification: ReadinessClassification = error.code === 'ENOENT' ? 'ENDPOINT_ABSENT' : error.code === 'ETIMEDOUT' ? 'TIMEOUT' : 'NOT_READY';
+      finish(classification, { reason:'connect-failed', code:error.code ?? 'UNKNOWN', endpointType:bundle.endpointType });
+    });
+  });
+}
+
+async function httpReadinessProbe(bundle: SlotUnitBundle): Promise<ReadinessProbeResult> {
+  const probe = bundle.readinessProbe;
+  const startedAt = Date.now();
+  return await new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (classification: ReadinessClassification, details: JsonObject, extras: JsonObject = {}): void => {
+      if (settled) return;
+      settled = true;
+      request.destroy();
+      resolvePromise(readinessResult(classification, startedAt, details, extras));
+    };
+    const port = bundle.endpointType === 'LOOPBACK_TCP' ? loopbackPort(bundle.endpoint) : undefined;
+    if (bundle.endpointType === 'LOOPBACK_TCP' && port === undefined) {
+      resolvePromise(readinessResult('FAILED', startedAt, { reason:'invalid-loopback-endpoint' }));
+      return;
+    }
+    const request = httpRequest({
+      method:'GET',
+      path:probe.httpPath ?? '/',
+      headers:{ Host:'localhost', Connection:'close', Accept:'*/*' },
+      ...(bundle.endpointType === 'UNIX_SOCKET'
+        ? { socketPath:bundle.endpoint }
+        : { host:'127.0.0.1', port:port as number }),
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      response.on('data', (chunk: Buffer | string) => {
+        const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += value.length;
+        if (bytes > probe.maxResponseBytes) {
+          finish('FAILED', { reason:'response-too-large', maximumBytes:probe.maxResponseBytes, observedAtLeast:bytes }, { httpStatus:response.statusCode ?? 0 });
+          return;
+        }
+        chunks.push(value);
+      });
+      response.on('end', () => {
+        if (settled) return;
+        const body = Buffer.concat(chunks);
+        const responseDigest = sha256(body);
+        const httpStatus = response.statusCode ?? 0;
+        const statusAllowed = (probe.expectedStatusCodes ?? [200]).includes(httpStatus);
+        const digestAllowed = probe.expectedResponseSha256 === undefined || probe.expectedResponseSha256 === responseDigest;
+        const predicateAllowed = probe.expectedResponseContains === undefined || body.includes(Buffer.from(probe.expectedResponseContains));
+        const classification: ReadinessClassification = statusAllowed && digestAllowed && predicateAllowed ? 'READY' : 'NOT_READY';
+        finish(classification, {
+          reason:classification === 'READY' ? 'http-ready' : 'http-predicate-failed',
+          statusAllowed,
+          digestAllowed,
+          predicateAllowed,
+          responseBytes:body.length,
+        }, { httpStatus, responseDigest });
+      });
+      response.on('error', (error: NodeJS.ErrnoException) => finish('UNKNOWN', { reason:'response-stream-error', code:error.code ?? 'UNKNOWN' }));
+    });
+    request.setTimeout(probe.responseTimeoutMs, () => finish('TIMEOUT', { reason:'response-timeout', endpointType:bundle.endpointType }));
+    request.once('error', (error: NodeJS.ErrnoException) => {
+      const classification: ReadinessClassification = error.code === 'ENOENT' ? 'ENDPOINT_ABSENT' : error.code === 'ETIMEDOUT' ? 'TIMEOUT' : 'NOT_READY';
+      finish(classification, { reason:'http-request-failed', code:error.code ?? 'UNKNOWN', endpointType:bundle.endpointType });
+    });
+    request.end();
+  });
+}
+
+async function compatibilityReadinessProbe(bundle: SlotUnitBundle): Promise<ReadinessProbeResult> {
+  if (bundle.readinessProbe.mode !== 'POLL') return readinessResult('FAILED', Date.now(), { reason:'compatibility-probe-mode-mismatch' });
+  if (bundle.readinessProbe.probeType === 'CONNECT') return await connectReadinessProbe(bundle);
+  if (bundle.readinessProbe.probeType === 'HTTP') return await httpReadinessProbe(bundle);
+  return readinessResult('FAILED', Date.now(), { reason:'compatibility-probe-not-configured' });
 }
 
 export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
@@ -644,8 +868,34 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
   }
 
   async observe(bundle: SlotUnitBundle): Promise<SlotUnitObservation> {
-    const show = await this.manager.show({ unit: bundle.unitName, properties: ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'FragmentPath', 'DropInPaths'], timeoutMs: 30_000 });
-    const properties = show.exitCode === 0 ? parseProperties(decodeCommandOutput(show.stdout)) : {};
+    const readinessProbeDigest = sha256(canonicalize(bundle.readinessProbe));
+    const show = await this.manager.show({
+      unit:bundle.unitName,
+      properties:[
+        'LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'FragmentPath', 'DropInPaths',
+        'Type', 'NotifyAccess', 'WatchdogUSec', 'WatchdogTimestampMonotonic',
+      ],
+      timeoutMs:30_000,
+    });
+    if (show.exitCode !== 0) {
+      const detailDigest = sha256(canonicalize({ reason:'systemd-query-failed', stderrDigest:show.stderrSha256, exitCode:show.exitCode }));
+      return {
+        observedAt:this.now(),
+        unitExists:false,
+        activeState:'unknown',
+        subState:'unknown',
+        unitName:bundle.unitName,
+        endpointExists:false,
+        runtimePathExists:existsSync(bundle.runtimeRoot),
+        transientUnitExists:false,
+        readinessMode:bundle.readinessProbe.mode,
+        readinessState:'UNKNOWN',
+        readinessProbeDigest,
+        readinessDetailDigest:detailDigest,
+        watchdogState:bundle.nativeWatchdog ? 'UNKNOWN' : 'UNSUPPORTED',
+      };
+    }
+    const properties = parseProperties(decodeCommandOutput(show.stdout));
     const unitExists = properties.LoadState !== undefined && properties.LoadState !== 'not-found';
     const mainPid = Number(properties.MainPID ?? 0);
     let identity: ProcessIdentityRecord | undefined;
@@ -660,38 +910,109 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
     let observedDropInDigest: string | undefined;
     const dropIn = properties.DropInPaths?.split(' ').find((path) => path.endsWith('10-babyx-release.conf'));
     if (dropIn !== undefined && existsSync(dropIn)) observedDropInDigest = sha256(readFileSync(dropIn));
+    const activeState = properties.ActiveState ?? 'unknown';
+    const subState = properties.SubState ?? 'unknown';
+    const watchdogConfigured = Number(properties.WatchdogUSec ?? 0) > 0;
+    const watchdogTimestamp = Number(properties.WatchdogTimestampMonotonic ?? 0);
+    const watchdogState: SlotUnitObservation['watchdogState'] = !bundle.nativeWatchdog
+      ? 'UNSUPPORTED'
+      : watchdogConfigured && watchdogTimestamp > 0
+        ? 'ACTIVE'
+        : unitExists
+          ? 'INACTIVE'
+          : 'UNKNOWN';
+
+    let probeResult: ReadinessProbeResult;
+    if (!unitExists) probeResult = readinessResult('UNKNOWN', Date.now(), { reason:'unit-not-found' });
+    else if (activeState === 'failed') probeResult = readinessResult('FAILED', Date.now(), { reason:'systemd-unit-failed', subState });
+    else if (activeState !== 'active') probeResult = readinessResult('NOT_READY', Date.now(), { reason:'unit-not-active', activeState, subState });
+    else if (!Number.isSafeInteger(mainPid) || mainPid < 1 || identity === undefined) probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'main-process-unprovable', mainPid });
+    else if (observedUnitDigest !== bundle.unitDigest || observedDropInDigest !== bundle.dropInDigest) probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'unit-bytes-mismatch' });
+    else if (!endpointExists) probeResult = readinessResult('ENDPOINT_ABSENT', Date.now(), { reason:'endpoint-absent', endpointType:bundle.endpointType });
+    else if (!endpointOwnerMatches(bundle, mainPid, endpointOwner)) probeResult = readinessResult('ENDPOINT_OWNER_MISMATCH', Date.now(), { reason:'endpoint-owner-mismatch', ownerDigest:sha256(canonicalize(endpointOwner ?? {})) });
+    else if (identity.executablePath !== bundle.executablePath || properties.ControlGroup !== `/system.slice/${bundle.unitName}`) probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'process-or-cgroup-mismatch' });
+    else if (bundle.readinessProbe.mode === 'NATIVE_NOTIFY') {
+      if (!bundle.nativeReadiness || bundle.readinessProbe.probeType !== 'SYSTEMD_NOTIFY' || properties.Type !== 'notify') {
+        probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'native-readiness-contract-mismatch', unitType:properties.Type ?? 'UNKNOWN' });
+      } else if (subState !== 'running') {
+        probeResult = readinessResult('NOT_READY', Date.now(), { reason:'native-unit-not-running', subState });
+      } else if (bundle.nativeWatchdog && watchdogState !== 'ACTIVE') {
+        probeResult = readinessResult('NOT_READY', Date.now(), { reason:'watchdog-not-active', watchdogState });
+      } else {
+        probeResult = readinessResult('READY', Date.now(), { reason:'systemd-notify-ready', notifyAccess:properties.NotifyAccess ?? 'UNKNOWN', watchdogState });
+      }
+    } else {
+      probeResult = await compatibilityReadinessProbe(bundle);
+    }
+
     return {
-      observedAt: this.now(),
+      observedAt:this.now(),
       unitExists,
-      activeState: properties.ActiveState ?? 'unknown',
-      subState: properties.SubState ?? 'unknown',
-      unitName: bundle.unitName,
-      ...(observedUnitDigest === undefined ? {} : { unitDigest: observedUnitDigest }),
-      ...(observedDropInDigest === undefined ? {} : { dropInDigest: observedDropInDigest }),
+      activeState,
+      subState,
+      unitName:bundle.unitName,
+      ...(observedUnitDigest === undefined ? {} : { unitDigest:observedUnitDigest }),
+      ...(observedDropInDigest === undefined ? {} : { dropInDigest:observedDropInDigest }),
       ...(mainPid > 0 ? { mainPid } : {}),
-      ...(identity === undefined ? {} : { processStartTime: identity.processStartTime, executablePath: identity.executablePath, bootId: identity.bootId }),
-      ...(properties.ControlGroup === undefined ? {} : { cgroup: properties.ControlGroup }),
+      ...(identity === undefined ? {} : { processStartTime:identity.processStartTime, executablePath:identity.executablePath, bootId:identity.bootId }),
+      ...(properties.ControlGroup === undefined ? {} : { cgroup:properties.ControlGroup }),
       endpointExists,
       ...(endpointOwner === undefined ? {} : { endpointOwner }),
-      runtimePathExists: existsSync(bundle.runtimeRoot),
-      transientUnitExists: false,
-      readinessState: properties.ActiveState === 'active' && properties.SubState === 'running' ? 'READY' : properties.ActiveState === 'active' ? 'NOT_READY' : 'UNKNOWN',
-      watchdogState: bundle.nativeWatchdog ? (properties.ActiveState === 'active' ? 'ACTIVE' : 'UNKNOWN') : 'UNSUPPORTED',
+      runtimePathExists:existsSync(bundle.runtimeRoot),
+      transientUnitExists:false,
+      readinessMode:bundle.readinessProbe.mode,
+      readinessState:probeResult.classification,
+      readinessProbeDigest,
+      readinessDetailDigest:probeResult.detailDigest,
+      readinessLatencyMs:probeResult.latencyMs,
+      ...(probeResult.httpStatus === undefined ? {} : { readinessHttpStatus:probeResult.httpStatus }),
+      ...(probeResult.responseDigest === undefined ? {} : { readinessResponseDigest:probeResult.responseDigest }),
+      watchdogState,
     };
   }
 
   async waitReady(bundle: SlotUnitBundle, policy: ReadinessPolicy): Promise<SlotUnitObservation[]> {
+    if (canonicalize(policy) !== canonicalize(bundle.readinessProbe)) throw new SlotRuntimeError('release_invalid_request', 'readiness policy does not match the immutable unit bundle');
     const started = Date.now();
     const observations: SlotUnitObservation[] = [];
+    const terminal = new Set<ReadinessClassification>(['READY', 'FAILED', 'IDENTITY_MISMATCH', 'ENDPOINT_OWNER_MISMATCH']);
     while (observations.length < policy.maximumSamples && Date.now() - started <= policy.timeoutMs) {
       const observation = await this.observe(bundle);
       observations.push(observation);
-      if (observation.readinessState === 'READY') return observations;
-      if (observation.activeState === 'failed' || observation.activeState === 'inactive') return observations;
-      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, policy.intervalMs));
+      if (terminal.has(observation.readinessState)) return observations;
+      const remaining = policy.timeoutMs - (Date.now() - started);
+      if (remaining <= 0 || observations.length >= policy.maximumSamples) break;
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, Math.min(policy.intervalMs, remaining)));
+    }
+    if (observations.length === 0) {
+      observations.push({
+        observedAt:this.now(),
+        unitExists:false,
+        activeState:'unknown',
+        subState:'unknown',
+        unitName:bundle.unitName,
+        endpointExists:false,
+        runtimePathExists:existsSync(bundle.runtimeRoot),
+        transientUnitExists:false,
+        readinessMode:bundle.readinessProbe.mode,
+        readinessState:'TIMEOUT',
+        readinessProbeDigest:sha256(canonicalize(bundle.readinessProbe)),
+        readinessDetailDigest:sha256(canonicalize({ reason:'readiness-timeout-without-observation' })),
+        readinessLatencyMs:Math.max(0, Date.now() - started),
+        watchdogState:bundle.nativeWatchdog ? 'UNKNOWN' : 'UNSUPPORTED',
+      });
+    } else {
+      const last = observations.at(-1) as SlotUnitObservation;
+      observations[observations.length - 1] = {
+        ...last,
+        readinessState:'TIMEOUT',
+        readinessDetailDigest:sha256(canonicalize({ reason:'readiness-deadline-expired', priorClassification:last.readinessState })),
+        readinessLatencyMs:Math.max(0, Date.now() - started),
+      };
     }
     return observations;
   }
+
 }
 
 function bundleFromRecord(record: JsonObject): SlotUnitBundle {
@@ -716,14 +1037,16 @@ function exactObservation(bundle: SlotUnitBundle, record: JsonObject, observatio
   if (observation.executablePath !== bundle.executablePath) conflicts.push('executable');
   if (observation.bootId !== expected.bootId) conflicts.push('boot-id');
   if (observation.cgroup !== expected.cgroup) conflicts.push('cgroup');
-  if (!observation.endpointExists) conflicts.push('endpoint-absent');
+  if (observation.readinessState === 'READY' && !observation.endpointExists) conflicts.push('endpoint-absent');
   const endpointOwner = observation.endpointOwner;
-  if (endpointOwner === undefined) conflicts.push('endpoint-owner-missing');
-  else {
-    if (endpointOwner.pid !== observation.mainPid) conflicts.push('endpoint-owner-pid');
-    if (endpointOwner.unitName !== bundle.unitName) conflicts.push('endpoint-owner-unit');
-    if (endpointOwner.serviceId !== bundle.serviceId) conflicts.push('endpoint-owner-service');
-    if (endpointOwner.slotId !== bundle.slotId) conflicts.push('endpoint-owner-slot');
+  if (observation.endpointExists) {
+    if (endpointOwner === undefined) conflicts.push('endpoint-owner-missing');
+    else {
+      if (endpointOwner.pid !== observation.mainPid) conflicts.push('endpoint-owner-pid');
+      if (endpointOwner.unitName !== bundle.unitName) conflicts.push('endpoint-owner-unit');
+      if (endpointOwner.serviceId !== bundle.serviceId) conflicts.push('endpoint-owner-service');
+      if (endpointOwner.slotId !== bundle.slotId) conflicts.push('endpoint-owner-slot');
+    }
   }
   if (conflicts.length > 0) throw new SlotRuntimeError('release_process_ambiguous', 'observed slot identity conflicts with the durable expected identity', { conflicts });
   return {
@@ -779,6 +1102,13 @@ export class SlotRuntimeService {
       processAuthority: 'existing-babyx-job-manager',
       slotIds: [...SLOT_IDS],
       endpointModes: ['UNIX_SOCKET', 'LOOPBACK_TCP'],
+      readiness: {
+        contractVersion: '1.0.0',
+        configuredPerService: true,
+        nativeNotify: { implemented: true, systemdTruth: true, processIdentityRequired: true, endpointOwnershipRequired: true, watchdogReadback: true },
+        compatibilityPoll: { implemented: true, probeTypes: ['CONNECT', 'HTTP'], endpointTypes: ['UNIX_SOCKET', 'LOOPBACK_TCP'], boundedTimeouts: true, boundedResponses: true, responsePredicates: true },
+        activeRunningAloneIsReady: false,
+      },
       mutationPubliclyExposed: false,
       productionMutationEnabledByDefault: false,
     };

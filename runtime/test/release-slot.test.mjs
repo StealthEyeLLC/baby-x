@@ -339,7 +339,7 @@ test('E08 native readiness and watchdog declarations are generated and verified'
 test('E09 compatibility readiness polling succeeds when native readiness is unavailable', async () => {
   const fx = fixture();
   try {
-    const staged = stage(fx, { serviceOverrides: { executableContract: { argv: ['/opt/notes/bin/server'], nativeReadiness: false, nativeWatchdog: false }, readinessProbe: { mode: 'POLL', timeoutMs: 5000, intervalMs: 5, maximumSamples: 8 } } });
+    const staged = stage(fx, { serviceOverrides: { executableContract: { argv: ['/opt/notes/bin/server'], nativeReadiness: false, nativeWatchdog: false }, readinessProbe: { mode: 'POLL', probeType: 'CONNECT', timeoutMs: 5000, intervalMs: 5, maximumSamples: 8 } } });
     const ready = await fx.service.start({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('start-poll'));
     assert.equal(ready.state, 'READY_PRIVATE');
     assert.equal(ready.observedProcessIdentity.watchdogState, 'UNSUPPORTED');

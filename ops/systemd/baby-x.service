@@ -9,6 +9,7 @@ Group=root
 ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/runtime/cli/main.js serve
 Environment=NODE_ENV=production
 EnvironmentFile=-/etc/baby-x/environment
+EnvironmentFile=-/etc/baby-x/runtime-key-environment
 Restart=on-failure
 RestartSec=2
 KillMode=mixed

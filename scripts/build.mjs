@@ -42,6 +42,7 @@ for (const path of [
   'scripts/install-local.sh',
   'scripts/rollback-local.sh',
   'scripts/verify-local.sh',
+  'scripts/provision-local-keys.sh',
   'ops/systemd/baby-x.service',
   'ops/systemd/baby-x.socket',
   'ops/systemd/baby-x-gateway.service',

@@ -16,6 +16,7 @@ atomic_link() {
 install_units_from() {
   local source=$1
   [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]] || return 0
+  "$source/scripts/provision-local-keys.sh" || return
   cp "$source/ops/systemd/baby-x.service" "$source/ops/systemd/baby-x.socket" "$source/ops/systemd/baby-x-gateway.service" /etc/systemd/system/ || return
   cp "$source/ops/tmpfiles/baby-x.conf" /etc/tmpfiles.d/ || return
   systemd-tmpfiles --create /etc/tmpfiles.d/baby-x.conf || return
@@ -24,6 +25,8 @@ install_units_from() {
 
 restart_units() {
   [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]] || return 0
+  systemctl stop baby-x.service 2>/dev/null || true
+  systemctl reset-failed baby-x.service baby-x-gateway.service 2>/dev/null || true
   systemctl restart baby-x.socket baby-x-gateway.service || return
 }
 
@@ -32,7 +35,7 @@ activate_and_verify() {
   atomic_link "$target" "$root/current" || return
   install_units_from "$target" || return
   restart_units || return
-  "$target/scripts/verify-local.sh" || return
+  BABY_X_INSTALL_UNITS=${BABY_X_INSTALL_UNITS:-0} "$target/scripts/verify-local.sh" || return
 }
 
 current=$(readlink -f "$root/current")

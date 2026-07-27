@@ -9,6 +9,7 @@ Group=horsey
 ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/gateway/main.js
 Environment=NODE_ENV=production
 EnvironmentFile=-/etc/baby-x/gateway-environment
+EnvironmentFile=-/etc/baby-x/gateway-key-environment
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

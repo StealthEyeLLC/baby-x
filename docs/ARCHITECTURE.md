@@ -19,3 +19,7 @@ Baby-X preserves exact identity, idempotency, atomic writes, durable jobs, strea
 ## State ownership
 
 Operational objects persist because they are useful: jobs, streams, artifacts, machines, traces, captures, checkpoints, specifications, campaigns, and counterexamples. Compact signed proofs bind requests to results without creating a second evidence bureaucracy.
+
+## Transactional Root Authority
+
+The runtime exposes a coordination-only root transaction service backed by authoritative durable records and idempotency claims. It consumes observations from existing authorities but cannot run commands or activate, verify, or roll back releases itself. This prevents a second scheduler, executor, machine provider, artifact store, or deployment lane.

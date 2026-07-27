@@ -47,3 +47,7 @@ Generic provider execution must not bypass these authorities.
 ## Held branches
 
 Work on held branches is `HELD_BRANCH_ONLY`. It may be inspected and individual concepts may be reimplemented, but it is not canonical merely because it exists or passes its own tests.
+
+## Transactional Root Authority
+
+`runtime/src/root-authority/service.ts` is the sole durable root-mutation coordination authority. It binds exact source and intent identities, enforces expected-sequence state transitions, and preserves a digest-chained event ledger. It has no execution authority; jobs, machines, artifacts, releases, and deployment remain with their existing singular providers. See `docs/TRANSACTIONAL-ROOT-AUTHORITY.md`.

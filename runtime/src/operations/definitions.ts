@@ -24,6 +24,17 @@ export interface OperationDefinition {
 const operations = `
 babyx.describe
 babyx.health
+babyx.root.describe
+babyx.root.transaction.create
+babyx.root.transaction.get
+babyx.root.transaction.list
+babyx.root.transaction.authorize
+babyx.root.transaction.begin
+babyx.root.transaction.observe
+babyx.root.transaction.commit
+babyx.root.transaction.rollback
+babyx.root.transaction.events
+babyx.root.transaction.verify
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -204,7 +215,7 @@ babyx.counterexample.remove
 `.trim().split(/\s+/u);
 
 const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate', 'export', 'wait']);
-const durableFamilies = new Set(['machine', 'certification', 'race']);
+const durableFamilies = new Set(['machine', 'certification', 'race', 'root']);
 const highRiskFamilies = new Set(['systemd', 'machine', 'debug', 'checkpoint', 'syscall']);
 const conditionalFileSuffixes = new Set(['write', 'replace', 'patch', 'copy', 'move', 'remove']);
 
@@ -274,7 +285,30 @@ function objectSchema(properties: Record<string, unknown>, required: readonly st
   };
 }
 
+function rootSchema(operation: string): Record<string, unknown> {
+  const digest = { type: 'string', pattern: '^[a-f0-9]{64}$' } as const;
+  const gitIdentity = { type: 'string', pattern: '^(?:[a-f0-9]{40}|[a-f0-9]{64})$' } as const;
+  const transactionId = { type: 'string', pattern: '^rtx_[a-f0-9]{32}$' } as const;
+  const expectedSequence = { type: 'integer', minimum: 1, maximum: 10_000_000 } as const;
+  const page = { offset: { type: 'integer', minimum: 0, maximum: 10_000_000 }, limit: { type: 'integer', minimum: 1, maximum: 1_000 } } as const;
+  if (operation === 'babyx.root.describe') return objectSchema({});
+  if (operation === 'babyx.root.transaction.create') return objectSchema({
+    source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
+    intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
+  }, ['source', 'intent']);
+  if (operation === 'babyx.root.transaction.get' || operation === 'babyx.root.transaction.verify') return objectSchema({ transactionId }, ['transactionId']);
+  if (operation === 'babyx.root.transaction.list') return objectSchema({ state: stringValue, ownerPrincipal: identifier, ...page });
+  if (operation === 'babyx.root.transaction.events') return objectSchema({ transactionId, ...page }, ['transactionId']);
+  if (operation === 'babyx.root.transaction.authorize') return objectSchema({ transactionId, expectedSequence, decisionDigest: digest, expiresAt: stringValue }, ['transactionId', 'expectedSequence', 'decisionDigest', 'expiresAt']);
+  if (operation === 'babyx.root.transaction.begin') return objectSchema({ transactionId, expectedSequence }, ['transactionId', 'expectedSequence']);
+  if (operation === 'babyx.root.transaction.observe') return objectSchema({ transactionId, expectedSequence, phase: { enum: ['execution', 'verification', 'rollback'] }, status: { enum: ['succeeded', 'failed', 'ambiguous'] }, authority: identifier, reference: stringValue, observationDigest: digest }, ['transactionId', 'expectedSequence', 'phase', 'status', 'authority', 'reference', 'observationDigest']);
+  if (operation === 'babyx.root.transaction.commit') return objectSchema({ transactionId, expectedSequence, commitDigest: digest, verificationDigest: digest }, ['transactionId', 'expectedSequence', 'commitDigest', 'verificationDigest']);
+  if (operation === 'babyx.root.transaction.rollback') return objectSchema({ transactionId, expectedSequence, rollbackDigest: digest, reasonDigest: digest }, ['transactionId', 'expectedSequence', 'rollbackDigest', 'reasonDigest']);
+  throw new Error(`missing root operation schema: ${operation}`);
+}
+
 function schemaFor(operation: string): Record<string, unknown> {
+  if (operation.startsWith('babyx.root.')) return rootSchema(operation);
   if (operation === 'babyx.describe' || operation === 'babyx.health' || operation.endsWith('.describe')) return objectSchema({});
   if (operation === 'babyx.exec') return objectSchema({ argv: stringArray, cwd: stringValue, env: jsonObject, target: jsonObject, timeoutMs: positiveInteger }, ['argv']);
   if (operation === 'babyx.shell') return objectSchema({ shell: stringValue, command: stringValue, script: stringValue, cwd: stringValue, env: jsonObject, target: jsonObject, timeoutMs: positiveInteger }, [], { anyOf: [{ required: ['command'] }, { required: ['script'] }] });
@@ -356,12 +390,13 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   const family = familyOf(operation);
   if (family === 'machine') return ['authoritative_machine_record_persisted', 'observed_state_reported'];
   if (family === 'certification' || family === 'race') return ['durable_record_persisted', 'evidence_references_reported'];
+  if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '2.0.0';
+export const OPERATION_CATALOG_VERSION = '3.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

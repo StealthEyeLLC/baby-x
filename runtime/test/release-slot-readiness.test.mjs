@@ -107,12 +107,15 @@ function makeFixture(overrides = {}, endpointMode) {
     subState: 'running',
     watchdogUSec: bundle.nativeWatchdog ? '30000000' : '0',
     watchdogTimestamp: bundle.nativeWatchdog ? '1' : '0',
+    transient: 'no',
+    showFailure: false,
     mutateShow: undefined,
   };
   const manager = {
     async show() {
       showCount += 1;
       state.mutateShow?.(showCount, state);
+      if (state.showFailure) return { exitCode: 1, stdout: '', stderrSha256: 'f'.repeat(64) };
       const output = [
         'LoadState=loaded',
         `ActiveState=${state.activeState}`,
@@ -123,6 +126,7 @@ function makeFixture(overrides = {}, endpointMode) {
         `DropInPaths=${dropInPath}`,
         `Type=${state.type}`,
         'NotifyAccess=main',
+        ...(state.transient === undefined ? [] : [`Transient=${state.transient}`]),
         `WatchdogUSec=${state.watchdogUSec}`,
         `WatchdogTimestampMonotonic=${state.watchdogTimestamp}`,
       ].join('\n') + '\n';
@@ -280,4 +284,55 @@ test('R2-11 capability reporting distinguishes native and compatibility readines
     assert.deepEqual(readiness.compatibilityPoll.probeTypes, ['CONNECT', 'HTTP']);
     assert.equal(readiness.activeRunningAloneIsReady, false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('R3-01 exact systemd Transient=yes is observed as present and rejected', async () => {
+  const fx = makeFixture();
+  fx.state.transient = 'yes';
+  try {
+    const observed = await fx.adapter.observe(fx.bundle);
+    assert.equal(observed.systemdObservationState, 'OBSERVED');
+    assert.equal(observed.transientUnitIdentity, fx.bundle.unitName);
+    assert.equal(observed.transientUnitExists, true);
+    assert.equal(observed.transientUnitState, 'PRESENT');
+    assert.equal(observed.readinessState, 'IDENTITY_MISMATCH');
+  } finally { fx.close(); }
+});
+
+test('R3-02 exact systemd Transient=no is observed as absent', async () => {
+  const fx = makeFixture();
+  try {
+    const observed = await fx.adapter.observe(fx.bundle);
+    assert.equal(observed.systemdObservationState, 'OBSERVED');
+    assert.equal(observed.transientUnitIdentity, fx.bundle.unitName);
+    assert.equal(observed.transientUnitExists, false);
+    assert.equal(observed.transientUnitState, 'ABSENT');
+  } finally { fx.close(); }
+});
+
+test('R3-03 systemd query failure remains UNKNOWN and never becomes false absence', async () => {
+  const fx = makeFixture();
+  fx.state.showFailure = true;
+  try {
+    const observed = await fx.adapter.observe(fx.bundle);
+    assert.equal(observed.systemdObservationState, 'PROVIDER_FAILED');
+    assert.equal(observed.unitExists, undefined);
+    assert.equal(observed.endpointExists, undefined);
+    assert.equal(observed.transientUnitExists, undefined);
+    assert.equal(observed.transientUnitState, 'UNKNOWN');
+    assert.equal(observed.readinessState, 'UNKNOWN');
+  } finally { fx.close(); }
+});
+
+test('R3-04 missing Transient property is UNKNOWN and never assumed absent', async () => {
+  const fx = makeFixture();
+  fx.state.transient = undefined;
+  try {
+    const observed = await fx.adapter.observe(fx.bundle);
+    assert.equal(observed.systemdObservationState, 'OBSERVED');
+    assert.equal(observed.transientUnitExists, undefined);
+    assert.equal(observed.transientUnitState, 'UNKNOWN');
+    assert.equal(observed.readinessState, 'UNKNOWN');
+  } finally { fx.close(); }
 });

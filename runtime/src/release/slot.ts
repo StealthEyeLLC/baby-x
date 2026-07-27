@@ -130,7 +130,8 @@ export interface SlotCredentialBinding extends JsonObject {
 
 export interface SlotUnitObservation extends JsonObject {
   observedAt: string;
-  unitExists: boolean;
+  unitExists?: boolean;
+  systemdObservationState: 'OBSERVED' | 'PROVIDER_FAILED';
   activeState: string;
   subState: string;
   unitName: string;
@@ -141,10 +142,12 @@ export interface SlotUnitObservation extends JsonObject {
   executablePath?: string;
   bootId?: string;
   cgroup?: string;
-  endpointExists: boolean;
+  endpointExists?: boolean;
   endpointOwner?: JsonObject;
   runtimePathExists: boolean;
-  transientUnitExists: boolean;
+  transientUnitIdentity: string;
+  transientUnitExists?: boolean;
+  transientUnitState: 'PRESENT' | 'ABSENT' | 'UNKNOWN' | 'IDENTITY_MISMATCH';
   readinessMode: 'NATIVE_NOTIFY' | 'POLL';
   readinessState: ReadinessClassification;
   readinessProbeDigest: string;
@@ -873,7 +876,7 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
       unit:bundle.unitName,
       properties:[
         'LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'FragmentPath', 'DropInPaths',
-        'Type', 'NotifyAccess', 'WatchdogUSec', 'WatchdogTimestampMonotonic',
+        'Type', 'NotifyAccess', 'WatchdogUSec', 'WatchdogTimestampMonotonic', 'Transient',
       ],
       timeoutMs:30_000,
     });
@@ -881,13 +884,13 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
       const detailDigest = sha256(canonicalize({ reason:'systemd-query-failed', stderrDigest:show.stderrSha256, exitCode:show.exitCode }));
       return {
         observedAt:this.now(),
-        unitExists:false,
+        systemdObservationState:'PROVIDER_FAILED',
         activeState:'unknown',
         subState:'unknown',
         unitName:bundle.unitName,
-        endpointExists:false,
         runtimePathExists:existsSync(bundle.runtimeRoot),
-        transientUnitExists:false,
+        transientUnitIdentity:bundle.unitName,
+        transientUnitState:'UNKNOWN',
         readinessMode:bundle.readinessProbe.mode,
         readinessState:'UNKNOWN',
         readinessProbeDigest,
@@ -897,6 +900,13 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
     }
     const properties = parseProperties(decodeCommandOutput(show.stdout));
     const unitExists = properties.LoadState !== undefined && properties.LoadState !== 'not-found';
+    const transientProperty = properties.Transient;
+    const transientUnitExists = !unitExists ? false : transientProperty === 'yes' ? true : transientProperty === 'no' ? false : undefined;
+    const transientUnitState: SlotUnitObservation['transientUnitState'] = transientUnitExists === true
+      ? 'PRESENT'
+      : transientUnitExists === false
+        ? 'ABSENT'
+        : 'UNKNOWN';
     const mainPid = Number(properties.MainPID ?? 0);
     let identity: ProcessIdentityRecord | undefined;
     if (mainPid > 0) {
@@ -924,6 +934,8 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
 
     let probeResult: ReadinessProbeResult;
     if (!unitExists) probeResult = readinessResult('UNKNOWN', Date.now(), { reason:'unit-not-found' });
+    else if (transientUnitExists === true) probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'transient-unit-forbidden', unitName:bundle.unitName });
+    else if (transientUnitExists === undefined) probeResult = readinessResult('UNKNOWN', Date.now(), { reason:'transient-unit-state-unproven', unitName:bundle.unitName });
     else if (activeState === 'failed') probeResult = readinessResult('FAILED', Date.now(), { reason:'systemd-unit-failed', subState });
     else if (activeState !== 'active') probeResult = readinessResult('NOT_READY', Date.now(), { reason:'unit-not-active', activeState, subState });
     else if (!Number.isSafeInteger(mainPid) || mainPid < 1 || identity === undefined) probeResult = readinessResult('IDENTITY_MISMATCH', Date.now(), { reason:'main-process-unprovable', mainPid });
@@ -948,6 +960,7 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
     return {
       observedAt:this.now(),
       unitExists,
+      systemdObservationState:'OBSERVED',
       activeState,
       subState,
       unitName:bundle.unitName,
@@ -959,7 +972,9 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
       endpointExists,
       ...(endpointOwner === undefined ? {} : { endpointOwner }),
       runtimePathExists:existsSync(bundle.runtimeRoot),
-      transientUnitExists:false,
+      transientUnitIdentity:bundle.unitName,
+      ...(transientUnitExists === undefined ? {} : { transientUnitExists }),
+      transientUnitState,
       readinessMode:bundle.readinessProbe.mode,
       readinessState:probeResult.classification,
       readinessProbeDigest,
@@ -987,13 +1002,13 @@ export class HostSystemdSlotAdapter implements SlotSystemdAdapter {
     if (observations.length === 0) {
       observations.push({
         observedAt:this.now(),
-        unitExists:false,
+        systemdObservationState:'PROVIDER_FAILED',
         activeState:'unknown',
         subState:'unknown',
         unitName:bundle.unitName,
-        endpointExists:false,
         runtimePathExists:existsSync(bundle.runtimeRoot),
-        transientUnitExists:false,
+        transientUnitIdentity:bundle.unitName,
+        transientUnitState:'UNKNOWN',
         readinessMode:bundle.readinessProbe.mode,
         readinessState:'TIMEOUT',
         readinessProbeDigest:sha256(canonicalize(bundle.readinessProbe)),
@@ -1030,7 +1045,10 @@ function replayByKey(store: ReleaseApplianceStore, schemaId: string, recordId: s
 function exactObservation(bundle: SlotUnitBundle, record: JsonObject, observation: SlotUnitObservation): SlotProcessIdentity {
   const expected = object(record.expectedProcessIdentity, 'slot.expectedProcessIdentity');
   const conflicts: string[] = [];
-  if (!observation.unitExists || observation.unitName !== bundle.unitName) conflicts.push('unit');
+  if (observation.systemdObservationState !== 'OBSERVED') conflicts.push('systemd-observation-unproven');
+  if (observation.unitExists !== true || observation.unitName !== bundle.unitName) conflicts.push('unit');
+  if (observation.transientUnitIdentity !== bundle.unitName) conflicts.push('transient-unit-identity');
+  if (observation.transientUnitState !== 'ABSENT' || observation.transientUnitExists !== false) conflicts.push('transient-unit-present-or-unproven');
   if (observation.unitDigest !== bundle.unitDigest || observation.dropInDigest !== bundle.dropInDigest) conflicts.push('unit-bytes');
   if (!Number.isSafeInteger(observation.mainPid) || Number(observation.mainPid) < 1) conflicts.push('main-pid');
   if (observation.processStartTime !== expected.processStartTime) conflicts.push('process-start-time');
@@ -1071,12 +1089,20 @@ function exactObservation(bundle: SlotUnitBundle, record: JsonObject, observatio
   };
 }
 
-function positiveAbsence(observation: SlotUnitObservation): boolean {
-  return !observation.unitExists
+function positiveStopped(observation: SlotUnitObservation): boolean {
+  return observation.systemdObservationState === 'OBSERVED'
     && observation.mainPid === undefined
-    && !observation.endpointExists
-    && !observation.runtimePathExists
-    && !observation.transientUnitExists;
+    && observation.endpointExists === false
+    && observation.activeState !== 'active'
+    && observation.transientUnitIdentity === observation.unitName
+    && observation.transientUnitExists === false
+    && observation.transientUnitState === 'ABSENT';
+}
+
+function positiveAbsence(observation: SlotUnitObservation): boolean {
+  return positiveStopped(observation)
+    && observation.unitExists === false
+    && observation.runtimePathExists === false;
 }
 
 export class SlotRuntimeService {
@@ -1102,6 +1128,13 @@ export class SlotRuntimeService {
       processAuthority: 'existing-babyx-job-manager',
       slotIds: [...SLOT_IDS],
       endpointModes: ['UNIX_SOCKET', 'LOOPBACK_TCP'],
+      unitExecution: {
+        persistentUnitOnly: true,
+        transientUnits: 'FORBIDDEN',
+        exactUnitIdentity: true,
+        transientPropertyReadback: true,
+        providerFailureIsUnknown: true,
+      },
       readiness: {
         contractVersion: '1.0.0',
         configuredPerService: true,
@@ -1211,7 +1244,8 @@ export class SlotRuntimeService {
     if (record.state === 'STAGED') record = this.transition(record, authenticated.subject, 'STARTING', 'start-intent', authenticated.idempotencyKey, requestDigest, { validationResult: validation });
     let observation: SlotUnitObservation;
     const preexisting = await this.options.systemd.observe(bundle);
-    if (preexisting.unitExists || preexisting.mainPid !== undefined || preexisting.endpointExists) {
+    if (preexisting.systemdObservationState !== 'OBSERVED') return this.recovery(record, authenticated.subject, 'start-preflight-provider-unavailable', new SlotRuntimeError('release_provider_unavailable', 'systemd preflight observation is unavailable'), requestDigest);
+    if (preexisting.unitExists === true || preexisting.mainPid !== undefined || preexisting.endpointExists === true || preexisting.transientUnitExists === true) {
       try {
         const identity = exactObservation(bundle, record, preexisting);
         record = this.transition(record, authenticated.subject, 'RUNNING_NOT_READY', 'start-adopt', `${authenticated.idempotencyKey}-adopt`, sha256(canonicalize({ requestDigest, preexisting })), { observedProcessIdentity: identity, startedAt: record.startedAt ?? this.now(), readinessObservations: [preexisting] });
@@ -1225,7 +1259,7 @@ export class SlotRuntimeService {
         await this.options.systemd.start(bundle);
       } catch (error) {
         const readback = await this.options.systemd.observe(bundle);
-        if (!readback.unitExists && readback.mainPid === undefined && !readback.endpointExists) return this.failed(record, authenticated.subject, 'start-failed', error, requestDigest);
+        if (positiveAbsence(readback)) return this.failed(record, authenticated.subject, 'start-failed', error, requestDigest);
         try { exactObservation(bundle, record, readback); } catch (identityError) { return this.ambiguous(record, authenticated.subject, 'start-response-loss', identityError, requestDigest); }
       }
       observation = await this.options.systemd.observe(bundle);
@@ -1260,12 +1294,12 @@ export class SlotRuntimeService {
     const bundle = bundleFromRecord(record);
     try { await this.options.systemd.stop(bundle); } catch (error) {
       const observation = await this.options.systemd.observe(bundle);
-      if (!observation.unitExists && observation.mainPid === undefined && !observation.endpointExists) return this.transition(record, authenticated.subject, 'STOPPED', 'stop-response-loss-absent', `${authenticated.idempotencyKey}-absent`, sha256(canonicalize({ requestDigest, observation })), { stoppedAt: this.now() });
+      if (positiveStopped(observation)) return this.transition(record, authenticated.subject, 'STOPPED', 'stop-response-loss-absent', `${authenticated.idempotencyKey}-absent`, sha256(canonicalize({ requestDigest, observation })), { stoppedAt: this.now() });
       try { exactObservation(bundle, record, observation); } catch (identityError) { return this.ambiguous(record, authenticated.subject, 'stop-response-loss', identityError, requestDigest); }
       return this.recovery(record, authenticated.subject, 'stop-obstructed', error, requestDigest);
     }
     const observation = await this.options.systemd.observe(bundle);
-    if (observation.mainPid !== undefined || observation.endpointExists || observation.activeState === 'active') return this.recovery(record, authenticated.subject, 'stop-absence-unproven', new SlotRuntimeError('release_cleanup_failed', 'stop did not prove process and listener absence'), requestDigest);
+    if (!positiveStopped(observation)) return this.recovery(record, authenticated.subject, 'stop-absence-unproven', new SlotRuntimeError('release_cleanup_failed', 'stop did not prove process, listener, and transient-unit absence'), requestDigest, { ambiguity: { observationDigest: sha256(canonicalize(observation)) } });
     return this.transition(record, authenticated.subject, 'STOPPED', 'stop-verified', `${authenticated.idempotencyKey}-verified`, sha256(canonicalize({ requestDigest, observation })), { stoppedAt: this.now(), livenessObservations: [...(Array.isArray(record.livenessObservations) ? record.livenessObservations : []), observation].slice(-MAX_OBSERVATIONS) });
   }
 
@@ -1289,8 +1323,10 @@ export class SlotRuntimeService {
     if (!['STAGED', 'STOPPED', 'FAILED', 'CLEANING'].includes(String(record.state))) throw new SlotRuntimeError('release_invalid_state', 'slot cannot be cleaned from its current state', { state: record.state });
     if (record.state !== 'CLEANING') record = this.transition(record, authenticated.subject, 'CLEANING', 'cleanup-intent', authenticated.idempotencyKey, requestDigest, {});
     const bundle = bundleFromRecord(record);
-    try { await this.options.systemd.cleanup(bundle); } catch (error) { return this.recovery(record, authenticated.subject, 'cleanup-effect-failed', error, requestDigest); }
+    let cleanupResponseLost = false;
+    try { await this.options.systemd.cleanup(bundle); } catch { cleanupResponseLost = true; }
     const observation = await this.options.systemd.observe(bundle);
+    if (cleanupResponseLost && !positiveAbsence(observation)) return this.recovery(record, authenticated.subject, 'cleanup-response-loss', new SlotRuntimeError('release_response_lost', 'cleanup response was lost and exact absence is unproven'), requestDigest, { ambiguity: { observationDigest: sha256(canonicalize(observation)) } });
     if (!positiveAbsence(observation)) return this.recovery(record, authenticated.subject, 'cleanup-absence-unproven', new SlotRuntimeError('release_cleanup_failed', 'cleanup did not prove unit, process, endpoint, runtime path, and transient-unit absence'), requestDigest, { ambiguity: { observationDigest: sha256(canonicalize(observation)) } });
     return this.transition(record, authenticated.subject, 'EMPTY_VERIFIED', 'cleanup-verified', `${authenticated.idempotencyKey}-verified`, sha256(canonicalize({ requestDigest, observation })), { desiredState: 'EMPTY_VERIFIED', releaseId: undefined, observedProcessIdentity: undefined, endpointIdentity: undefined, credentialSetId: undefined, credentialBindingDigest: undefined, routeMembership: false, cleanupCompletedAt: this.now(), ambiguity: undefined, error: undefined });
   }

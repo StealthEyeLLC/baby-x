@@ -101,12 +101,15 @@ function absent(bundle, observedAt = '2026-07-26T16:00:00.000Z') {
   return {
     observedAt,
     unitExists: false,
+    systemdObservationState: 'OBSERVED',
     activeState: 'inactive',
     subState: 'dead',
     unitName: bundle.unitName,
     endpointExists: false,
     runtimePathExists: false,
+    transientUnitIdentity: bundle.unitName,
     transientUnitExists: false,
+    transientUnitState: 'ABSENT',
     readinessState: 'UNKNOWN',
     watchdogState: bundle.nativeWatchdog ? 'UNKNOWN' : 'UNSUPPORTED',
   };
@@ -116,6 +119,7 @@ function running(bundle, overrides = {}) {
   return {
     observedAt: '2026-07-26T16:00:01.000Z',
     unitExists: true,
+    systemdObservationState: 'OBSERVED',
     activeState: 'active',
     subState: 'running',
     unitName: bundle.unitName,
@@ -129,7 +133,9 @@ function running(bundle, overrides = {}) {
     endpointExists: true,
     endpointOwner: { pid: 4242, unitName: bundle.unitName, serviceId: bundle.serviceId, slotId: bundle.slotId },
     runtimePathExists: true,
+    transientUnitIdentity: bundle.unitName,
     transientUnitExists: false,
+    transientUnitState: 'ABSENT',
     readinessState: 'READY',
     watchdogState: bundle.nativeWatchdog ? 'ACTIVE' : 'UNSUPPORTED',
     ...overrides,
@@ -182,8 +188,29 @@ class FakeSystemdAdapter {
   }
   async cleanup(bundle) {
     this.calls.push('cleanup');
-    if (this.cleanupFailure) throw new Error('fake cleanup obstruction');
+    if (this.cleanupFailure === 'before') throw new Error('fake cleanup obstruction before effect');
+    if (this.cleanupFailure === 'transient') {
+      this.current = absent(bundle, undefined);
+      this.current = { ...this.current, unitExists: true, transientUnitExists: true, transientUnitState: 'PRESENT' };
+      return { removed: false };
+    }
+    if (this.cleanupFailure === 'provider') {
+      this.current = {
+        observedAt: '2026-07-26T16:00:09.000Z',
+        systemdObservationState: 'PROVIDER_FAILED',
+        activeState: 'unknown',
+        subState: 'unknown',
+        unitName: bundle.unitName,
+        runtimePathExists: false,
+        transientUnitIdentity: bundle.unitName,
+        transientUnitState: 'UNKNOWN',
+        readinessState: 'UNKNOWN',
+        watchdogState: bundle.nativeWatchdog ? 'UNKNOWN' : 'UNSUPPORTED',
+      };
+      return { removed: false };
+    }
     this.current = absent(bundle);
+    if (this.cleanupFailure === 'after') throw new Error('fake cleanup response loss after effect');
     return { removed: true };
   }
   async observe(bundle) {
@@ -478,7 +505,9 @@ test('E22 cleanup requires positive absence and obstruction enters RECOVERY_REQU
   const fx = fixture();
   try {
     const staged = stage(fx);
-    fx.adapter.cleanupFailure = true;
+    fx.adapter.current = absent(staged.unitBundle, undefined);
+    fx.adapter.current = { ...fx.adapter.current, runtimePathExists: true };
+    fx.adapter.cleanupFailure = 'before';
     const result = await fx.service.cleanup({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('cleanup-obstructed'));
     assert.equal(result.state, 'RECOVERY_REQUIRED');
   } finally { fx.close(); }
@@ -610,5 +639,94 @@ test('E32 only one slot per service may remain ACTIVE', async () => {
     const greenActive = fx.service.activate({ serviceId: 'notes-api', slotId: 'green', expectedSequence: greenReady.sequence, routeReadbackVerified: true, routeDigest: DIGEST_B }, context('activate-green'));
     assert.equal(greenActive.state, 'ACTIVE');
     assert.equal(blueActive.state, 'ACTIVE');
+  } finally { fx.close(); }
+});
+
+
+test('R3-05 wrong transient-unit identity during readiness is ambiguous and never ready', async () => {
+  const fx = fixture();
+  try {
+    const staged = stage(fx);
+    fx.adapter.readyObservations = [running(staged.unitBundle, { transientUnitIdentity: 'foreign-transient.service' })];
+    const result = await fx.service.start({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('r3-wrong-transient-identity'));
+    assert.equal(result.state, 'AMBIGUOUS');
+    assert.equal(result.routeMembership, false);
+  } finally { fx.close(); }
+});
+
+test('R3-06 transient unit remaining after cleanup preserves RECOVERY_REQUIRED', async () => {
+  const fx = fixture();
+  try {
+    const staged = stage(fx);
+    fx.adapter.cleanupFailure = 'transient';
+    const result = await fx.service.cleanup({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('r3-transient-remains'));
+    assert.equal(result.state, 'RECOVERY_REQUIRED');
+    assert.equal(result.ambiguity.observationDigest.length, 64);
+  } finally { fx.close(); }
+});
+
+test('R3-07 provider unavailable during cleanup preserves UNKNOWN truth', async () => {
+  const fx = fixture();
+  try {
+    const staged = stage(fx);
+    fx.adapter.cleanupFailure = 'provider';
+    const result = await fx.service.cleanup({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('r3-provider-unavailable'));
+    assert.equal(result.state, 'RECOVERY_REQUIRED');
+    assert.equal(result.error.phase, 'cleanup-absence-unproven');
+  } finally { fx.close(); }
+});
+
+test('R3-08 cleanup response loss completes only from exact positive absence', async () => {
+  const fx = fixture();
+  try {
+    const staged = stage(fx);
+    fx.adapter.cleanupFailure = 'after';
+    const result = await fx.service.cleanup({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: staged.sequence }, context('r3-cleanup-response-loss'));
+    assert.equal(result.state, 'EMPTY_VERIFIED');
+    assert.equal(fx.adapter.current.unitExists, false);
+    assert.equal(fx.adapter.current.transientUnitExists, false);
+  } finally { fx.close(); }
+});
+
+test('R3-09 coordinator restart resumes durable CLEANING without duplicate cleanup success', async () => {
+  const fx = fixture();
+  try {
+    const staged = stage(fx);
+    const cleaning = { ...staged, state: 'CLEANING', sequence: staged.sequence + 1 };
+    fx.store.applyMutation({
+      schemaId: 'SlotRecordV1',
+      recordId: 'notes-api:blue',
+      ownerPrincipal: OWNER,
+      expectedSequence: staged.sequence,
+      idempotencyKey: 'r3-simulated-cleanup-intent',
+      requestDigest: sha256(canonicalize({ action: 'cleanup', serviceId: 'notes-api', slotId: 'blue', releaseId: staged.releaseId })),
+      operation: 'babyx.release.slot.coordinate',
+      phase: 'cleanup-intent',
+      record: cleaning,
+      occurredAt: '2026-07-26T16:00:50.000Z',
+    });
+    fx.adapter.current = absent(staged.unitBundle, '2026-07-26T16:00:51.000Z');
+    const restarted = new SlotRuntimeService({
+      stateRoot: fx.root,
+      store: fx.store,
+      jobs: { get(id) { return { id, status: 'completed' }; } },
+      systemd: fx.adapter,
+      now: () => '2026-07-26T16:00:52.000Z',
+    });
+    const result = await restarted.cleanup({ serviceId: 'notes-api', slotId: 'blue', expectedSequence: cleaning.sequence }, context('r3-cleanup-restart'));
+    assert.equal(result.state, 'EMPTY_VERIFIED');
+    assert.equal(fx.adapter.calls.filter((call) => call === 'cleanup').length, 1);
+  } finally { fx.close(); }
+});
+
+test('R3-10 slot runtime statically forbids transient launch and reports the invariant', () => {
+  const source = readFileSync(new URL('../src/release/slot.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /systemd-run/u);
+  const fx = fixture();
+  try {
+    const unitExecution = fx.service.describe().unitExecution;
+    assert.equal(unitExecution.persistentUnitOnly, true);
+    assert.equal(unitExecution.transientUnits, 'FORBIDDEN');
+    assert.equal(unitExecution.providerFailureIsUnknown, true);
   } finally { fx.close(); }
 });

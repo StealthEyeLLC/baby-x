@@ -35,10 +35,17 @@ test('describe exposes only implemented operations without duplicate authority p
     assert.equal(operations.some((item) => item.operation === 'babyx.pty.create'), false);
     assert.equal(operations.some((item) => item.operation === 'babyx.artifact.begin'), false);
     for (const definition of operations) {
-      assert.equal('risk' in definition, false);
-      assert.equal('confirmation' in definition, false);
-      assert.equal('receiptVersion' in definition, false);
+      assert.ok(['low', 'medium', 'high'].includes(definition.risk));
+      assert.ok(['read_only', 'caller_key', 'conditional', 'non_idempotent'].includes(definition.idempotency));
+      assert.equal(definition.receiptVersion, '1.0.0');
+      assert.equal(definition.authority.class, 'unrestricted-owner');
+      assert.equal(definition.input.type, 'object');
+      assert.equal(definition.input.additionalProperties, false);
+      assert.ok(Array.isArray(definition.errors));
+      assert.ok(Array.isArray(definition.postconditions));
     }
+    assert.equal(description.operationCatalogVersion, '2.0.0');
+    assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     assert.equal(operationDefinitions().length, operations.length);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

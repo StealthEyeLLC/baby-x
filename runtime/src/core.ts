@@ -4,7 +4,7 @@ import { constants as fsConstants, createReadStream, createWriteStream, existsSy
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { processIdentity as readProcessIdentity } from './process/identity.ts';
-import { OPERATION_DEFINITIONS, OPERATION_NAMES, type OperationDefinition } from './operations/definitions.ts';
+import { OPERATION_CATALOG_VERSION, OPERATION_DEFINITIONS, OPERATION_NAMES, type OperationDefinition } from './operations/definitions.ts';
 
 export type JsonObject = Record<string, unknown>;
 
@@ -613,7 +613,7 @@ export class BabyXRuntime {
     const tools = toolAvailability();
     return {
       product: 'baby-x', protocol: 'QRT1/1.0.0', sourceVersion: '0.1.0', sourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? null, sourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? null,
-      hostname: hostname(), machineIdSha256: machineIdHash(), authorityClass: 'unrestricted-owner', configuredLimits: { maxFrameSize: 16 * 1024 * 1024, maxInlineResultBytes: MAX_INLINE }, operations: OPERATION_DEFINITIONS,
+      hostname: hostname(), machineIdSha256: machineIdHash(), authorityClass: 'unrestricted-owner', configuredLimits: { maxFrameSize: 16 * 1024 * 1024, maxInlineResultBytes: MAX_INLINE }, operationCatalogVersion: OPERATION_CATALOG_VERSION, operationCatalogSha256: sha256(canonicalize(OPERATION_DEFINITIONS)), operations: OPERATION_DEFINITIONS,
       hostSystemdAvailable: existsSync('/run/systemd/system'), nspawnAvailable: Boolean(tools['systemd-nspawn']), machineStorageCapabilities: { root: '/var/lib/machines', reflinkProbe: executable('cp') !== null },
       bpftraceAvailable: Boolean(tools.bpftrace), gdbAvailable: Boolean(tools.gdb), ptraceConfiguration: existsSync('/proc/sys/kernel/yama/ptrace_scope') ? readFileSync('/proc/sys/kernel/yama/ptrace_scope', 'utf8').trim() : null,
       criuAvailable: Boolean(tools.criu), criuBasicCheck: tools.criu ? spawnSync(String(tools.criu), ['check'], { encoding: 'utf8' }).status === 0 : false,

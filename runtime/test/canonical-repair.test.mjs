@@ -102,3 +102,34 @@ test('runtime frame accumulation rejects oversized chunks and declared frames be
   const partial = appendBoundedRuntimeFrameChunk(Buffer.alloc(0), Buffer.from('QRT1'), 24);
   assert.equal(partial.length, 4);
 });
+
+
+test('public operation definitions expose finite honest execution contracts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-contract-repair-'));
+  try {
+    const description = new BabyXRuntime({ stateRoot: root }).describe();
+    assert.equal(description.operationCatalogVersion, '2.0.0');
+    assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
+    for (const definition of description.operations) {
+      assert.equal(definition.input.type, 'object');
+      assert.equal(definition.input.additionalProperties, false);
+      assert.ok(definition.risk);
+      assert.ok(definition.idempotency);
+      assert.ok(definition.cancellation);
+      assert.ok(definition.restartBehavior);
+      assert.equal(typeof definition.postActionVerification, 'boolean');
+      assert.ok(definition.errors.length >= 2);
+      assert.ok(definition.postconditions.length >= 1);
+      assert.equal(definition.limits.maxFrameBytes, 16_777_216);
+      assert.equal(definition.authority.provider, 'baby-x-runtime');
+    }
+    const patch = description.operations.find((definition) => definition.operation === 'babyx.file.patch');
+    assert.deepEqual(patch.input.required, ['path', 'expectedSha256', 'patches']);
+    const wait = description.operations.find((definition) => definition.operation === 'babyx.job.wait');
+    assert.deepEqual(wait.input.required, ['jobId']);
+    assert.equal(wait.idempotency, 'read_only');
+    const machineCreate = description.operations.find((definition) => definition.operation === 'babyx.machine.create');
+    assert.equal(machineCreate.idempotency, 'caller_key');
+    assert.equal(machineCreate.restartBehavior, 'durable_reconcile');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

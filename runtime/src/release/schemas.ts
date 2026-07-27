@@ -269,7 +269,7 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
   GitHubOutboxRecordV1: schema('GitHubOutboxRecordV1', {
     outboxId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), repositoryId: stringField(true, 'identifier'), repository: stringField(true),
     installationId: stringField(true, 'identifier'), deploymentId: stringField(true, 'identifier'), reportKind: enumField(['DEPLOYMENT', 'CHECK', 'COMMENT'], true), targetOperation: stringField(true, 'identifier'),
-    payloadDigest: stringField(true, 'digest'), payload: jsonField(true), state: enumField(['QUEUED', 'SENDING', 'DELIVERED', 'FAILED', 'DEFERRED'], true), attemptCount: integerField(true), sequence: integerField(true),
+    payloadDigest: stringField(true, 'digest'), payload: jsonField(true), state: enumField(['QUEUED', 'SENDING', 'DELIVERED', 'FAILED', 'DEFERRED', 'UNKNOWN', 'RECOVERY_REQUIRED'], true), attemptCount: integerField(true), sequence: integerField(true),
     createdAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'), nextAttemptAt: stringField(false, 'timestamp'), deliveredAt: stringField(false, 'timestamp'),
     remoteIdentity: jsonField(), lastStatus: jsonField(), error: structuredError(),
   }),

@@ -737,6 +737,14 @@ export class BabyXRuntime {
       if (service === undefined) return { operation, configured: false, processedInbox: [], reconciledOutbox: [], processedCount: 0, deliveredCount: 0, deferredCount: 0 };
       return service.reconcile(payload, context);
     }
+    if (operation === 'babyx.release.github.webhook.ingest') {
+      const service = this.releaseGitHubIntegrationService();
+      if (service === undefined) {
+        const { ReleaseAccessError } = await import('./release/access.ts');
+        throw new ReleaseAccessError('release_provider_unavailable', 'GitHub webhook ingress is not configured');
+      }
+      return service.ingestGatewayWebhook(payload, context);
+    }
     if (operation === 'babyx.release.plan') {
       const coordinator = await import('./release/coordinator.ts');
       return coordinator.planReleaseDeployment(payload, context);

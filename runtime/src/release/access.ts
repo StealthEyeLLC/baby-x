@@ -228,9 +228,11 @@ export interface MaterialAuthority {
 
 export interface GitHubTransport {
   readonly authority: 'github-app-transport';
+  describe?(): JsonObject;
   exchangeInstallation(input: { appId: string; installationId: string; assertion: string; permissions: JsonObject }): Promise<{ accessValue: string; expiresAt: string; remoteIdentity?: JsonObject }>;
   deliver(input: { accessValue: string; semanticKey: string; repository: string; targetOperation: string; payload: JsonObject }): Promise<JsonObject>;
-  poll?(input: { accessValue: string; repository: string; repositoryId: string; installationId: string; cursor?: string }): Promise<{ observations: JsonObject[]; cursor?: string }>;
+  lookupDelivery?(input: { accessValue: string; semanticKey: string; repository: string; targetOperation: string; payload: JsonObject }): Promise<JsonObject | undefined>;
+  poll?(input: { accessValue: string; repository: string; repositoryId: string; installationId: string; cursor?: string; allowedEvents?: string[]; allowedActions?: JsonObject; allowedRefs?: string[] }): Promise<{ observations: JsonObject[]; cursor?: string }>;
 }
 
 export interface GitHubRepositoryPolicy extends JsonObject {
@@ -243,6 +245,8 @@ export interface GitHubRepositoryPolicy extends JsonObject {
   allowedActions?: JsonObject;
   allowedRefs?: string[];
   webhookMaterialRefs: string[];
+  webhookPath: string;
+  allowComments: boolean;
   environment?: string;
 }
 
@@ -287,18 +291,23 @@ export class GitHubAppAccessProvider {
 }
 
 function normalizePolicy(value: GitHubRepositoryPolicy): GitHubRepositoryPolicy {
-  const input = strictObject(value, 'GitHub repository policy', ['ownerPrincipal','repositoryId','repository','installationId','serviceId','allowedEvents','allowedActions','allowedRefs','webhookMaterialRefs','environment'], ['ownerPrincipal','repositoryId','repository','installationId','serviceId','allowedEvents','webhookMaterialRefs']);
+  const input = strictObject(value, 'GitHub repository policy', ['ownerPrincipal','repositoryId','repository','installationId','serviceId','allowedEvents','allowedActions','allowedRefs','webhookMaterialRefs','webhookPath','allowComments','environment'], ['ownerPrincipal','repositoryId','repository','installationId','serviceId','allowedEvents','webhookMaterialRefs']);
   const repository = text(input.repository, 'repository', 256);
   if (!REPOSITORY_NAME.test(repository)) throw new ReleaseAccessError('release_invalid_request', 'repository must be owner/name');
   if (!Array.isArray(input.allowedEvents) || !Array.isArray(input.webhookMaterialRefs)) throw new ReleaseAccessError('release_invalid_request', 'allowedEvents and webhookMaterialRefs must be arrays');
+  const repositoryId = identifier(input.repositoryId, 'repositoryId');
+  const webhookPath = input.webhookPath === undefined ? `/hooks/babyx/github/${repositoryId}` : text(input.webhookPath, 'webhookPath', 256);
+  if (!/^\/hooks\/babyx\/github\/[A-Za-z0-9._:-]+$/u.test(webhookPath)) throw new ReleaseAccessError('release_invalid_request', 'webhookPath is invalid');
   return {
-    ownerPrincipal: identifier(input.ownerPrincipal,'ownerPrincipal'), repositoryId: identifier(input.repositoryId,'repositoryId'), repository,
-    installationId: identifier(input.installationId,'installationId'), serviceId: identifier(input.serviceId,'serviceId'),
-    allowedEvents: sortedUnique(input.allowedEvents.map((entry) => identifier(entry,'eventName'))),
-    allowedActions: input.allowedActions === undefined ? {} : object(input.allowedActions,'allowedActions'),
-    allowedRefs: input.allowedRefs === undefined ? [] : sortedUnique((input.allowedRefs as unknown[]).map((entry) => text(entry,'allowedRef',256))),
-    webhookMaterialRefs: sortedUnique(input.webhookMaterialRefs.map((entry) => identifier(entry,'webhookMaterialRef'))),
-    ...(input.environment === undefined ? {} : { environment: text(input.environment,'environment',128) }),
+    ownerPrincipal: identifier(input.ownerPrincipal, 'ownerPrincipal'), repositoryId, repository,
+    installationId: identifier(input.installationId, 'installationId'), serviceId: identifier(input.serviceId, 'serviceId'),
+    allowedEvents: sortedUnique(input.allowedEvents.map((entry) => identifier(entry, 'eventName'))),
+    allowedActions: input.allowedActions === undefined ? {} : object(input.allowedActions, 'allowedActions'),
+    allowedRefs: input.allowedRefs === undefined ? [] : sortedUnique((input.allowedRefs as unknown[]).map((entry) => text(entry, 'allowedRef', 256))),
+    webhookMaterialRefs: sortedUnique(input.webhookMaterialRefs.map((entry) => identifier(entry, 'webhookMaterialRef'))),
+    webhookPath,
+    allowComments: input.allowComments === true,
+    ...(input.environment === undefined ? {} : { environment: text(input.environment, 'environment', 128) }),
   };
 }
 
@@ -364,6 +373,7 @@ export interface GitHubIntegrationServiceOptions {
   access?: GitHubAppAccessProvider;
   transport?: GitHubTransport;
   events?: GitHubEventAuthority;
+  gatewayRouteInstalled?: boolean;
   now?: () => string;
 }
 
@@ -404,6 +414,37 @@ export class GitHubIntegrationService {
     const record=validateReleaseRecord('GitHubInboxRecordV1',{schemaVersion:'1.0.0',inboxId:recordId,ownerPrincipal:input.policy.ownerPrincipal,deliveryId:input.deliveryId,source:input.source,repositoryId:input.policy.repositoryId,repository:input.policy.repository,installationId:input.policy.installationId,eventName:input.eventName,...(input.normalized.action===undefined?{}:{action:input.normalized.action}),bodySha256:input.rawDigest,signatureVerified:input.signatureVerified,receivedAt:input.receivedAt,normalizedEvent:input.normalized,normalizedRequestDigest,convergenceKey,processingState:'RECEIVED',disposition:'ACCEPTED',sequence:1});
     return apply(this.options.store,'GitHubInboxRecordV1',recordId,input.policy.ownerPrincipal,0,`github-inbox-${sha256(input.deliveryId).slice(0,40)}`,'babyx.release.github.ingest','inbox-received',record,input.receivedAt);
   }
+  async ingestGatewayWebhook(inputValue: JsonObject, requestContext: RuntimeExecutionContext): Promise<JsonObject> {
+    if (requestContext.authorityClass !== 'unrestricted-owner' && requestContext.authorityClass !== 'gateway-webhook') throw new ReleaseAccessError('release_wrong_principal', 'gateway webhook authority is required');
+    const input = strictObject(inputValue, 'GitHub gateway webhook', ['method','path','headers','rawBodyBase64'], ['method','path','headers','rawBodyBase64']);
+    if (input.method !== 'POST') return { httpStatus:405, accepted:false, body:{ code:'METHOD_NOT_ALLOWED' } };
+    const path = text(input.path, 'path', 256);
+    const policy = this.policies.find((candidate) => candidate.webhookPath === path);
+    if (policy === undefined) return { httpStatus:404, accepted:false, body:{ code:'NOT_FOUND' } };
+    const headerInput = object(input.headers, 'headers');
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headerInput)) {
+      if (typeof value !== 'string' || key.length < 1 || key.length > 128 || value.length > 4096) throw new ReleaseAccessError('release_invalid_request', 'webhook header is invalid');
+      headers[key.toLowerCase()] = value;
+    }
+    const encoded = text(input.rawBodyBase64, 'rawBodyBase64', Math.ceil(MAX_WEBHOOK_BYTES * 4 / 3) + 16);
+    const rawBody = Buffer.from(encoded, 'base64');
+    if (rawBody.length < 1 || rawBody.length > MAX_WEBHOOK_BYTES || rawBody.toString('base64').replace(/=+$/u, '') !== encoded.replace(/=+$/u, '')) return { httpStatus:413, accepted:false, body:{ code:'BODY_INVALID' } };
+    const deliveryId=headers['x-github-delivery'];
+    const expectedInboxId=deliveryId===undefined?undefined:`github-inbox-${sha256(deliveryId).slice(0,40)}`;
+    const duplicateBefore=expectedInboxId!==undefined&&this.options.store.hasRecord('GitHubInboxRecordV1',expectedInboxId);
+    try {
+      const result = await this.ingestWebhook({ repository:policy.repository, headers, rawBody });
+      const inbox = object(result.inbox, 'inbox');
+      const duplicate=duplicateBefore;
+      return { httpStatus:202, accepted:true, duplicate, body:{ accepted:true, inboxId:inbox.inboxId, duplicate } };
+    } catch (error) {
+      const code = error instanceof ReleaseAccessError ? error.code : 'release_provider_unavailable';
+      const httpStatus = code === 'release_webhook_signature_invalid' ? 401 : code === 'release_github_delivery_conflict' ? 409 : code === 'release_invalid_request' ? 400 : 503;
+      return { httpStatus, accepted:false, body:{ code } };
+    }
+  }
+
   async ingestWebhook(inputValue: JsonObject): Promise<JsonObject> {
     const input=strictObject(inputValue,'webhook input',['repository','headers','rawBody'],['repository','headers','rawBody']);
     const policy=this.policyByRepository(text(input.repository,'repository',256));
@@ -436,7 +477,7 @@ export class GitHubIntegrationService {
     return {operation:'babyx.release.github.poll.ingest',inbox:this.persistInbox({deliveryId,source:'POLL',rawDigest,signatureVerified:true,eventName:String(normalized.eventName),normalized,policy,receivedAt:this.now()})};
   }
   queueReport(inputValue: JsonObject, requestContext: RuntimeExecutionContext): JsonObject {
-    const authenticated=context(requestContext); const input=strictObject(inputValue,'GitHub report',['repository','deploymentId','reportKind','targetOperation','payload'],['repository','deploymentId','reportKind','targetOperation','payload']); const policy=this.policyByRepository(String(input.repository)); if(policy.ownerPrincipal!==authenticated.subject)throw new ReleaseAccessError('release_wrong_principal','repository policy owner does not match'); const payload=object(input.payload,'report payload'); assertNoRawSecrets(payload); const payloadDigest=sha256(canonicalize(payload)); const reportKind=String(input.reportKind); if(!['DEPLOYMENT','CHECK','COMMENT'].includes(reportKind))throw new ReleaseAccessError('release_invalid_request','reportKind is invalid'); const outboxId=`github-outbox-${sha256(canonicalize({repository:policy.repository,deploymentId:input.deploymentId,reportKind,targetOperation:input.targetOperation,payloadDigest})).slice(0,40)}`;
+    const authenticated=context(requestContext); const input=strictObject(inputValue,'GitHub report',['repository','deploymentId','reportKind','targetOperation','payload'],['repository','deploymentId','reportKind','targetOperation','payload']); const policy=this.policyByRepository(String(input.repository)); if(policy.ownerPrincipal!==authenticated.subject)throw new ReleaseAccessError('release_wrong_principal','repository policy owner does not match'); const payload=object(input.payload,'report payload'); assertNoRawSecrets(payload); const payloadDigest=sha256(canonicalize(payload)); const reportKind=String(input.reportKind); if(!['DEPLOYMENT','CHECK','COMMENT'].includes(reportKind))throw new ReleaseAccessError('release_invalid_request','reportKind is invalid'); if(reportKind==='COMMENT'&&policy.allowComments!==true)throw new ReleaseAccessError('release_invalid_request','comment delivery is not allowed by repository policy'); const outboxId=`github-outbox-${sha256(canonicalize({repository:policy.repository,deploymentId:input.deploymentId,reportKind,targetOperation:input.targetOperation,payloadDigest})).slice(0,40)}`;
     if(this.options.store.hasRecord('GitHubOutboxRecordV1',outboxId))return this.options.store.getRecord('GitHubOutboxRecordV1',outboxId);
     const now=this.now(); const record=validateReleaseRecord('GitHubOutboxRecordV1',{schemaVersion:'1.0.0',outboxId,ownerPrincipal:authenticated.subject,repositoryId:policy.repositoryId,repository:policy.repository,installationId:policy.installationId,deploymentId:identifier(input.deploymentId,'deploymentId'),reportKind,targetOperation:identifier(input.targetOperation,'targetOperation'),payloadDigest,payload,state:'QUEUED',attemptCount:0,sequence:1,createdAt:now,updatedAt:now,nextAttemptAt:now}); return apply(this.options.store,'GitHubOutboxRecordV1',outboxId,authenticated.subject,0,authenticated.idempotencyKey,'babyx.release.github.queue','outbox-queued',record,now);
   }
@@ -480,14 +521,53 @@ export class GitHubIntegrationService {
   }
   async reconcile(payloadValue: JsonObject = {}, requestContext: RuntimeExecutionContext): Promise<JsonObject> {
     context(requestContext); const payload=strictObject(payloadValue,'GitHub reconcile',['limit','poll'],[]); const limit=payload.limit===undefined?50:integer(payload.limit,'limit',1,MAX_RECONCILE); const now=this.now(); const processed:JsonObject[]=[]; const delivered:JsonObject[]=[];
-    if(payload.poll===true&&this.options.transport?.poll!==undefined&&this.options.access!==undefined){for(const policy of this.policies.slice(0,limit)){try{const result=await this.options.access.withInstallationAccess(policy.installationId,(accessValue)=>this.options.transport!.poll!({accessValue,repository:policy.repository,repositoryId:policy.repositoryId,installationId:policy.installationId}));for(const observation of result.observations.slice(0,limit))this.ingestPollObservation({...observation,repository:policy.repository,repositoryId:policy.repositoryId,installationId:policy.installationId});}catch{}}}
+    if(payload.poll===true&&this.options.transport?.poll!==undefined&&this.options.access!==undefined){for(const policy of this.policies.slice(0,limit)){try{const result=await this.options.access.withInstallationAccess(policy.installationId,(accessValue)=>this.options.transport!.poll!({accessValue,repository:policy.repository,repositoryId:policy.repositoryId,installationId:policy.installationId,...(this.pollCursors.get(policy.repository)===undefined?{}:{cursor:this.pollCursors.get(policy.repository)}),allowedEvents:policy.allowedEvents,allowedActions:policy.allowedActions,allowedRefs:policy.allowedRefs}));for(const observation of result.observations.slice(0,limit))this.ingestPollObservation({...observation,repository:policy.repository,repositoryId:policy.repositoryId,installationId:policy.installationId});}catch{}}}
     const inbox=listRecords(this.options.store,'GitHubInboxRecordV1').filter((record)=>['RECEIVED','RECOVERY_REQUIRED'].includes(String(record.processingState))).sort((a,b)=>String(a.receivedAt).localeCompare(String(b.receivedAt))).slice(0,limit);
     for(const record of inbox){const duplicate=listRecords(this.options.store,'GitHubInboxRecordV1').find((other)=>other.inboxId!==record.inboxId&&other.convergenceKey===record.convergenceKey&&other.processingState==='PROCESSED');if(duplicate!==undefined){processed.push(this.transitionInbox(record,{processingState:'EXCLUDED',disposition:'DUPLICATE',processedAt:now,deploymentId:duplicate.deploymentId??undefined,exclusionReason:'converged-with-processed-delivery'},'inbox-converged'));continue;}if(this.options.events===undefined){processed.push(this.transitionInbox(record,{processingState:'RECOVERY_REQUIRED',disposition:'DEFERRED',error:safeStructuredError('release_provider_unavailable','inbox-processing',true)},'inbox-deferred'));continue;}try{const outcome=await this.options.events.process(object(record.normalizedEvent,'normalizedEvent'),{...requestContext,subject:record.ownerPrincipal,idempotencyKey:`github-event-${record.normalizedRequestDigest}`});processed.push(this.transitionInbox(record,{processingState:outcome.exclusionReason===undefined?'PROCESSED':'EXCLUDED',disposition:outcome.exclusionReason===undefined?'ACCEPTED':'REJECTED',processedAt:now,...(outcome.deploymentId===undefined?{}:{deploymentId:outcome.deploymentId}),...(outcome.exclusionReason===undefined?{}:{exclusionReason:outcome.exclusionReason}),error:undefined},'inbox-processed'));}catch{processed.push(this.transitionInbox(record,{processingState:'RECOVERY_REQUIRED',disposition:'DEFERRED',error:safeStructuredError('release_recovery_required','inbox-processing',true)},'inbox-recovery'));}}
-    const outbox=listRecords(this.options.store,'GitHubOutboxRecordV1').filter((record)=>['QUEUED','DEFERRED','SENDING'].includes(String(record.state))&&(record.nextAttemptAt===undefined||Date.parse(String(record.nextAttemptAt))<=Date.parse(now))).sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).slice(0,limit);
-    for(let record of outbox){if(this.options.access===undefined||this.options.transport===undefined){delivered.push(this.transitionOutbox(record,{state:'DEFERRED',attemptCount:Number(record.attemptCount)+1,nextAttemptAt:new Date(Date.parse(now)+DEFAULT_BACKOFF_MS).toISOString(),error:safeStructuredError('release_github_unavailable','outbox-delivery',true)},'outbox-deferred'));continue;}record=this.transitionOutbox(record,{state:'SENDING',attemptCount:Number(record.attemptCount)+1,error:undefined},'outbox-sending');try{const response=await this.options.access.withInstallationAccess(String(record.installationId),(accessValue)=>this.options.transport!.deliver({accessValue,semanticKey:String(record.outboxId),repository:String(record.repository),targetOperation:String(record.targetOperation),payload:object(record.payload,'outbox payload')}));const remoteIdentity={id:response.id??null,nodeId:response.nodeId??null,urlDigest:response.url===undefined?null:sha256(String(response.url))};delivered.push(this.transitionOutbox(record,{state:'DELIVERED',deliveredAt:this.now(),nextAttemptAt:undefined,remoteIdentity,lastStatus:{status:'DELIVERED',responseDigest:sha256(canonicalize(remoteIdentity))},error:undefined},'outbox-delivered'));}catch{const delay=Math.min(MAX_BACKOFF_MS,DEFAULT_BACKOFF_MS*2**Math.min(8,Number(record.attemptCount)));delivered.push(this.transitionOutbox(record,{state:'DEFERRED',nextAttemptAt:new Date(Date.parse(this.now())+delay).toISOString(),lastStatus:{status:'DEFERRED'},error:safeStructuredError('release_github_unavailable','outbox-delivery',true)},'outbox-retry'));}}
-    return {operation:'babyx.release.github.reconcile',processedInbox:processed.map((record)=>record.inboxId),reconciledOutbox:delivered.map((record)=>record.outboxId),processedCount:processed.length,deliveredCount:delivered.filter((record)=>record.state==='DELIVERED').length,deferredCount:delivered.filter((record)=>record.state==='DEFERRED').length};
+    const outbox=listRecords(this.options.store,'GitHubOutboxRecordV1')
+      .filter((record)=>['QUEUED','DEFERRED','SENDING','UNKNOWN','RECOVERY_REQUIRED'].includes(String(record.state))&&(record.nextAttemptAt===undefined||Date.parse(String(record.nextAttemptAt))<=Date.parse(now)))
+      .sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).slice(0,limit);
+    const remoteIdentity=(response:JsonObject):JsonObject=>({id:response.id??null,nodeId:response.nodeId??response.node_id??null,urlDigest:response.url===undefined&&response.html_url===undefined?null:sha256(String(response.url??response.html_url))});
+    for(let record of outbox){
+      if(this.options.access===undefined||this.options.transport===undefined){
+        delivered.push(this.transitionOutbox(record,{state:'DEFERRED',attemptCount:Number(record.attemptCount)+1,nextAttemptAt:new Date(Date.parse(now)+DEFAULT_BACKOFF_MS).toISOString(),lastStatus:{status:'DEFERRED',failureClass:'PROVIDER_UNCONFIGURED'},error:safeStructuredError('release_github_unavailable','outbox-delivery',true)},'outbox-deferred'));
+        continue;
+      }
+      const deliveryInput=(accessValue:string)=>({accessValue,semanticKey:String(record.outboxId),repository:String(record.repository),targetOperation:String(record.targetOperation),payload:object(record.payload,'outbox payload')});
+      if(['SENDING','UNKNOWN','RECOVERY_REQUIRED'].includes(String(record.state))){
+        if(this.options.transport.lookupDelivery===undefined){
+          delivered.push(this.transitionOutbox(record,{state:'RECOVERY_REQUIRED',nextAttemptAt:undefined,lastStatus:{status:'RECOVERY_REQUIRED',failureClass:'RESPONSE_LOSS_UNPROVABLE'},error:safeStructuredError('release_response_lost','outbox-delivery-readback',true)},'outbox-response-loss-unproven'));
+          continue;
+        }
+        try{
+          const observed=await this.options.access.withInstallationAccess(String(record.installationId),(accessValue)=>this.options.transport!.lookupDelivery!(deliveryInput(accessValue)));
+          if(observed!==undefined){
+            const identity=remoteIdentity(observed);
+            delivered.push(this.transitionOutbox(record,{state:'DELIVERED',deliveredAt:this.now(),nextAttemptAt:undefined,remoteIdentity:identity,lastStatus:{status:'DELIVERED',recovered:true,responseDigest:sha256(canonicalize(identity))},error:undefined},'outbox-delivered-readback'));
+            continue;
+          }
+        }catch{
+          delivered.push(this.transitionOutbox(record,{state:'RECOVERY_REQUIRED',nextAttemptAt:undefined,lastStatus:{status:'RECOVERY_REQUIRED',failureClass:'PROVIDER_READBACK_FAILED'},error:safeStructuredError('release_response_lost','outbox-delivery-readback',true)},'outbox-readback-recovery'));
+          continue;
+        }
+      }
+      record=this.transitionOutbox(record,{state:'SENDING',attemptCount:Number(record.attemptCount)+1,error:undefined,lastStatus:{status:'SENDING'}},'outbox-sending');
+      try{
+        const response=await this.options.access.withInstallationAccess(String(record.installationId),(accessValue)=>this.options.transport!.deliver(deliveryInput(accessValue)));
+        const identity=remoteIdentity(response);
+        delivered.push(this.transitionOutbox(record,{state:'DELIVERED',deliveredAt:this.now(),nextAttemptAt:undefined,remoteIdentity:identity,lastStatus:{status:'DELIVERED',responseDigest:sha256(canonicalize(identity))},error:undefined},'outbox-delivered'));
+      }catch(error){
+        const retryable=isObject(error)&&error.retryable===true;
+        const failureClass=isObject(error)&&typeof error.failureClass==='string'?String(error.failureClass):'UNKNOWN';
+        const state=retryable?'DEFERRED':'FAILED';
+        const delay=Math.min(MAX_BACKOFF_MS,DEFAULT_BACKOFF_MS*2**Math.min(8,Number(record.attemptCount)));
+        delivered.push(this.transitionOutbox(record,{state,...(retryable?{nextAttemptAt:new Date(Date.parse(this.now())+delay).toISOString()}:{nextAttemptAt:undefined}),lastStatus:{status:state,failureClass,retryable},error:safeStructuredError('release_github_unavailable','outbox-delivery',retryable)},retryable?'outbox-retry':'outbox-failed'));
+      }
+    }
+    return {operation:'babyx.release.github.reconcile',processedInbox:processed.map((record)=>record.inboxId),reconciledOutbox:delivered.map((record)=>record.outboxId),processedCount:processed.length,deliveredCount:delivered.filter((record)=>record.state==='DELIVERED').length,deferredCount:delivered.filter((record)=>record.state==='DEFERRED').length,failedCount:delivered.filter((record)=>record.state==='FAILED').length,recoveryRequiredCount:delivered.filter((record)=>record.state==='RECOVERY_REQUIRED').length};
   }
   status(payloadValue: JsonObject = {}, requestContext: RuntimeExecutionContext = {}): JsonObject {
-    const payload=strictObject(payloadValue,'GitHub status',['repository','limit']); const limit=payload.limit===undefined?100:integer(payload.limit,'limit',1,200); const visible=(record:JsonObject)=>ownerVisible(record,requestContext)&&(payload.repository===undefined||record.repository===payload.repository); const inbox=listRecords(this.options.store,'GitHubInboxRecordV1').filter(visible).sort((a,b)=>String(b.receivedAt).localeCompare(String(a.receivedAt))).slice(0,limit); const outbox=listRecords(this.options.store,'GitHubOutboxRecordV1').filter(visible).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,limit); return {operation:'babyx.release.github.status',readOnly:true,configuredRepositories:this.policies.map((policy)=>({repositoryId:policy.repositoryId,repository:policy.repository,installationId:policy.installationId,serviceId:policy.serviceId,events:policy.allowedEvents})),provider:this.options.access?.describe()??{provider:'UNCONFIGURED'},inbox:inbox.map((record)=>({inboxId:record.inboxId,deliveryId:record.deliveryId,source:record.source,repository:record.repository,eventName:record.eventName,receivedAt:record.receivedAt,processingState:record.processingState,disposition:record.disposition,deploymentId:record.deploymentId??null})),outbox:outbox.map((record)=>({outboxId:record.outboxId,repository:record.repository,deploymentId:record.deploymentId,reportKind:record.reportKind,state:record.state,attemptCount:record.attemptCount,nextAttemptAt:record.nextAttemptAt??null,deliveredAt:record.deliveredAt??null})),counts:{inbox:inbox.length,outbox:outbox.length,queued:outbox.filter((record)=>record.state==='QUEUED').length,deferred:outbox.filter((record)=>record.state==='DEFERRED').length,delivered:outbox.filter((record)=>record.state==='DELIVERED').length}};
+    const payload=strictObject(payloadValue,'GitHub status',['repository','limit']); const limit=payload.limit===undefined?100:integer(payload.limit,'limit',1,200); const visible=(record:JsonObject)=>ownerVisible(record,requestContext)&&(payload.repository===undefined||record.repository===payload.repository); const inbox=listRecords(this.options.store,'GitHubInboxRecordV1').filter(visible).sort((a,b)=>String(b.receivedAt).localeCompare(String(a.receivedAt))).slice(0,limit); const outbox=listRecords(this.options.store,'GitHubOutboxRecordV1').filter(visible).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).slice(0,limit);
+    return { operation:'babyx.release.github.status', readOnly:true, configuredRepositories:this.policies.map((policy)=>({repositoryId:policy.repositoryId,repository:policy.repository,installationId:policy.installationId,serviceId:policy.serviceId,events:policy.allowedEvents,allowedRefs:policy.allowedRefs,webhookPath:policy.webhookPath,webhookMaterialRefCount:policy.webhookMaterialRefs.length,allowComments:policy.allowComments})), provider:this.options.access?.describe()??{provider:'UNCONFIGURED'}, transport:this.options.transport?.describe?.()??{implemented:false,providerConfigured:false}, webhook:{operationWired:true,routeInstalled:this.options.gatewayRouteInstalled===true,paths:this.policies.map((policy)=>policy.webhookPath),secretAvailable:this.policies.every((policy)=>policy.webhookMaterialRefs.length>0)}, polling:{enabled:this.options.transport?.poll!==undefined}, outboxDeliverable:this.options.access!==undefined&&this.options.transport!==undefined, inbox:inbox.map((record)=>({inboxId:record.inboxId,deliveryId:record.deliveryId,source:record.source,repository:record.repository,eventName:record.eventName,receivedAt:record.receivedAt,processingState:record.processingState,disposition:record.disposition,deploymentId:record.deploymentId??null})), outbox:outbox.map((record)=>({outboxId:record.outboxId,repository:record.repository,deploymentId:record.deploymentId,reportKind:record.reportKind,state:record.state,attemptCount:record.attemptCount,nextAttemptAt:record.nextAttemptAt??null,deliveredAt:record.deliveredAt??null})), counts:{inbox:inbox.length,outbox:outbox.length,queued:outbox.filter((record)=>record.state==='QUEUED').length,deferred:outbox.filter((record)=>record.state==='DEFERRED').length,delivered:outbox.filter((record)=>record.state==='DELIVERED').length} };
   }
 }

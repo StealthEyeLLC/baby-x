@@ -124,17 +124,31 @@ class FakeTransport {
   authority = 'github-app-transport';
   exchangeCalls = [];
   deliveries = [];
+  lookups = [];
   polls = [];
   failDelivery = false;
+  terminalDeliveryFailure = false;
+  failLookup = false;
+  lookupResult = { id:'remote-recovered', nodeId:'node-recovered', url:'https://api.github.example/recovered' };
   accessValue = 'opaque-format-without-prefix';
   expiresAt = '2026-07-26T22:00:00.000Z';
   pollObservations = [];
   async exchangeInstallation(input) { this.exchangeCalls.push(structuredClone(input)); return { accessValue: this.accessValue, expiresAt: this.expiresAt, remoteIdentity: { installationId: input.installationId } }; }
-  async deliver(input) { this.deliveries.push(structuredClone(input)); if (this.failDelivery) throw new Error('provider unavailable'); return { id: `remote-${this.deliveries.length}`, nodeId: 'node-a', url: 'https://api.github.example/result' }; }
+  async deliver(input) {
+    this.deliveries.push(structuredClone(input));
+    if (this.failDelivery || this.terminalDeliveryFailure) {
+      const error = new Error('provider unavailable');
+      error.retryable = this.failDelivery;
+      error.failureClass = this.failDelivery ? 'NETWORK' : 'PROVIDER_4XX';
+      throw error;
+    }
+    return { id: `remote-${this.deliveries.length}`, nodeId: 'node-a', url: 'https://api.github.example/result' };
+  }
+  async lookupDelivery(input) { this.lookups.push(structuredClone(input)); if (this.failLookup) throw new Error('provider readback unavailable'); return this.lookupResult === undefined ? undefined : structuredClone(this.lookupResult); }
   async poll(input) { this.polls.push(structuredClone(input)); return { observations: this.pollObservations.map(structuredClone), cursor: 'cursor-a' }; }
 }
 function policy(overrides = {}) {
-  return { ownerPrincipal: OWNER, repositoryId: 'repo-1', repository: 'StealthEyeLLC/notes-api', installationId: 'installation-1', serviceId: 'notes-api', allowedEvents: ['push','release','deployment','deployment_status','check_run','status'], allowedActions: { deployment: ['created'], release: ['published'] }, allowedRefs: ['refs/heads/main'], webhookMaterialRefs: ['webhook-current','webhook-previous'], environment: 'production', ...overrides };
+  return { ownerPrincipal: OWNER, repositoryId: 'repo-1', repository: 'StealthEyeLLC/notes-api', installationId: 'installation-1', serviceId: 'notes-api', allowedEvents: ['push','release','deployment','deployment_status','check_run','status'], allowedActions: { deployment: ['created'], release: ['published'] }, allowedRefs: ['refs/heads/main'], webhookMaterialRefs: ['webhook-current','webhook-previous'], allowComments: true, environment: 'production', ...overrides };
 }
 function pushPayload(overrides = {}) {
   return { ref: 'refs/heads/main', after: COMMIT, deleted: false, repository: { id: 'repo-1', full_name: 'StealthEyeLLC/notes-api' }, installation: { id: 'installation-1' }, ...overrides };
@@ -154,7 +168,7 @@ function githubFixture(options = {}) {
   const access = options.noAccess === true ? undefined : new GitHubAppAccessProvider({ appId: 'app-1', signingMaterialRef: 'github-signing', material, transport, now: () => now });
   const eventCalls = [];
   const events = options.noEvents === true ? undefined : { authority: 'release-github-event-authority', async process(event) { eventCalls.push(structuredClone(event)); if (options.eventFailure === true && eventCalls.length === 1) throw new Error('temporary event failure'); return options.eventOutcome ?? { deploymentId: 'deployment-a' }; } };
-  const service = new GitHubIntegrationService({ store, policies: [policy(options.policy)], material, access, transport, events, now: () => now });
+  const service = new GitHubIntegrationService({ store, policies: [policy(options.policy)], material, access, transport, events, gatewayRouteInstalled: options.gatewayRouteInstalled ?? true, now: () => now });
   return { root, store, material, transport, access, eventCalls, service, privatePem: String(privatePem), setNow(value) { now = value; }, close() { rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -193,7 +207,7 @@ test('I27 recovery-required inbox item retries after restart-like reconciliation
 test('I28 outbox queue is semantic-key idempotent', () => { const fx=githubFixture(); try { const input={repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'DEPLOYMENT',targetOperation:'deployments.status',payload:{state:'queued'}}; const first=fx.service.queueReport(input,context('queue-one')); const second=fx.service.queueReport(input,context('queue-two')); assert.equal(second.outboxId,first.outboxId); assert.equal(fx.store.listRecordIdentities().filter(x=>x.schemaId==='GitHubOutboxRecordV1').length,1); } finally {fx.close();} });
 test('I29 provider outage defers reporting without changing local deployment truth', async () => { const fx=githubFixture({noAccess:true}); try { const local={deploymentId:'deployment-a',state:'SUCCEEDED'}; const queued=fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'DEPLOYMENT',targetOperation:'deployments.status',payload:{state:'success'}},context('queue-outage')); const result=await fx.service.reconcile({},context('reconcile-outage')); const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DEFERRED'); assert.deepEqual(local,{deploymentId:'deployment-a',state:'SUCCEEDED'}); assert.equal(result.deferredCount,1); } finally {fx.close();} });
 test('I30 deferred outbox retries after bounded backoff', async () => { const fx=githubFixture(); try { fx.transport.failDelivery=true; const queued=fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'DEPLOYMENT',targetOperation:'deployments.status',payload:{state:'success'}},context('queue-retry')); await fx.service.reconcile({},context('reconcile-fail')); let record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DEFERRED'); fx.transport.failDelivery=false; fx.setNow('2026-07-26T21:01:00.000Z'); await fx.service.reconcile({},context('reconcile-success')); record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DELIVERED'); assert.equal(fx.transport.deliveries.length,2); } finally {fx.close();} });
-test('I31 SENDING outbox record is retried after restart boundary with same semantic key', async () => { const fx=githubFixture(); try { const queued=fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'CHECK',targetOperation:'checks.update',payload:{status:'in_progress'}},context('queue-sending')); const sending=validateReleaseRecord('GitHubOutboxRecordV1',{...queued,state:'SENDING',attemptCount:1,sequence:2,updatedAt:NOW}); fx.store.applyMutation({schemaId:'GitHubOutboxRecordV1',recordId:queued.outboxId,ownerPrincipal:OWNER,expectedSequence:1,idempotencyKey:'force-sending',requestDigest:sha256(canonicalize(sending)),operation:'test.sending',phase:'test',record:sending,occurredAt:NOW}); await fx.service.reconcile({},context('reconcile-sending')); const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DELIVERED'); assert.equal(fx.transport.deliveries[0].semanticKey,queued.outboxId); } finally {fx.close();} });
+test('I31 SENDING outbox record is recovered by exact semantic readback without blind resend', async () => { const fx=githubFixture(); try { const queued=fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'CHECK',targetOperation:'checks.update',payload:{status:'in_progress'}},context('queue-sending')); const sending=validateReleaseRecord('GitHubOutboxRecordV1',{...queued,state:'SENDING',attemptCount:1,sequence:2,updatedAt:NOW}); fx.store.applyMutation({schemaId:'GitHubOutboxRecordV1',recordId:queued.outboxId,ownerPrincipal:OWNER,expectedSequence:1,idempotencyKey:'force-sending',requestDigest:sha256(canonicalize(sending)),operation:'test.sending',phase:'test',record:sending,occurredAt:NOW}); await fx.service.reconcile({},context('reconcile-sending')); const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DELIVERED'); assert.equal(fx.transport.deliveries.length,0); assert.equal(fx.transport.lookups[0].semanticKey,queued.outboxId); } finally {fx.close();} });
 test('I32 delivered outbox persists remote metadata but never access material', async () => { const fx=githubFixture(); try { const queued=fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'COMMENT',targetOperation:'issues.comment',payload:{body:'deployment complete'}},context('queue-delivery')); await fx.service.reconcile({},context('deliver')); const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId); assert.equal(record.state,'DELIVERED'); assert.equal(record.remoteIdentity.id,'remote-1'); const persisted=readFileSync(join(fx.root,'store','records','GitHubOutboxRecordV1',`${queued.outboxId}.json`),'utf8'); assert.equal(persisted.includes(fx.transport.accessValue),false); assert.equal(persisted.includes('github-signing'),false); } finally {fx.close();} });
 test('I33 local deployment states map to GitHub projection states', () => { assert.equal(githubDeploymentState('REQUESTED'),'queued'); assert.equal(githubDeploymentState('AWAITING_APPROVAL'),'pending'); assert.equal(githubDeploymentState('CUTTING_OVER'),'in_progress'); assert.equal(githubDeploymentState('SUCCEEDED'),'success'); assert.equal(githubDeploymentState('FAILED'),'failure'); assert.equal(githubDeploymentState('ROLLED_BACK'),'inactive'); assert.equal(githubDeploymentState('AMBIGUOUS'),'error'); });
 test('I34 exact GitHub approval binds deployment artifact route and certification', () => { const deployment={deploymentId:'deployment-a',creationRequestDigest:DIGEST_A,artifact:{sha256:DIGEST_B},certification:{certificationId:'cert-a'},candidateRouteDigest:'c'.repeat(64)}; const normalized={repository:'StealthEyeLLC/notes-api',installationId:'installation-1',commit:COMMIT,approval:{deploymentId:'deployment-a',requestDigest:DIGEST_A,artifactDigest:DIGEST_B,certificationId:'cert-a',candidateRouteDigest:'c'.repeat(64),expiresAt:'2026-07-26T22:00:00.000Z'}}; const result=assertGitHubApprovalMatches(normalized,deployment,NOW); assert.match(result.approvalDigest,/^[a-f0-9]{64}$/u); });
@@ -201,7 +215,7 @@ test('I35 mismatched GitHub approval is rejected', () => { const deployment={dep
 test('I36 expired GitHub approval is rejected', () => { const deployment={deploymentId:'deployment-a',creationRequestDigest:DIGEST_A,artifact:{sha256:DIGEST_B},certification:{certificationId:'cert-a'},candidateRouteDigest:'c'.repeat(64)}; const normalized={repository:'StealthEyeLLC/notes-api',installationId:'installation-1',commit:COMMIT,approval:{deploymentId:'deployment-a',requestDigest:DIGEST_A,artifactDigest:DIGEST_B,certificationId:'cert-a',candidateRouteDigest:'c'.repeat(64),expiresAt:'2026-07-26T20:00:00.000Z'}}; assert.throws(()=>assertGitHubApprovalMatches(normalized,deployment,NOW),code('release_approval_expired')); });
 test('I37 GitHub status is redacted and owner scoped', async () => { const fx=githubFixture(); try { const body=Buffer.from(JSON.stringify(pushPayload())); await fx.service.ingestWebhook(webhookInput(body)); fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'DEPLOYMENT',targetOperation:'deployments.status',payload:{state:'queued'}},context('status-queue')); const status=fx.service.status({},context('status')); const serialized=JSON.stringify(status); assert.equal(serialized.includes(fx.transport.accessValue),false); assert.equal(serialized.includes(fx.privatePem.slice(0,30)),false); assert.equal(status.inbox.length,1); assert.equal(fx.service.status({},context('other',OTHER)).inbox.length,0); } finally {fx.close();} });
 test('I38 durable GitHub records contain no signing webhook or installation access material', async () => { const fx=githubFixture(); try { const body=Buffer.from(JSON.stringify(pushPayload())); await fx.service.ingestWebhook(webhookInput(body)); fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-a',reportKind:'DEPLOYMENT',targetOperation:'deployments.status',payload:{state:'queued'}},context('scan-queue')); await fx.service.reconcile({},context('scan-reconcile')); const serialized=files(fx.root).map(entry=>entry.join(':')).join('\n')+readdirSync(join(fx.root,'store','records'),{recursive:true}).join('\n'); const raw=JSON.stringify(fx.store.listRecordIdentities().map(identity=>fx.store.getRecord(identity.schemaId,identity.recordId))); assert.equal(raw.includes(WEBHOOK_CURRENT.toString()),false); assert.equal(raw.includes(WEBHOOK_PREVIOUS.toString()),false); assert.equal(raw.includes(fx.transport.accessValue),false); assert.equal(raw.includes(['BEGIN','PRIVATE','KEY'].join(' ')),false); assert.ok(serialized.length>0); } finally {fx.close();} });
-test('I39 checkpoint I public operations are exact and mutation-classified', () => { const definitions=operationDefinitions(); const expected=new Map([['babyx.release.credentials.describe',false],['babyx.release.credentials.rotate',true],['babyx.release.github.status',false],['babyx.release.github.reconcile',true]]); for(const [name,mutation] of expected){const matches=definitions.filter(entry=>entry.operation===name); assert.equal(matches.length,1,name); assert.equal(matches[0].mutation,mutation,name); assert.equal(matches[0].input.additionalProperties,false,name);} });
+test('I39 checkpoint I and R5 public operations are exact and mutation-classified', () => { const definitions=operationDefinitions(); const expected={ 'babyx.release.github.status':false, 'babyx.release.github.reconcile':true, 'babyx.release.github.webhook.ingest':true }; for(const [name,mutating] of Object.entries(expected)){const definition=definitions.find(entry=>entry.operation===name); assert.ok(definition); assert.equal(definitions.filter(entry=>entry.operation===name).length,1); assert.equal(definition.mutation,mutating);} });
 test('I40 unconfigured runtime read operations are pure and mutations report absence', async () => { const root=mkdtempSync(join(tmpdir(),'baby-x-access-runtime-empty-')); try { const runtime=new BabyXRuntime({stateRoot:root}); const before=files(root); const credentials=await runtime.execute('babyx.release.credentials.describe',{},context('runtime-credential-read')); const github=await runtime.execute('babyx.release.github.status',{},context('runtime-github-read')); assert.equal(credentials.configured,false); assert.equal(github.configured,false); assert.deepEqual(files(root),before); await assert.rejects(runtime.execute('babyx.release.credentials.rotate',{credentialSet:credentialSet(),expectedProcessIdentity:{}},context('runtime-rotate')),code('release_provider_unavailable')); } finally {rmSync(root,{recursive:true,force:true});} });
 test('I41 runtime routes injected checkpoint I services', async () => { const credentialFx=credentialFixture(); const githubFx=githubFixture(); const root=mkdtempSync(join(tmpdir(),'baby-x-access-runtime-injected-')); try { const runtime=new BabyXRuntime({stateRoot:root,releaseCredentialAccessService:credentialFx.service,releaseGitHubIntegrationService:githubFx.service}); const rotated=await runtime.execute('babyx.release.credentials.rotate',{credentialSet:credentialSet(),expectedProcessIdentity:{processStartTime:'10'}},context('runtime-rotate-injected')); assert.equal(rotated.rotationState,'READY_PRIVATE'); const status=await runtime.execute('babyx.release.github.status',{},context('runtime-status-injected')); assert.equal(status.configuredRepositories.length,1); } finally {rmSync(root,{recursive:true,force:true});credentialFx.close();githubFx.close();} });
 test('I42 coordinator reporting is best effort after durable transition', () => { const source=readFileSync(new URL('../src/release/coordinator.ts',import.meta.url),'utf8'); assert.match(source,/const persisted = this\.options\.store\.applyMutation/u); assert.match(source,/this\.options\.reporter\.queueDeploymentProjection\(persisted/u); assert.match(source,/try \{ this\.options\.reporter/u); });
@@ -269,4 +283,147 @@ test('I49 path-valued systemd directives use native path escaping rather than sh
     assert.match(bundle.dropInBytes,/LoadCredentialEncrypted=notes-db:\/.*\\x20/u);
     assert.doesNotMatch(bundle.dropInBytes,/LoadCredentialEncrypted=notes-db:"/u);
   } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+function gatewayInput(body, deliveryId = 'delivery-gateway-1', material = WEBHOOK_CURRENT, eventName = 'push', overrides = {}) {
+  const input = webhookInput(body, deliveryId, material, eventName);
+  return { method:'POST', path:'/hooks/babyx/github/repo-1', headers:input.headers, rawBodyBase64:body.toString('base64'), ...overrides };
+}
+
+function forceOutboxState(fx, queued, state, key, patch = {}) {
+  const record = validateReleaseRecord('GitHubOutboxRecordV1', { ...queued, state, attemptCount:1, sequence:2, updatedAt:NOW, ...patch });
+  fx.store.applyMutation({ schemaId:'GitHubOutboxRecordV1', recordId:queued.outboxId, ownerPrincipal:OWNER, expectedSequence:1, idempotencyKey:key, requestDigest:sha256(canonicalize(record)), operation:'test.outbox', phase:'test', record, occurredAt:NOW });
+  return record;
+}
+
+function queueDeploymentReport(fx, suffix = 'r5') {
+  return fx.service.queueReport({ repository:'StealthEyeLLC/notes-api', deploymentId:`deployment-${suffix}`, reportKind:'DEPLOYMENT', targetOperation:'deployments.status', payload:{ deploymentId:'77', state:'success', description:'release complete' } }, context(`queue-${suffix}`));
+}
+
+test('R5-A01 Gateway ingress accepts exact signed raw bytes through the existing operation boundary', async () => {
+  const fx=githubFixture(); try {
+    const body=Buffer.from(JSON.stringify(pushPayload()));
+    const result=await fx.service.ingestGatewayWebhook(gatewayInput(body),context('gateway-valid',OWNER,'gateway-webhook'));
+    assert.equal(result.httpStatus,202); assert.equal(result.accepted,true); assert.equal(result.duplicate,false);
+    assert.equal(fx.store.listRecordIdentities().filter(entry=>entry.schemaId==='GitHubInboxRecordV1').length,1);
+  } finally { fx.close(); }
+});
+
+test('R5-A02 Gateway ingress rejects invalid signature before JSON parsing', async () => {
+  const fx=githubFixture(); try {
+    const body=Buffer.from('{not-json'); const input=gatewayInput(body); input.headers['x-hub-signature-256']='sha256='+'0'.repeat(64);
+    const result=await fx.service.ingestGatewayWebhook(input,context('gateway-bad-signature',OWNER,'gateway-webhook'));
+    assert.equal(result.httpStatus,401); assert.equal(result.accepted,false);
+    assert.equal(fx.store.listRecordIdentities().filter(entry=>entry.schemaId==='GitHubInboxRecordV1').length,0);
+  } finally { fx.close(); }
+});
+
+test('R5-A03 overlapping webhook secret remains valid through Gateway rotation window', async () => {
+  const fx=githubFixture(); try {
+    const body=Buffer.from(JSON.stringify(pushPayload()));
+    const result=await fx.service.ingestGatewayWebhook(gatewayInput(body,'delivery-previous',WEBHOOK_PREVIOUS),context('gateway-previous',OWNER,'gateway-webhook'));
+    assert.equal(result.httpStatus,202); assert.equal(result.accepted,true);
+  } finally { fx.close(); }
+});
+
+test('R5-A04 duplicate Gateway delivery is acknowledged without duplicate durable intent', async () => {
+  const fx=githubFixture(); try {
+    const body=Buffer.from(JSON.stringify(pushPayload())); const input=gatewayInput(body,'delivery-duplicate');
+    const first=await fx.service.ingestGatewayWebhook(input,context('gateway-duplicate-1',OWNER,'gateway-webhook'));
+    const second=await fx.service.ingestGatewayWebhook(input,context('gateway-duplicate-2',OWNER,'gateway-webhook'));
+    assert.equal(first.duplicate,false); assert.equal(second.duplicate,true);
+    assert.equal(fx.store.listRecordIdentities().filter(entry=>entry.schemaId==='GitHubInboxRecordV1').length,1);
+  } finally { fx.close(); }
+});
+
+test('R5-A05 conflicting Gateway delivery ID is rejected with 409', async () => {
+  const fx=githubFixture(); try {
+    const first=Buffer.from(JSON.stringify(pushPayload())); const second=Buffer.from(JSON.stringify(pushPayload({ after:'d'.repeat(40) })));
+    await fx.service.ingestGatewayWebhook(gatewayInput(first,'delivery-conflict'),context('gateway-conflict-1',OWNER,'gateway-webhook'));
+    const result=await fx.service.ingestGatewayWebhook(gatewayInput(second,'delivery-conflict'),context('gateway-conflict-2',OWNER,'gateway-webhook'));
+    assert.equal(result.httpStatus,409); assert.equal(result.accepted,false);
+  } finally { fx.close(); }
+});
+
+test('R5-A06 Gateway route is narrow, POST-only, bounded, and authority-bound', async () => {
+  const fx=githubFixture(); try {
+    const body=Buffer.from(JSON.stringify(pushPayload()));
+    assert.equal((await fx.service.ingestGatewayWebhook(gatewayInput(body,'delivery-method',WEBHOOK_CURRENT,'push',{method:'GET'}),context('gateway-method',OWNER,'gateway-webhook'))).httpStatus,405);
+    assert.equal((await fx.service.ingestGatewayWebhook(gatewayInput(body,'delivery-path',WEBHOOK_CURRENT,'push',{path:'/hooks/other'}),context('gateway-path',OWNER,'gateway-webhook'))).httpStatus,404);
+    const oversized=Buffer.alloc(1024*1024+1,65);
+    assert.equal((await fx.service.ingestGatewayWebhook(gatewayInput(oversized,'delivery-large'),context('gateway-large',OWNER,'gateway-webhook'))).httpStatus,413);
+    await assert.rejects(fx.service.ingestGatewayWebhook(gatewayInput(body,'delivery-authority'),context('gateway-authority',OWNER,'owner')),code('release_wrong_principal'));
+  } finally { fx.close(); }
+});
+
+test('R5-A07 GitHub status reports capability truth without material values', () => {
+  const fx=githubFixture(); try {
+    const status=fx.service.status({},context('status-r5'));
+    assert.equal(status.webhook.operationWired,true); assert.equal(status.webhook.routeInstalled,true); assert.deepEqual(status.webhook.paths,['/hooks/babyx/github/repo-1']);
+    assert.equal(status.webhook.secretAvailable,true); assert.equal(status.polling.enabled,true); assert.equal(status.outboxDeliverable,true);
+    assert.equal(status.configuredRepositories[0].allowComments,true);
+    const serialized=JSON.stringify(status); assert.equal(serialized.includes(WEBHOOK_CURRENT),false); assert.equal(serialized.includes(fx.transport.accessValue),false);
+  } finally { fx.close(); }
+});
+
+test('R5-A07b external Gateway route truth defaults to not installed', () => {
+  const fx=githubFixture({gatewayRouteInstalled:false}); try {
+    const status=fx.service.status({},context('status-r5-route-absent'));
+    assert.equal(status.webhook.operationWired,true); assert.equal(status.webhook.routeInstalled,false);
+    assert.deepEqual(status.webhook.paths,['/hooks/babyx/github/repo-1']);
+  } finally { fx.close(); }
+});
+
+test('R5-A08 comment delivery requires explicit repository policy', () => {
+  const fx=githubFixture({policy:{allowComments:false}}); try {
+    assert.throws(()=>fx.service.queueReport({repository:'StealthEyeLLC/notes-api',deploymentId:'deployment-comment-denied',reportKind:'COMMENT',targetOperation:'issues.comments.create',payload:{issueNumber:'9',body:'report'}},context('comment-denied')),code('release_invalid_request'));
+    assert.equal(fx.store.listRecordIdentities().filter(entry=>entry.schemaId==='GitHubOutboxRecordV1').length,0);
+  } finally { fx.close(); }
+});
+
+test('R5-A09 SENDING without semantic lookup remains RECOVERY_REQUIRED and is not resent', async () => {
+  const fx=githubFixture(); try {
+    const queued=queueDeploymentReport(fx,'no-lookup'); forceOutboxState(fx,queued,'SENDING','force-no-lookup'); fx.transport.lookupDelivery=undefined;
+    await fx.service.reconcile({},context('reconcile-no-lookup'));
+    const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId);
+    assert.equal(record.state,'RECOVERY_REQUIRED'); assert.equal(fx.transport.deliveries.length,0);
+  } finally { fx.close(); }
+});
+
+test('R5-A10 exact lookup absence permits one bounded retry and delivery', async () => {
+  const fx=githubFixture(); try {
+    const queued=queueDeploymentReport(fx,'lookup-absent'); forceOutboxState(fx,queued,'SENDING','force-lookup-absent'); fx.transport.lookupResult=undefined;
+    await fx.service.reconcile({},context('reconcile-lookup-absent'));
+    const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId);
+    assert.equal(record.state,'DELIVERED'); assert.equal(fx.transport.lookups.length,1); assert.equal(fx.transport.deliveries.length,1);
+  } finally { fx.close(); }
+});
+
+test('R5-A11 provider readback failure preserves RECOVERY_REQUIRED without resend', async () => {
+  const fx=githubFixture(); try {
+    const queued=queueDeploymentReport(fx,'lookup-failed'); forceOutboxState(fx,queued,'SENDING','force-lookup-failed'); fx.transport.failLookup=true;
+    await fx.service.reconcile({},context('reconcile-lookup-failed'));
+    const record=fx.store.getRecord('GitHubOutboxRecordV1',queued.outboxId);
+    assert.equal(record.state,'RECOVERY_REQUIRED'); assert.equal(fx.transport.lookups.length,1); assert.equal(fx.transport.deliveries.length,0);
+  } finally { fx.close(); }
+});
+
+test('R5-A12 terminal provider rejection is FAILED while retryable outage is DEFERRED', async () => {
+  const terminal=githubFixture(); try {
+    terminal.transport.terminalDeliveryFailure=true; const queued=queueDeploymentReport(terminal,'terminal');
+    const result=await terminal.service.reconcile({},context('reconcile-terminal')); const record=terminal.store.getRecord('GitHubOutboxRecordV1',queued.outboxId);
+    assert.equal(record.state,'FAILED'); assert.equal(result.failedCount,1); assert.equal(record.lastStatus.failureClass,'PROVIDER_4XX');
+  } finally { terminal.close(); }
+  const retryable=githubFixture(); try {
+    retryable.transport.failDelivery=true; const queued=queueDeploymentReport(retryable,'retryable');
+    const result=await retryable.service.reconcile({},context('reconcile-retryable')); const record=retryable.store.getRecord('GitHubOutboxRecordV1',queued.outboxId);
+    assert.equal(record.state,'DEFERRED'); assert.equal(result.deferredCount,1); assert.equal(record.lastStatus.failureClass,'NETWORK');
+  } finally { retryable.close(); }
+});
+
+test('R5-A13 GitHub integration introduces no listener or alternate deployment authority', () => {
+  const accessSource=readFileSync(new URL('../src/release/access.ts',import.meta.url),'utf8');
+  const transportSource=readFileSync(new URL('../src/release/github-transport.ts',import.meta.url),'utf8');
+  assert.doesNotMatch(accessSource,/createServer|\.listen\s*\(/u); assert.doesNotMatch(transportSource,/createServer|\.listen\s*\(/u);
+  assert.match(accessSource,/events\.process/u); assert.doesNotMatch(accessSource,/new\s+JobManager|new\s+DisposableMachineService|zfs|systemd-nspawn/u);
 });

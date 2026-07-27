@@ -25,3 +25,4 @@ export * from './release/route.ts';
 export * from './release/coordinator.ts';
 export * from './release/governor.ts';
 export * from './release/access.ts';
+export * from './release/github-transport.ts';

@@ -228,6 +228,7 @@ babyx.release.credentials.describe
 babyx.release.credentials.rotate
 babyx.release.github.status
 babyx.release.github.reconcile
+babyx.release.github.webhook.ingest
 babyx.release.plan
 babyx.release.prepare
 babyx.release.promote
@@ -290,6 +291,13 @@ const exactInputs: Readonly<Record<string, JsonObject>> = Object.freeze({
   },
   'babyx.release.github.reconcile': {
     type: 'object', additionalProperties: false, properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, poll: { type: 'boolean' } },
+  },
+  'babyx.release.github.webhook.ingest': {
+    type: 'object', additionalProperties: false, required: ['method','path','headers','rawBodyBase64'], properties: {
+      method: { enum: ['POST'] }, path: { type: 'string', maxLength: 256 },
+      headers: { type: 'object', additionalProperties: { type: 'string', maxLength: 4096 }, maxProperties: 64 },
+      rawBodyBase64: { type: 'string', maxLength: 1398120 },
+    },
   },
   'babyx.release.plan': {
     type: 'object', additionalProperties: false, required: ['request'], properties: { request: { type: 'object', additionalProperties: true } },

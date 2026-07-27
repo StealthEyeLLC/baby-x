@@ -537,12 +537,27 @@ function validateSpecificationStatement(value: unknown): string[] {
   return errors;
 }
 
+function pageArguments(payload: JsonObject, maximum = 1_000): { offset: number; limit: number } {
+  const offset = payload.offset === undefined ? 0 : Number(payload.offset);
+  const limit = payload.limit === undefined ? 100 : Number(payload.limit);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative safe integer');
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) throw new Error(`limit must be between 1 and ${maximum}`);
+  return { offset, limit };
+}
+
 export class ObjectStore {
   private readonly store: AtomicStore<{ objects: Record<string, JsonObject> }>;
   constructor(path: string) { this.store = new AtomicStore(path, { objects: {} }); }
   create(value: JsonObject): JsonObject { const id = typeof value.id === 'string' ? value.id : randomUUID(); const object = { ...value, id, createdAt: value.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString() }; this.store.update((current) => ({ objects: { ...current.objects, [id]: object } })); return object; }
   get(id: string): JsonObject { const object = this.store.read().objects[id]; if (!object) throw new Error('object not found'); return object; }
-  list(): JsonObject[] { return Object.values(this.store.read().objects); }
+  count(): number { return Object.keys(this.store.read().objects).length; }
+  list(offset = 0, limit = 100): JsonObject[] {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative safe integer');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('limit must be between 1 and 10000');
+    return Object.values(this.store.read().objects)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
+      .slice(offset, offset + limit);
+  }
   remove(id: string): JsonObject { this.store.update((current) => { const objects = { ...current.objects }; delete objects[id]; return { objects }; }); return { removed: true, id }; }
   update(id: string, patch: JsonObject): JsonObject { return this.create({ ...this.get(id), ...patch, id }); }
 }
@@ -721,7 +736,13 @@ export class BabyXRuntime {
     }
     if (operation === 'babyx.artifact.create') return (await this.artifactManager()).create(requiredString(payload, 'name'), requiredString(payload, 'sourcePath'), payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata as JsonObject : {});
     if (operation === 'babyx.artifact.get') return (await this.artifactManager()).get(requiredString(payload, 'id'));
-    if (operation === 'babyx.artifact.list') return { artifacts: (await this.artifactManager()).list() };
+    if (operation === 'babyx.artifact.list') {
+      const manager = await this.artifactManager();
+      const { offset, limit } = pageArguments(payload);
+      const artifacts = manager.list(offset, limit);
+      const total = manager.count();
+      return { artifacts, offset, limit, total, nextOffset: offset + artifacts.length < total ? offset + artifacts.length : null };
+    }
     if (operation === 'babyx.artifact.verify') return (await this.artifactManager()).verify(requiredString(payload, 'id'));
     if (operation.startsWith('babyx.file.')) return this.fileOperation(operation, payload);
     if (operation.startsWith('babyx.spec.')) return this.specOperation(operation, payload);
@@ -742,16 +763,16 @@ export class BabyXRuntime {
   private specOperation(operation: string, payload: JsonObject): JsonObject {
     const suffix = operation.slice('babyx.spec.'.length);
     if (suffix === 'describe') return { classifications: ['declared-requirement', 'static-fact', 'observed-invariant', 'hypothesis', 'falsified-hypothesis'], analyzers: ['repository-identity', 'operation-schema', 'test-name', 'systemd-dependency', 'nspawn-definition', 'observed-shape', 'state-transition', 'resource-ownership', 'process-port-topology'] };
-    if (suffix === 'list') return { statements: this.specs.list() }; if (suffix === 'get') return this.specs.get(requiredString(payload, 'id')); if (suffix === 'remove' || suffix === 'reject') return this.specs.remove(requiredString(payload, 'id'));
+    if (suffix === 'list') { const { offset, limit } = pageArguments(payload); const statements = this.specs.list(offset, limit); const total = this.specs.count(); return { statements, offset, limit, total, nextOffset: offset + statements.length < total ? offset + statements.length : null }; } if (suffix === 'get') return this.specs.get(requiredString(payload, 'id')); if (suffix === 'remove' || suffix === 'reject') return this.specs.remove(requiredString(payload, 'id'));
     if (suffix === 'promote') return this.specs.update(requiredString(payload, 'id'), { classification: 'declared-requirement', promotedAt: new Date().toISOString() });
     if (suffix === 'falsify') return this.specs.update(requiredString(payload, 'id'), { classification: 'falsified-hypothesis', falsifiedBy: payload.counterexamples ?? [], lastObservedAt: new Date().toISOString() });
     if (suffix === 'scan' || suffix === 'observe' || suffix === 'generate') { const statement: SpecificationStatement = { id: randomUUID(), classification: suffix === 'scan' ? 'static-fact' : suffix === 'observe' ? 'observed-invariant' : 'hypothesis', subject: typeof payload.subject === 'string' ? payload.subject : 'baby-x', predicate: typeof payload.predicate === 'string' ? payload.predicate : suffix, value: payload.value ?? payload, provenance: [{ operation, timestamp: new Date().toISOString(), source: payload.source ?? null }], firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() }; return this.specs.create(statement as unknown as JsonObject); }
-    if (suffix === 'diff') return { left: payload.left, right: payload.right, equal: canonicalize(payload.left) === canonicalize(payload.right) }; if (suffix === 'validate') { const statement = payload.statement ?? null; const errors = validateSpecificationStatement(statement); return { valid: errors.length === 0, errors, statement }; } if (suffix === 'export') { const statements = this.specs.list(); return { statements, sha256: sha256(canonicalize(statements)) }; } if (suffix === 'raw') return this.rawOperation(operation, payload);
+    if (suffix === 'diff') return { left: payload.left, right: payload.right, equal: canonicalize(payload.left) === canonicalize(payload.right) }; if (suffix === 'validate') { const statement = payload.statement ?? null; const errors = validateSpecificationStatement(statement); return { valid: errors.length === 0, errors, statement }; } if (suffix === 'export') { const total = this.specs.count(); if (total > 10_000) throw new Error('specification export exceeds 10000 statements'); const statements = this.specs.list(0, 10_000); return { statements, total, sha256: sha256(canonicalize(statements)) }; } if (suffix === 'raw') return this.rawOperation(operation, payload);
     throw new Error('unsupported specification operation');
   }
   private objectOperation(operation: string, payload: JsonObject, store: ObjectStore): JsonObject {
     const suffix = operation.split('.').at(-1) ?? '';
-    if (suffix === 'list') return { objects: store.list() }; if (suffix === 'get') return store.get(requiredString(payload, 'id')); if (suffix === 'remove') return store.remove(requiredString(payload, 'id'));
+    if (suffix === 'list') { const { offset, limit } = pageArguments(payload); const objects = store.list(offset, limit); const total = store.count(); return { objects, offset, limit, total, nextOffset: offset + objects.length < total ? offset + objects.length : null }; } if (suffix === 'get') return store.get(requiredString(payload, 'id')); if (suffix === 'remove') return store.remove(requiredString(payload, 'id'));
     if (['create', 'submit'].includes(suffix)) return store.create(payload);
     if (['start', 'step', 'pause', 'resume', 'cancel', 'build', 'verify', 'run', 'replay', 'export'].includes(suffix)) { const id = requiredString(payload, 'id'); const state = suffix === 'start' || suffix === 'resume' ? 'running' : suffix === 'pause' ? 'paused' : suffix === 'cancel' ? 'cancelled' : suffix === 'verify' ? 'bounded-pass' : suffix; return store.update(id, { state, lastAction: suffix, updatedAt: new Date().toISOString(), result: payload.result ?? null }); }
     return store.create({ ...payload, operation });
@@ -766,7 +787,7 @@ export class BabyXRuntime {
     const family = operation.split('.')[1] ?? '';
     const suffix = operation.split('.').slice(2).join('.');
     if (family === 'systemd') { const unit = typeof payload.unit === 'string' ? payload.unit : undefined; const mapping: Record<string, string[]> = { list: ['list-units', '--all', '--no-pager'], show: ['show', String(unit)], start: ['start', String(unit)], stop: ['stop', String(unit)], restart: ['restart', String(unit)], reload: ['reload', String(unit)], enable: ['enable', String(unit)], disable: ['disable', String(unit)], mask: ['mask', String(unit)], unmask: ['unmask', String(unit)], 'daemon-reload': ['daemon-reload'], 'reset-failed': ['reset-failed', ...(unit ? [unit] : [])], kill: ['kill', String(unit)] }; if (suffix === 'logs') return this.executor.run({ ...payload, argv: ['/usr/bin/journalctl', '--no-pager', '-u', String(unit), ...(Array.isArray(payload.argv) ? payload.argv : [])] }) as unknown as JsonObject; if (suffix === 'run') return this.executor.run({ ...payload, argv: ['/usr/bin/systemd-run', '--wait', '--pipe', '--collect', ...(Array.isArray(payload.properties) ? (payload.properties as string[]).flatMap((property) => [`--property=${property}`]) : []), '--', ...assertStrings(payload.argv, 'argv')] }) as unknown as JsonObject; return this.executor.run({ ...payload, argv: ['/usr/bin/systemctl', ...(mapping[suffix] ?? [suffix, ...(unit ? [unit] : [])])] }) as unknown as JsonObject; }
-    if (family === 'machine') { const machine = typeof payload.machine === 'string' ? payload.machine : undefined; if (suffix === 'exec' || suffix === 'shell') return this.executor.run({ ...payload, target: { kind: 'machine', machine }, argv: suffix === 'shell' ? ['/usr/bin/bash', '-lc', requiredString(payload, 'command')] : assertStrings(payload.argv, 'argv') }) as unknown as JsonObject; const args = Array.isArray(payload.argv) ? payload.argv as string[] : [suffix.replaceAll('.', '-'), ...(machine ? [machine] : [])]; return this.executor.run({ ...payload, argv: ['/usr/bin/machinectl', ...args] }) as unknown as JsonObject; }
+    if (family === 'machine') throw new Error('machine operations must be routed through DisposableMachineService');
     const tools: Record<string, string> = { trace: '/usr/bin/bpftrace', debug: '/usr/bin/gdb', checkpoint: '/usr/sbin/criu', packet: suffix.startsWith('decode') || suffix.startsWith('follow') || suffix.startsWith('statistics') ? '/usr/bin/tshark' : '/usr/bin/tcpdump', syscall: join(process.cwd(), 'runtime', 'native', 'seccomp-supervisor', 'target', 'release', 'baby-x-seccomp-supervisor') };
     const tool = tools[family]; if (!tool || (!existsSync(tool) && executable(tool) === null)) return { operation, status: 'unavailable', requiredTool: tool ?? family };
     const argv = Array.isArray(payload.argv) ? payload.argv as string[] : ['--help']; return this.executor.run({ ...payload, argv: [tool, ...argv] }) as unknown as JsonObject;

@@ -295,6 +295,7 @@ function schemaFor(operation: string): Record<string, unknown> {
   if (operation === 'babyx.artifact.create') return objectSchema({ name: stringValue, sourcePath: stringValue, metadata: jsonObject }, ['name', 'sourcePath']);
   if (operation === 'babyx.artifact.get' || operation === 'babyx.artifact.verify') return objectSchema({ id: identifier }, ['id']);
   if (operation === 'babyx.artifact.list') return objectSchema({ offset: nonNegativeInteger, limit: { type: 'integer', minimum: 1, maximum: 1_000 } });
+  if (['babyx.spec.list', 'babyx.campaign.list', 'babyx.candidate.list', 'babyx.adversary.list', 'babyx.counterexample.list'].includes(operation)) return objectSchema({ offset: nonNegativeInteger, limit: { type: 'integer', minimum: 1, maximum: 1_000 } });
   if (operation === 'babyx.spec.validate') return objectSchema({ statement: jsonObject }, ['statement']);
   if (operation === 'babyx.spec.diff') return objectSchema({ left: {}, right: {} }, ['left', 'right']);
   if (operation.endsWith('.raw')) return objectSchema({ tool: stringValue, argv: stringArray, cwd: stringValue, env: jsonObject, target: jsonObject, timeoutMs: positiveInteger }, ['tool']);

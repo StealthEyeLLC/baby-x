@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BabyXRuntime, FileManager, JobManager, sha256 } from '../../dist/runtime/core.js';
 import { appendBoundedRuntimeFrameChunk } from '../../dist/runtime/server.js';
+import { ArtifactManager } from '../../dist/runtime/artifacts/manager.js';
 
 test('spec validation rejects malformed statements and accepts complete statements', async () => {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-spec-repair-'));
@@ -131,5 +132,51 @@ test('public operation definitions expose finite honest execution contracts', ()
     const machineCreate = description.operations.find((definition) => definition.operation === 'babyx.machine.create');
     assert.equal(machineCreate.idempotency, 'caller_key');
     assert.equal(machineCreate.restartBehavior, 'durable_reconcile');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('generic machine provider cannot bypass DisposableMachineService', () => {
+  const source = readFileSync(new URL('../src/core.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /if \(family === 'machine'\).*machinectl/su);
+  assert.equal((source.match(/\/usr\/bin\/machinectl/gu) ?? []).length, 1);
+});
+
+test('generic object listings are deterministic and paginated', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-object-page-'));
+  try {
+    const runtime = new BabyXRuntime({ stateRoot: root });
+    await runtime.execute('babyx.campaign.create', { id: 'campaign-c', name: 'c' });
+    await runtime.execute('babyx.campaign.create', { id: 'campaign-a', name: 'a' });
+    await runtime.execute('babyx.campaign.create', { id: 'campaign-b', name: 'b' });
+    const page = await runtime.execute('babyx.campaign.list', { offset: 1, limit: 1 });
+    assert.deepEqual(page.objects.map((value) => value.id), ['campaign-b']);
+    assert.equal(page.total, 3);
+    assert.equal(page.offset, 1);
+    assert.equal(page.limit, 1);
+    assert.equal(page.nextOffset, 2);
+    await assert.rejects(() => runtime.execute('babyx.campaign.list', { limit: 1_001 }), /limit must be between 1 and 1000/u);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('artifact writes are durable and artifact reads are bounded and paginated', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-artifact-page-'));
+  try {
+    const manager = new ArtifactManager(root);
+    const records = [manager.begin('c'), manager.begin('a'), manager.begin('b')];
+    const sorted = [...records].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    assert.deepEqual(manager.list(1, 1).map((value) => value.id), [sorted[1].id]);
+    assert.equal(manager.count(), 3);
+    assert.throws(() => manager.list(0, 1_001), /limit must be between 1 and 1000/u);
+    assert.throws(() => manager.upload(String(records[0].id), -1, Buffer.from('x')), /non-negative safe integer/u);
+    const bytes = Buffer.from('artifact-bytes');
+    manager.upload(String(records[0].id), 0, bytes);
+    const finalized = manager.finalize(String(records[0].id), bytes.length, sha256(bytes));
+    assert.equal(finalized.state, 'finalized');
+    assert.throws(() => manager.download(String(records[0].id), -1, 1), /non-negative safe integer/u);
+    assert.throws(() => manager.download(String(records[0].id), 0, 65_537), /between 0 and 65536/u);
+    const downloaded = manager.download(String(records[0].id), 0, 4);
+    assert.equal(Buffer.from(downloaded.data, 'base64').toString('utf8'), 'arti');
+    assert.equal(downloaded.eof, false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

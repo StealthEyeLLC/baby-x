@@ -24,6 +24,19 @@ Baby-X is governed by one mandate:
 14. Every addition must increase useful power more than architectural complexity.
 15. The core should be boring; the compositions may be extreme.
 
+
+## Authority interpretation
+
+The direct-execution principle does not authorize bypassing a specialized durable authority. Once Baby-X owns a durable concern, every public lifecycle operation for that concern must route through the owning service.
+
+- Disposable machine lifecycle belongs only to `DisposableMachineService`.
+- Durable process lifecycle belongs only to `JobManager`.
+- Artifact lifecycle belongs only to `ArtifactManager`.
+- Certification and racing coordinate existing authorities; they do not replace them.
+- The gateway authenticates and forwards; it is never an executor or persistence authority.
+
+Raw provider access is permitted only where no specialized durable authority is bypassed and only through the finite authenticated public catalog.
+
 ## Minimal permanent concepts
 
 The target kernel should express the system through five concepts:

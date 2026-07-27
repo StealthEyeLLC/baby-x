@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BabyXRuntime, FileManager, JobManager, sha256 } from '../../dist/runtime/core.js';
@@ -213,4 +213,22 @@ test('artifact metadata listing isolates one corrupt record and remains bounded'
     assert.equal(page.total, 2);
     assert.throws(() => manager.listPage(0, 1_001), /limit must be between 1 and 1000/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('canonical documents defer generated facts and duplicate facades are absent', () => {
+  const operations = readFileSync('docs/OPERATIONS.md', 'utf8');
+  const truth = readFileSync('docs/CANONICAL-TRUTH.md', 'utf8');
+  const constitution = readFileSync('docs/BABY-X-CONSTITUTION.md', 'utf8');
+  assert.match(operations, /runtime\/src\/operations\/definitions\.ts/u);
+  assert.match(operations, /Legacy direct `machinectl` catalog entries/u);
+  assert.match(truth, /Runtime source and strict validators/u);
+  assert.match(truth, /HELD_BRANCH_ONLY/u);
+  assert.match(constitution, /Disposable machine lifecycle belongs only to `DisposableMachineService`/u);
+  for (const facade of [
+    'runtime/src/battleground/manager.ts',
+    'runtime/src/specification/observer.ts',
+    'runtime/src/specification/scanner.ts',
+    'runtime/src/specification/store.ts',
+  ]) assert.equal(existsSync(facade), false);
 });

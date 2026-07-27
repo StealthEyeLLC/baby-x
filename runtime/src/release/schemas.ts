@@ -296,6 +296,17 @@ export const RELEASE_RECORD_SCHEMAS: Readonly<Record<string, ReleaseRecordSchema
     reasons: stringArray(true), referenceCount: integerField(true), protectedReferences: stringArray(true), decidedAt: stringField(true, 'timestamp'), decisionDigest: stringField(true, 'digest'),
     planDigest: stringField(false, 'digest'), executionState: enumField(['PLANNED', 'EXECUTED', 'FAILED']), sequence: integerField(), executedAt: stringField(false, 'timestamp'), bytesFreed: integerField(), error: structuredError(),
   }),
+  RetentionEvictionV1: schema('RetentionEvictionV1', {
+    decisionId: stringField(true, 'identifier'), ownerPrincipal: stringField(true, 'identifier'), artifactId: stringField(true, 'identifier'), objectId: stringField(true, 'identifier'),
+    expectedArtifactDigest: stringField(true, 'digest'), retentionClass: enumField(['CACHE'], true), planDigest: stringField(true, 'digest'),
+    referenceScanDigest: stringField(true, 'digest'), removalReferenceScanDigest: stringField(false, 'digest'),
+    protectedReferenceResult: enumField(['UNPROTECTED', 'PROTECTED', 'UNCERTAIN'], true), protectedReferences: stringArray(true, 1_000),
+    idempotencyKey: stringField(true, 'identifier'), requestDigest: stringField(true, 'digest'), sequence: integerField(true),
+    requestedAction: enumField(['REMOVE'], true), requestedAt: stringField(true, 'timestamp'), updatedAt: stringField(true, 'timestamp'),
+    state: enumField(['REQUESTED', 'REMOVING', 'VERIFYING_ABSENCE', 'REMOVED', 'BLOCKED', 'FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'], true),
+    removingAt: stringField(false, 'timestamp'), absenceVerifiedAt: stringField(false, 'timestamp'), removedAt: stringField(false, 'timestamp'),
+    bytesFreed: integerField(), observationDigest: stringField(false, 'digest'), error: structuredError(),
+  }),
   MigrationRunV1: schema('MigrationRunV1', {
     migrationRunId: stringField(true, 'identifier'), deploymentId: stringField(true, 'identifier'), migrationContractDigest: stringField(true, 'digest'), phase: enumField(['EXPAND', 'MIGRATE', 'CONTRACT'], true),
     reversibility: enumField(['REVERSIBLE', 'FORWARD_ONLY', 'IRREVERSIBLE'], true), approvalEvidence: objectArray(), activeJobIds: stringArray(true), allJobIds: stringArray(true),

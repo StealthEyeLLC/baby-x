@@ -78,7 +78,11 @@ function files(root) {
 
 function fixture(options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'baby-x-release-governor-'));
-  const store = new ReleaseApplianceStore(join(root, 'store'));
+  let storeFaultInjector = options.storeFaultInjector;
+  let retentionFaultInjector = options.retentionFaultInjector;
+  const store = new ReleaseApplianceStore(join(root, 'store'), {
+    faultInjector(stage, details) { storeFaultInjector?.(stage, details); },
+  });
   const artifacts = new ArtifactManager(join(root, 'artifacts'));
   let currentObservation = observation(options.observation);
   let now = options.now ?? NOW;
@@ -92,6 +96,7 @@ function fixture(options = {}) {
     artifacts,
     capacityProvider: () => structuredClone(currentObservation),
     priorityAuthority,
+    retentionFaultInjector(stage, details) { retentionFaultInjector?.(stage, details); },
     now: () => now,
   });
   const governor = createGovernor();
@@ -100,6 +105,8 @@ function fixture(options = {}) {
     restart: createGovernor,
     setObservation(value) { currentObservation = observation(value); },
     setNow(value) { now = value; },
+    setStoreFaultInjector(value) { storeFaultInjector = value; },
+    setRetentionFaultInjector(value) { retentionFaultInjector = value; },
     close() { rmSync(root, { recursive: true, force: true }); },
   };
 }
@@ -511,4 +518,271 @@ test('H37 governor creates no scheduler machine artifact process or destructive 
   assert.match(source, /ReleaseApplianceStore/u);
   assert.match(source, /ArtifactManager/u);
   assert.match(source, /PriorityEnforcementAuthority/u);
+});
+
+
+function retentionRecords(fx) {
+  return fx.store.listRecordIdentities(10_000)
+    .filter((entry) => entry.schemaId === 'RetentionEvictionV1')
+    .map((entry) => fx.store.getRecord(entry.schemaId, entry.recordId));
+}
+
+function artifactExists(manager, artifactId) {
+  try { manager.get(artifactId); return true; } catch (error) {
+    if (/artifact not found/u.test(String(error?.message))) return false;
+    throw error;
+  }
+}
+
+function armRetentionFault(fx, target, callback) {
+  let armed = true;
+  fx.setRetentionFaultInjector((stage, details) => {
+    if (!armed || stage !== target) return;
+    armed = false;
+    callback?.(details);
+    throw new Error(`simulated-${target}`);
+  });
+}
+
+function prepareRetentionFault(target) {
+  const fx = fixture();
+  const item = artifact(fx, `r1-${target}`, Buffer.from(`bytes-${target}`), { retentionClass: 'CACHE' });
+  const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context(`r1-${target}`));
+  armRetentionFault(fx, target);
+  assert.throws(
+    () => fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context(`r1-${target}`)),
+    new RegExp(`simulated-${target}`, 'u'),
+  );
+  fx.setRetentionFaultInjector(undefined);
+  return { fx, item, plan, key: `r1-${target}` };
+}
+
+function completeRetentionRecovery(prepared) {
+  const result = prepared.fx.restart().gc(
+    { dryRun: false, limit: 10, planDigest: prepared.plan.planDigest },
+    context(prepared.key),
+  );
+  const record = retentionRecords(prepared.fx)[0];
+  assert.equal(record.state, 'REMOVED');
+  assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), false);
+  assert.equal(prepared.fx.store.hasRecord('RetentionDecisionV1', record.decisionId), true);
+  assert.ok(result.destructiveActions.length >= 1);
+  return record;
+}
+
+test('R1-01 failure before durable intent leaves artifact and store unchanged', () => {
+  const prepared = prepareRetentionFault('before_intent');
+  try {
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), true);
+    assert.equal(retentionRecords(prepared.fx).length, 0);
+    assert.equal(prepared.fx.store.listPending().length, 0);
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-02 store response loss immediately after pending intent is restart recoverable', () => {
+  let armed = true;
+  const fx = fixture({
+    storeFaultInjector(stage, details) {
+      if (armed && stage === 'after_pending_write' && details.schemaId === 'RetentionEvictionV1') {
+        armed = false;
+        throw new Error('simulated-store-intent-loss');
+      }
+    },
+  });
+  try {
+    const item = artifact(fx, 'r1-store-intent', Buffer.from('store-intent'), { retentionClass: 'CACHE' });
+    const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context('r1-store-intent'));
+    assert.throws(() => fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-store-intent')), /simulated-store-intent-loss/u);
+    assert.equal(artifactExists(fx.artifacts, item.id), true);
+    assert.equal(fx.store.listPending().some((entry) => entry.state === 'PREPARED'), true);
+    fx.setStoreFaultInjector(undefined);
+    const startup = fx.store.startupScan();
+    assert.equal(startup.recoveredPending, 1);
+    const result = fx.restart().gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-store-intent'));
+    assert.equal(result.destructiveActions[0].decision.state, 'REMOVED');
+    assert.equal(artifactExists(fx.artifacts, item.id), false);
+  } finally { fx.close(); }
+});
+
+test('R1-03 process loss immediately after durable eviction intent resumes safely', () => {
+  const prepared = prepareRetentionFault('after_intent');
+  try {
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), true);
+    assert.equal(retentionRecords(prepared.fx)[0].state, 'REQUESTED');
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-04 process loss before removal leaves REMOVING intent and resumes with fresh reference scan', () => {
+  const prepared = prepareRetentionFault('before_remove');
+  try {
+    const pending = retentionRecords(prepared.fx)[0];
+    assert.equal(pending.state, 'REMOVING');
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), true);
+    assert.match(pending.removalReferenceScanDigest, /^[a-f0-9]{64}$/u);
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-05 process loss after removal preserves durable intent and completes from observed absence', () => {
+  const prepared = prepareRetentionFault('after_remove');
+  try {
+    assert.equal(retentionRecords(prepared.fx)[0].state, 'REMOVING');
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), false);
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-06 process loss before absence verification resumes from VERIFYING_ABSENCE', () => {
+  const prepared = prepareRetentionFault('before_absence_verification');
+  try {
+    assert.equal(retentionRecords(prepared.fx)[0].state, 'VERIFYING_ABSENCE');
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), false);
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-07 process loss during absence verification preserves nonterminal truth', () => {
+  const prepared = prepareRetentionFault('during_absence_verification');
+  try {
+    assert.equal(retentionRecords(prepared.fx)[0].state, 'VERIFYING_ABSENCE');
+    completeRetentionRecovery(prepared);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-08 process loss after absence readback but before terminal persistence resumes safely', () => {
+  for (const stage of ['after_absence_verification', 'before_terminal_persist']) {
+    const prepared = prepareRetentionFault(stage);
+    try {
+      assert.equal(retentionRecords(prepared.fx)[0].state, 'VERIFYING_ABSENCE');
+      assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), false);
+      completeRetentionRecovery(prepared);
+    } finally { prepared.fx.close(); }
+  }
+});
+
+test('R1-09 exact replay after terminal response loss is idempotent and adds no events', () => {
+  const fx = fixture();
+  try {
+    const item = artifact(fx, 'r1-terminal-replay', Buffer.from('terminal-replay'), { retentionClass: 'CACHE' });
+    const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context('r1-terminal-replay'));
+    const first = fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-terminal-replay'));
+    const decisionId = first.destructiveActions[0].decision.decisionId;
+    const beforeEvents = fx.store.events('RetentionEvictionV1', decisionId).length;
+    const second = fx.restart().gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-terminal-replay'));
+    assert.equal(second.destructiveActions[0].decision.state, 'REMOVED');
+    assert.equal(fx.store.events('RetentionEvictionV1', decisionId).length, beforeEvents);
+    assert.equal(artifactExists(fx.artifacts, item.id), false);
+  } finally { fx.close(); }
+});
+
+test('R1-10 reference appearing after dry-run blocks removal before the effect', () => {
+  const fx = fixture();
+  try {
+    const item = artifact(fx, 'r1-late-reference', Buffer.from('late-reference'), { retentionClass: 'CACHE' });
+    const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context('r1-late-reference'));
+    let inserted = false;
+    fx.setRetentionFaultInjector((stage) => {
+      if (stage === 'after_intent' && !inserted) { inserted = true; persistEvidenceReference(fx, item.id); }
+    });
+    const result = fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-late-reference'));
+    assert.equal(result.destructiveActions[0].decision.state, 'BLOCKED');
+    assert.equal(artifactExists(fx.artifacts, item.id), true);
+    assert.equal(result.destructiveActions[0].decision.protectedReferenceResult, 'PROTECTED');
+  } finally { fx.close(); }
+});
+
+test('R1-11 wrong principal cannot recover or mutate a durable eviction', () => {
+  const prepared = prepareRetentionFault('after_intent');
+  try {
+    const before = files(prepared.fx.root);
+    assert.throws(
+      () => prepared.fx.restart().gc(
+        { dryRun: false, limit: 10, planDigest: prepared.plan.planDigest },
+        { subject: 'foreign-owner', idempotencyKey: prepared.key, authorityClass: 'owner' },
+      ),
+      code('release_wrong_principal'),
+    );
+    assert.deepEqual(files(prepared.fx.root), before);
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), true);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-12 conflicting idempotency key cannot recover or mutate a durable eviction', () => {
+  const prepared = prepareRetentionFault('after_intent');
+  try {
+    const before = files(prepared.fx.root);
+    assert.throws(
+      () => prepared.fx.restart().gc(
+        { dryRun: false, limit: 10, planDigest: prepared.plan.planDigest },
+        context('r1-conflicting-key'),
+      ),
+      code('release_idempotency_conflict'),
+    );
+    assert.deepEqual(files(prepared.fx.root), before);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-13 stale eviction sequence is rejected after another controller advances truth', () => {
+  const prepared = prepareRetentionFault('before_remove');
+  try {
+    const stale = retentionRecords(prepared.fx)[0];
+    const terminal = completeRetentionRecovery(prepared);
+    assert.ok(Number(terminal.sequence) > Number(stale.sequence));
+    assert.throws(() => prepared.fx.governor.executeEviction(stale), code('release_stale_sequence'));
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-14 corrupt eviction record fails closed without destructive work', () => {
+  const prepared = prepareRetentionFault('after_intent');
+  try {
+    const record = retentionRecords(prepared.fx)[0];
+    writeFileSync(prepared.fx.store.authoritativeRecordPath('RetentionEvictionV1', record.decisionId), '{"schemaVersion":"1.0.0","corrupt":true}\n');
+    assert.throws(
+      () => prepared.fx.restart().gc({ dryRun: false, limit: 10, planDigest: prepared.plan.planDigest }, context(prepared.key)),
+      code('release_record_corrupt'),
+    );
+    assert.equal(artifactExists(prepared.fx.artifacts, prepared.item.id), true);
+  } finally { prepared.fx.close(); }
+});
+
+test('R1-15 corrupt store pending intent is quarantined and never removes the artifact', () => {
+  let armed = true;
+  const fx = fixture({
+    storeFaultInjector(stage, details) {
+      if (armed && stage === 'after_pending_write' && details.schemaId === 'RetentionEvictionV1') {
+        armed = false;
+        throw new Error('simulated-pending-corruption-window');
+      }
+    },
+  });
+  try {
+    const item = artifact(fx, 'r1-corrupt-pending', Buffer.from('corrupt-pending'), { retentionClass: 'CACHE' });
+    const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context('r1-corrupt-pending'));
+    assert.throws(() => fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-corrupt-pending')), /simulated-pending-corruption-window/u);
+    const pending = fx.store.listPending()[0];
+    const pendingPath = join(fx.root, 'store', 'pending', `${pending.mutationId}.json`);
+    writeFileSync(pendingPath, '{"schemaVersion":"1.0.0","corrupt":true}\n');
+    fx.setStoreFaultInjector(undefined);
+    const report = fx.store.startupScan();
+    assert.ok(report.corrupt >= 1);
+    assert.ok(report.recoveryRequired >= 1);
+    assert.equal(artifactExists(fx.artifacts, item.id), true);
+  } finally { fx.close(); }
+});
+
+test('R1-16 retention state and event evidence remain bounded', () => {
+  const fx = fixture();
+  try {
+    artifact(fx, 'r1-bounded', Buffer.from('bounded'), { retentionClass: 'CACHE' });
+    const plan = fx.governor.gc({ dryRun: true, limit: 10 }, context('r1-bounded'));
+    const result = fx.governor.gc({ dryRun: false, limit: 10, planDigest: plan.planDigest }, context('r1-bounded'));
+    const record = result.destructiveActions[0].decision;
+    const events = fx.store.events('RetentionEvictionV1', record.decisionId);
+    assert.ok(events.length >= 4 && events.length <= 8);
+    assert.ok(record.protectedReferences.length <= 1_000);
+    assert.ok(Buffer.byteLength(canonicalize(record)) < 65_536);
+    assert.equal(fx.store.verify().valid, true);
+  } finally { fx.close(); }
 });

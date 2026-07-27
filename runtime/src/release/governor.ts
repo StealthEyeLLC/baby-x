@@ -42,11 +42,22 @@ export interface PriorityEnforcementAuthority {
   apply(request: { target: string; workClass: ReleaseWorkClass; properties: Readonly<Record<string, string>> }, context: RuntimeExecutionContext): Promise<JsonObject> | JsonObject;
 }
 
+export type RetentionFaultStage =
+  | 'before_intent'
+  | 'after_intent'
+  | 'before_remove'
+  | 'after_remove'
+  | 'before_absence_verification'
+  | 'during_absence_verification'
+  | 'after_absence_verification'
+  | 'before_terminal_persist';
+
 export interface ReleaseResourceGovernorOptions {
   store: ReleaseApplianceStore;
   artifacts: ArtifactManager;
   capacityProvider: () => CapacityObservation;
   priorityAuthority?: PriorityEnforcementAuthority;
+  retentionFaultInjector?: (stage: RetentionFaultStage, context: JsonObject) => void;
   now?: () => string;
 }
 
@@ -217,7 +228,7 @@ function recordProtectsArtifacts(schemaId: string, record: JsonObject): boolean 
   if (schemaId === 'DeploymentRecordV1') return !['ROLLED_BACK','FAILED','CANCELLED','EXPIRED'].includes(String(record.state)) || ['AMBIGUOUS','RECOVERY_REQUIRED'].includes(String(record.state));
   if (schemaId === 'RouteRecordV1') return !['ABSENT_VERIFIED'].includes(String(record.state));
   if (schemaId === 'CertificationRecordV1') return !['FAILED'].includes(String(record.state)) || record.evidenceIndexId !== undefined;
-  return !['CapacitySnapshotV1','CapacityReservationLedgerV1','RetentionDecisionV1'].includes(schemaId);
+  return !['CapacitySnapshotV1','CapacityReservationLedgerV1','RetentionDecisionV1','RetentionEvictionV1'].includes(schemaId);
 }
 
 export function projectReleaseCapacity(observationValue: CapacityObservation, payloadValue: JsonObject = {}, activeReservationsValue: readonly JsonObject[] = [], nowValue?: string): JsonObject {
@@ -335,9 +346,358 @@ export class ReleaseResourceGovernor implements CapacityReservationAuthority {
     const planDigest=sha256(canonicalize(planIdentity));
     return {operation:'babyx.release.gc',dryRun:true,decidedAt:now,...planIdentity,planDigest,destructiveActions:[]};
   }
-  gc(payloadValue: JsonObject, context: RuntimeExecutionContext): JsonObject {
-    const payload=strictObject(payloadValue,'gc request',['dryRun','limit','maxBytes','planDigest'],['dryRun']); const plan=this.planGc({...(payload.limit===undefined?{}:{limit:payload.limit}),...(payload.maxBytes===undefined?{}:{maxBytes:payload.maxBytes})}); if(payload.dryRun===true)return plan; if(payload.dryRun!==false)throw new ReleaseGovernorError('release_invalid_request','dryRun must be boolean'); const owner=identifier(context.subject,'context.subject'); identifier(context.idempotencyKey,'context.idempotencyKey'); if(typeof payload.planDigest!=='string'||payload.planDigest!==plan.planDigest)throw new ReleaseGovernorError('release_stale_sequence','live GC requires the exact current dry-run plan digest'); const executed:JsonObject[]=[];
-    for(const item of plan.decisions as JsonObject[]){if(item.decision!=='EVICT')continue; const removal=this.options.artifacts.remove(String(item.objectId),String(item.artifactSha256)); const decidedAt=this.now(); const base={schemaVersion:'1.0.0',decisionId:`retention-${sha256(`${plan.planDigest}:${item.objectId}`).slice(0,40)}`,ownerPrincipal:owner,objectType:'ARTIFACT',objectId:item.objectId,decision:'EVICT',reasons:item.reasons,referenceCount:item.referenceCount,protectedReferences:item.protectedReferences,decidedAt,planDigest:plan.planDigest,executionState:'EXECUTED',sequence:1,executedAt:decidedAt,bytesFreed:Number(removal.bytesFreed??0)}; const decision=validateReleaseRecord('RetentionDecisionV1',{...base,decisionDigest:sha256(canonicalize(base))}); if(!this.options.store.hasRecord('RetentionDecisionV1',String(decision.decisionId)))this.options.store.applyMutation({schemaId:'RetentionDecisionV1',recordId:String(decision.decisionId),ownerPrincipal:owner,expectedSequence:0,idempotencyKey:`${context.idempotencyKey}-${String(item.objectId)}`,requestDigest:sha256(canonicalize(decision)),operation:'babyx.release.gc',phase:'retention-eviction',record:decision,occurredAt:decidedAt,artifactReferences:[]}); executed.push({decision,removal});}
-    return {...plan,dryRun:false,destructiveActions:executed,bytesFreed:executed.reduce((sum,item)=>sum+Number(object(item.removal,'removal').bytesFreed??0),0)};
+  private retentionFault(stage: RetentionFaultStage, context: JsonObject): void {
+    this.options.retentionFaultInjector?.(stage, structuredClone(context));
   }
+  private mutationKey(...parts: string[]): string {
+    return `retention-${sha256(parts.join(':')).slice(0, 48)}`;
+  }
+  private artifactPresence(artifactId: string, expectedDigest: string): JsonObject {
+    try {
+      const record = this.options.artifacts.get(artifactId);
+      const metadata = isObject(record.metadata) ? record.metadata : {};
+      if (record.sha256 !== expectedDigest) {
+        return { status:'IDENTITY_MISMATCH', present:true, observedDigest:record.sha256, retentionClass:metadata.retentionClass, pinned:metadata.pinned === true };
+      }
+      const verification = this.options.artifacts.verify(artifactId);
+      return {
+        status:verification.valid === true ? 'PRESENT_VERIFIED' : 'PRESENT_CORRUPT',
+        present:true,
+        observedDigest:verification.sha256,
+        retentionClass:metadata.retentionClass,
+        pinned:metadata.pinned === true,
+      };
+    } catch (error) {
+      if (error instanceof Error && /artifact not found/u.test(error.message)) return { status:'ABSENT_VERIFIED', present:false };
+      return { status:'UNKNOWN', present:null, errorDigest:sha256(error instanceof Error ? error.message : String(error)) };
+    }
+  }
+  private writeEviction(current: JsonObject, state: string, phase: string, extras: JsonObject = {}): JsonObject {
+    const occurredAt = this.now();
+    const merged: JsonObject = { ...current, ...extras };
+    if (['REMOVING','VERIFYING_ABSENCE','REMOVED'].includes(state)) delete merged.error;
+    const candidate = validateReleaseRecord('RetentionEvictionV1', {
+      ...merged,
+      state,
+      sequence:Number(current.sequence) + 1,
+      updatedAt:occurredAt,
+    });
+    return this.options.store.applyMutation({
+      schemaId:'RetentionEvictionV1',
+      recordId:String(candidate.decisionId),
+      ownerPrincipal:String(candidate.ownerPrincipal),
+      expectedSequence:Number(current.sequence),
+      idempotencyKey:this.mutationKey(String(candidate.decisionId), String(candidate.sequence), state),
+      requestDigest:sha256(canonicalize(candidate)),
+      operation:'babyx.release.gc',
+      phase,
+      record:candidate,
+      occurredAt,
+      artifactReferences:[],
+      observationDigest:typeof candidate.observationDigest === 'string' ? candidate.observationDigest : undefined,
+    });
+  }
+  private createEviction(item: JsonObject, plan: JsonObject, owner: string, idempotencyKey: string): JsonObject {
+    const decisionId = `retention-${sha256(`${String(plan.planDigest)}:${String(item.objectId)}`).slice(0, 40)}`;
+    if (this.options.store.hasRecord('RetentionEvictionV1', decisionId)) {
+      const existing = this.options.store.getRecord('RetentionEvictionV1', decisionId);
+      if (existing.ownerPrincipal !== owner) throw new ReleaseGovernorError('release_wrong_principal', 'retention eviction owner does not match');
+      if (
+        existing.idempotencyKey !== idempotencyKey
+        || existing.planDigest !== plan.planDigest
+        || existing.artifactId !== item.objectId
+        || existing.expectedArtifactDigest !== item.artifactSha256
+      ) throw new ReleaseGovernorError('release_idempotency_conflict', 'retention eviction identity conflicts with the durable request');
+      return existing;
+    }
+    const requestedAt = this.now();
+    const identity: JsonObject = {
+      decisionId,
+      ownerPrincipal:owner,
+      artifactId:item.objectId,
+      objectId:item.objectId,
+      expectedArtifactDigest:item.artifactSha256,
+      retentionClass:item.retentionClass,
+      planDigest:plan.planDigest,
+      referenceScanDigest:plan.referenceDigest,
+      protectedReferenceResult:Number(item.referenceCount) === 0 ? 'UNPROTECTED' : 'PROTECTED',
+      protectedReferences:item.protectedReferences,
+      idempotencyKey,
+      requestedAction:'REMOVE',
+      requestedAt,
+    };
+    const requestDigest = sha256(canonicalize(identity));
+    const record = validateReleaseRecord('RetentionEvictionV1', {
+      schemaVersion:'1.0.0',
+      ...identity,
+      requestDigest,
+      sequence:1,
+      state:'REQUESTED',
+      updatedAt:requestedAt,
+    });
+    this.retentionFault('before_intent', { decisionId, artifactId:item.objectId });
+    const durable = this.options.store.applyMutation({
+      schemaId:'RetentionEvictionV1',
+      recordId:decisionId,
+      ownerPrincipal:owner,
+      expectedSequence:0,
+      idempotencyKey:this.mutationKey(decisionId, 'requested'),
+      requestDigest,
+      operation:'babyx.release.gc',
+      phase:'retention-intent',
+      record,
+      occurredAt:requestedAt,
+      artifactReferences:[],
+    });
+    this.retentionFault('after_intent', { decisionId, artifactId:item.objectId, sequence:durable.sequence });
+    return durable;
+  }
+  private blockedEviction(record: JsonObject, refs: ReturnType<ReleaseResourceGovernor['references']>, reason: string): JsonObject {
+    const protectedReferences = sortedUnique(refs.protected.get(String(record.artifactId)) ?? []);
+    return this.writeEviction(record, 'BLOCKED', 'retention-reference-check', {
+      removalReferenceScanDigest:refs.digest,
+      protectedReferenceResult:refs.uncertain ? 'UNCERTAIN' : 'PROTECTED',
+      protectedReferences,
+      observationDigest:sha256(canonicalize({ reason, referenceScanDigest:refs.digest, protectedReferences })),
+      error:{
+        code:'release_recovery_required',
+        message:reason,
+        retryable:false,
+        phase:'retention-reference-check',
+        productionImpact:'NONE',
+        detailsDigest:sha256(reason),
+      },
+    });
+  }
+  private ensureFinalRetentionDecision(eviction: JsonObject): JsonObject {
+    const decisionId = String(eviction.decisionId);
+    if (this.options.store.hasRecord('RetentionDecisionV1', decisionId)) {
+      const existing = this.options.store.getRecord('RetentionDecisionV1', decisionId);
+      if (
+        existing.ownerPrincipal !== eviction.ownerPrincipal
+        || existing.objectId !== eviction.artifactId
+        || existing.planDigest !== eviction.planDigest
+        || existing.executionState !== 'EXECUTED'
+      ) throw new ReleaseGovernorError('release_idempotency_conflict', 'terminal retention decision conflicts with durable eviction truth');
+      return existing;
+    }
+    const base: JsonObject = {
+      schemaVersion:'1.0.0',
+      decisionId,
+      ownerPrincipal:eviction.ownerPrincipal,
+      objectType:'ARTIFACT',
+      objectId:eviction.artifactId,
+      decision:'EVICT',
+      reasons:['unreferenced-cache-lru'],
+      referenceCount:0,
+      protectedReferences:[],
+      decidedAt:eviction.requestedAt,
+      planDigest:eviction.planDigest,
+      executionState:'EXECUTED',
+      sequence:1,
+      executedAt:eviction.removedAt,
+      bytesFreed:Number(eviction.bytesFreed ?? 0),
+    };
+    const decision = validateReleaseRecord('RetentionDecisionV1', { ...base, decisionDigest:sha256(canonicalize(base)) });
+    return this.options.store.applyMutation({
+      schemaId:'RetentionDecisionV1',
+      recordId:decisionId,
+      ownerPrincipal:String(eviction.ownerPrincipal),
+      expectedSequence:0,
+      idempotencyKey:this.mutationKey(decisionId, 'terminal-decision'),
+      requestDigest:sha256(canonicalize(decision)),
+      operation:'babyx.release.gc',
+      phase:'retention-terminal-evidence',
+      record:decision,
+      occurredAt:String(eviction.removedAt),
+      artifactReferences:[],
+      observationDigest:String(eviction.observationDigest),
+    });
+  }
+  private executeEviction(recordValue: JsonObject): JsonObject {
+    let record = validateReleaseRecord('RetentionEvictionV1', recordValue);
+    if (record.state === 'REMOVED') {
+      this.ensureFinalRetentionDecision(record);
+      return record;
+    }
+    if (record.state === 'BLOCKED' || record.state === 'FAILED') return record;
+
+    let observation = this.artifactPresence(String(record.artifactId), String(record.expectedArtifactDigest));
+    if (observation.status === 'IDENTITY_MISMATCH' || observation.status === 'PRESENT_CORRUPT') {
+      return this.writeEviction(record, 'FAILED', 'retention-identity-check', {
+        observationDigest:sha256(canonicalize(observation)),
+        error:{
+          code:'release_artifact_invalid',
+          message:'artifact identity or integrity does not match eviction intent',
+          retryable:false,
+          phase:'retention-identity-check',
+          productionImpact:'NONE',
+          detailsDigest:sha256(canonicalize(observation)),
+        },
+      });
+    }
+    if (observation.status === 'UNKNOWN') {
+      return this.writeEviction(record, 'AMBIGUOUS', 'retention-readback', {
+        observationDigest:sha256(canonicalize(observation)),
+        error:{
+          code:'release_recovery_required',
+          message:'artifact presence could not be proven',
+          retryable:true,
+          phase:'retention-readback',
+          productionImpact:'UNKNOWN',
+          detailsDigest:sha256(canonicalize(observation)),
+        },
+      });
+    }
+
+    if (observation.present === true) {
+      if (observation.pinned === true || observation.retentionClass !== 'CACHE') {
+        return this.writeEviction(record, 'BLOCKED', 'retention-class-recheck', {
+          observationDigest:sha256(canonicalize(observation)),
+          protectedReferenceResult:'PROTECTED',
+          error:{
+            code:'release_recovery_required',
+            message:'artifact retention metadata became protected before removal',
+            retryable:false,
+            phase:'retention-class-recheck',
+            productionImpact:'NONE',
+            detailsDigest:sha256(canonicalize(observation)),
+          },
+        });
+      }
+      const refs = this.references();
+      const protectedReferences = sortedUnique(refs.protected.get(String(record.artifactId)) ?? []);
+      if (refs.uncertain || protectedReferences.length > 0) {
+        return this.blockedEviction(record, refs, refs.uncertain ? 'authoritative reference scan is uncertain' : 'artifact became protected before removal');
+      }
+      record = this.writeEviction(record, 'REMOVING', 'retention-removing', {
+        removalReferenceScanDigest:refs.digest,
+        protectedReferenceResult:'UNPROTECTED',
+        protectedReferences,
+        removingAt:this.now(),
+      });
+      this.retentionFault('before_remove', { decisionId:record.decisionId, artifactId:record.artifactId, sequence:record.sequence });
+      let removal: JsonObject | undefined;
+      try {
+        removal = this.options.artifacts.remove(String(record.artifactId), String(record.expectedArtifactDigest));
+      } catch (error) {
+        observation = this.artifactPresence(String(record.artifactId), String(record.expectedArtifactDigest));
+        if (observation.present === true) {
+          return this.writeEviction(record, 'RECOVERY_REQUIRED', 'retention-remove-failed', {
+            observationDigest:sha256(canonicalize(observation)),
+            error:{
+              code:'release_recovery_required',
+              message:'artifact removal did not complete',
+              retryable:true,
+              phase:'retention-remove',
+              productionImpact:'NONE',
+              detailsDigest:sha256(error instanceof Error ? error.message : String(error)),
+            },
+          });
+        }
+        if (observation.present === null) {
+          return this.writeEviction(record, 'AMBIGUOUS', 'retention-remove-response-loss', {
+            observationDigest:sha256(canonicalize(observation)),
+            error:{
+              code:'release_response_lost',
+              message:'artifact removal response was lost and absence is unproven',
+              retryable:true,
+              phase:'retention-remove',
+              productionImpact:'UNKNOWN',
+              detailsDigest:sha256(error instanceof Error ? error.message : String(error)),
+            },
+          });
+        }
+      }
+      this.retentionFault('after_remove', { decisionId:record.decisionId, artifactId:record.artifactId, sequence:record.sequence });
+      record = this.writeEviction(record, 'VERIFYING_ABSENCE', 'retention-absence-requested', {
+        bytesFreed:Number(removal?.bytesFreed ?? record.bytesFreed ?? 0),
+      });
+    } else if (record.state !== 'VERIFYING_ABSENCE') {
+      record = this.writeEviction(record, 'VERIFYING_ABSENCE', 'retention-recovery-readback');
+    }
+
+    this.retentionFault('before_absence_verification', { decisionId:record.decisionId, artifactId:record.artifactId, sequence:record.sequence });
+    observation = this.artifactPresence(String(record.artifactId), String(record.expectedArtifactDigest));
+    this.retentionFault('during_absence_verification', { decisionId:record.decisionId, artifactId:record.artifactId, observation });
+    if (observation.status !== 'ABSENT_VERIFIED') {
+      const nextState = observation.present === true ? 'RECOVERY_REQUIRED' : 'AMBIGUOUS';
+      return this.writeEviction(record, nextState, 'retention-absence-unproven', {
+        observationDigest:sha256(canonicalize(observation)),
+        error:{
+          code:'release_recovery_required',
+          message:'positive artifact absence was not proven',
+          retryable:true,
+          phase:'retention-absence',
+          productionImpact:'UNKNOWN',
+          detailsDigest:sha256(canonicalize(observation)),
+        },
+      });
+    }
+    const observationDigest = sha256(canonicalize(observation));
+    this.retentionFault('after_absence_verification', { decisionId:record.decisionId, artifactId:record.artifactId, observationDigest });
+    this.retentionFault('before_terminal_persist', { decisionId:record.decisionId, artifactId:record.artifactId, sequence:record.sequence });
+    const removedAt = this.now();
+    record = this.writeEviction(record, 'REMOVED', 'retention-removed', {
+      absenceVerifiedAt:removedAt,
+      removedAt,
+      observationDigest,
+    });
+    this.ensureFinalRetentionDecision(record);
+    return record;
+  }
+  private evictionRecords(planDigest?: string): JsonObject[] {
+    return this.options.store.listRecordIdentities(10_000)
+      .filter((entry) => entry.schemaId === 'RetentionEvictionV1')
+      .map((entry) => this.options.store.getRecord(entry.schemaId, entry.recordId))
+      .filter((record) => planDigest === undefined || record.planDigest === planDigest)
+      .sort((left, right) => String(left.artifactId).localeCompare(String(right.artifactId)));
+  }
+  private validateEvictionReplay(records: readonly JsonObject[], owner: string, idempotencyKey: string): void {
+    for (const record of records) {
+      if (record.ownerPrincipal !== owner) throw new ReleaseGovernorError('release_wrong_principal', 'retention eviction belongs to a different principal');
+      if (record.idempotencyKey !== idempotencyKey) throw new ReleaseGovernorError('release_idempotency_conflict', 'retention eviction idempotency key conflicts with durable intent');
+    }
+  }
+  recoverRetentionEvictions(context: RuntimeExecutionContext, planDigest?: string): JsonObject {
+    const owner = identifier(context.subject, 'context.subject');
+    const idempotencyKey = identifier(context.idempotencyKey, 'context.idempotencyKey');
+    const records = this.evictionRecords(planDigest);
+    const selected = planDigest === undefined ? records.filter((record) => record.ownerPrincipal === owner) : records;
+    if (planDigest !== undefined) this.validateEvictionReplay(selected, owner, idempotencyKey);
+    const recovered = selected.map((record) => this.executeEviction(record));
+    return { operation:'babyx.release.gc.recover', ownerPrincipal:owner, planDigest, recovered };
+  }
+  gc(payloadValue: JsonObject, context: RuntimeExecutionContext): JsonObject {
+    const payload = strictObject(payloadValue, 'gc request', ['dryRun','limit','maxBytes','planDigest'], ['dryRun']);
+    if (payload.dryRun === true) return this.planGc({ ...(payload.limit === undefined ? {} : { limit:payload.limit }), ...(payload.maxBytes === undefined ? {} : { maxBytes:payload.maxBytes }) });
+    if (payload.dryRun !== false) throw new ReleaseGovernorError('release_invalid_request', 'dryRun must be boolean');
+    const owner = identifier(context.subject, 'context.subject');
+    const idempotencyKey = identifier(context.idempotencyKey, 'context.idempotencyKey');
+    if (typeof payload.planDigest !== 'string') throw new ReleaseGovernorError('release_stale_sequence', 'live GC requires the exact current dry-run plan digest');
+
+    let records = this.evictionRecords(payload.planDigest);
+    this.validateEvictionReplay(records, owner, idempotencyKey);
+    const currentPlan = this.planGc({ ...(payload.limit === undefined ? {} : { limit:payload.limit }), ...(payload.maxBytes === undefined ? {} : { maxBytes:payload.maxBytes }) });
+    if (currentPlan.planDigest === payload.planDigest) {
+      const evictionItems = (currentPlan.decisions as JsonObject[]).filter((item) => item.decision === 'EVICT');
+      for (const item of evictionItems) this.createEviction(item, currentPlan, owner, idempotencyKey);
+      records = this.evictionRecords(payload.planDigest);
+      this.validateEvictionReplay(records, owner, idempotencyKey);
+    } else if (records.length === 0) {
+      throw new ReleaseGovernorError('release_stale_sequence', 'live GC requires the exact current dry-run plan digest');
+    }
+
+    const executed = records.map((record) => {
+      const decision = this.executeEviction(record);
+      return { decision, removal:{ bytesFreed:Number(decision.bytesFreed ?? 0), state:decision.state } };
+    });
+    return {
+      ...(currentPlan.planDigest === payload.planDigest ? currentPlan : { operation:'babyx.release.gc', planDigest:payload.planDigest, recovered:true }),
+      dryRun:false,
+      destructiveActions:executed,
+      bytesFreed:executed.reduce((sum, item) => sum + Number(object(item.removal, 'removal').bytesFreed ?? 0), 0),
+    };
+  }
+
 }

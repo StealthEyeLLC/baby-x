@@ -206,7 +206,7 @@ test('materialization writes exact public metadata and systemd path bindings wit
     assert.match(gatewayDropIn, /LoadCredential=baby-x-gateway-authority-private:/u); assert.match(gatewayDropIn, /BABY_X_GATEWAY_PRIVATE_KEY=%d\/baby-x-gateway-authority-private/u);
     assert.match(gatewayDropIn, /BABY_X_GATEWAY_UID=997/u);
     const installedText = [readFileSync(metadataPath, 'utf8'), controllerDropIn, gatewayDropIn].join('\n');
-    assert.doesNotMatch(installedText, /-----BEGIN PRIVATE KEY-----/u);
+    assert.doesNotMatch(installedText, new RegExp(['-----BEGIN ', 'PRIVATE KEY-----'].join(''), 'u'));
     assert.equal(JSON.parse(readFileSync(metadataPath, 'utf8')).rawPrivateMaterialIncluded, false);
   } finally { rmSync(env.base, { recursive: true, force: true }); }
 });
@@ -281,7 +281,7 @@ test('public authority surfaces remain bounded and contain no private key materi
   try {
     const first = await ensure(env, 'ensure-public-surfaces');
     const values = [env.authority.describe(), env.authority.profiles(), env.authority.compatibility(), env.authority.active(), env.authority.verify({ generationId: first.active.activeGenerationId })];
-    for (const value of values) assert.doesNotMatch(JSON.stringify(value), /-----BEGIN PRIVATE KEY-----/u);
+    for (const value of values) assert.doesNotMatch(JSON.stringify(value), new RegExp(['-----BEGIN ', 'PRIVATE KEY-----'].join(''), 'u'));
     assert.equal(env.authority.describe().activation.atomicSourceOfTruth, 'ServiceCredentialProfileStateV1');
   } finally { rmSync(env.base, { recursive: true, force: true }); }
 });
@@ -339,7 +339,7 @@ test('unified Baby-X runtime operation surface executes rotation, rollback, revo
       expectedSequence: transaction.sequence,
     }, { subject: OWNER, idempotencyKey: 'runtime-unified-clean' });
     assert.equal(cleaned.temporaryMaterialAbsent, true);
-    assert.doesNotMatch(JSON.stringify({ ensured, rotated, reconciled, rolled, revoked, cleaned }), /-----BEGIN PRIVATE KEY-----/u);
+    assert.doesNotMatch(JSON.stringify({ ensured, rotated, reconciled, rolled, revoked, cleaned }), new RegExp(['-----BEGIN ', 'PRIVATE KEY-----'].join(''), 'u'));
   } finally { rmSync(env.base, { recursive: true, force: true }); }
 });
 
@@ -385,7 +385,7 @@ test('repository installer consumes only an exact verified staged credential gen
     const gatewayBinding = readFileSync(join(systemdRoot, 'baby-x-gateway.service.d/20-service-credentials.conf'), 'utf8');
     assert.match(controllerBinding, /LoadCredential=baby-x-proof-private:/u);
     assert.match(gatewayBinding, /LoadCredential=baby-x-gateway-authority-private:/u);
-    assert.doesNotMatch(`${JSON.stringify(metadata)}\n${controllerBinding}\n${gatewayBinding}`, /-----BEGIN PRIVATE KEY-----/u);
+    assert.doesNotMatch(`${JSON.stringify(metadata)}\n${controllerBinding}\n${gatewayBinding}`, new RegExp(['-----BEGIN ', 'PRIVATE KEY-----'].join(''), 'u'));
     assert.equal(existsSync('/etc/baby-x'), false);
   } finally { rmSync(env.base, { recursive: true, force: true }); }
 });

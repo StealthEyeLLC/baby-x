@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BabyXRuntime, FileManager, JobManager, sha256 } from '../../dist/runtime/core.js';
@@ -231,4 +231,38 @@ test('canonical documents defer generated facts and duplicate facades are absent
     'runtime/src/specification/scanner.ts',
     'runtime/src/specification/store.ts',
   ]) assert.equal(existsSync(facade), false);
+});
+
+
+test('failed record serialization removes its temporary file', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-record-temp-cleanup-'));
+  try {
+    const store = new DurableRecordStore(root);
+    const cyclic = { id: 'cyclic' };
+    cyclic.self = cyclic;
+    assert.throws(() => store.put('cyclic', cyclic), /circular|cyclic|maximum call stack/iu);
+    assert.deepEqual(readdirSync(join(root, 'records')), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('artifact content paths cannot escape the artifact authority root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-artifact-root-boundary-'));
+  const outside = mkdtempSync(join(tmpdir(), 'baby-x-artifact-outside-'));
+  try {
+    const outsideFile = join(outside, 'outside');
+    writeFileSync(outsideFile, 'outside', { mode: 0o600 });
+    symlinkSync(outsideFile, join(root, 'linked-outside'));
+    writeFileSync(join(root, 'index.json'), JSON.stringify({ artifacts: {
+      direct: { id: 'direct', name: 'direct', state: 'finalized', path: outsideFile, size: 7, sha256: '0000000000000000000000000000000000000000000000000000000000000000' },
+      linked: { id: 'linked', name: 'linked', state: 'finalized', path: join(root, 'linked-outside'), size: 7, sha256: '0000000000000000000000000000000000000000000000000000000000000000' },
+    } }), { mode: 0o600 });
+    const manager = new ArtifactManager(root);
+    assert.throws(() => manager.download('direct'), /escapes artifact root/u);
+    assert.throws(() => manager.abort('direct'), /escapes artifact root/u);
+    assert.throws(() => manager.download('linked'), /escapes artifact root/u);
+    assert.equal(readFileSync(outsideFile, 'utf8'), 'outside');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });

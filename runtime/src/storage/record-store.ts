@@ -19,11 +19,16 @@ function writeTemporary(path: string, value: JsonObject): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, 'wx', 0o600);
+  let complete = false;
   try {
     writeFileSync(fd, `${canonicalize(value)}\n`);
     fsyncSync(fd);
-  } finally { closeSync(fd); }
-  return temporary;
+    complete = true;
+    return temporary;
+  } finally {
+    closeSync(fd);
+    if (!complete) rmSync(temporary, { force: true });
+  }
 }
 
 function replaceDurably(path: string, value: JsonObject): void {

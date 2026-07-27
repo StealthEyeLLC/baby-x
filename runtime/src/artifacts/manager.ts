@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, closeSync, readFileSync, readSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, closeSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { type JsonObject } from '../core.ts';
 import { DurableRecordStore } from '../storage/record-store.ts';
 
@@ -33,6 +33,20 @@ export class ArtifactManager {
     this.importLegacy(join(root, 'index.json'));
   }
 
+  private contentPath(record: JsonObject): string {
+    if (typeof record.path !== 'string') throw new Error('artifact record path is invalid');
+    const root = realpathSync(this.root);
+    const candidate = resolve(record.path);
+    if (candidate === root || !candidate.startsWith(`${root}${sep}`)) throw new Error('artifact record path escapes artifact root');
+    const parent = realpathSync(dirname(candidate));
+    if (parent !== root && !parent.startsWith(`${root}${sep}`)) throw new Error('artifact record path escapes artifact root');
+    if (existsSync(candidate)) {
+      const observed = realpathSync(candidate);
+      if (observed === root || !observed.startsWith(`${root}${sep}`)) throw new Error('artifact record path escapes artifact root');
+    }
+    return candidate;
+  }
+
   private importLegacy(path: string): void {
     if (!existsSync(path)) return;
     let legacy: { artifacts?: Record<string, JsonObject> };
@@ -54,7 +68,7 @@ export class ArtifactManager {
     const record = this.get(id);
     if (record.state !== 'uploading') throw new Error('artifact is immutable');
     if (offset + data.length > MAX_ARTIFACT_BYTES) throw new Error('artifact exceeds maximum size');
-    const fd = openSync(String(record.path), 'a+', 0o600);
+    const fd = openSync(this.contentPath(record), 'a+', 0o600);
     try { writeSync(fd, data, 0, data.length, offset); fsyncSync(fd); } finally { closeSync(fd); }
     return { id, offset: offset + data.length };
   }
@@ -64,10 +78,10 @@ export class ArtifactManager {
     if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) throw new Error('artifact expected SHA-256 is invalid');
     const record = this.get(id);
     if (record.state !== 'uploading') return this.verify(id);
-    const observed = hashFile(String(record.path));
+    const observed = hashFile(this.contentPath(record));
     if (observed.size !== expectedSize || observed.sha256 !== expectedSha256) throw new Error('artifact integrity mismatch');
     const finalPath = join(this.root, observed.sha256);
-    if (!existsSync(finalPath)) renameSync(String(record.path), finalPath); else rmSync(String(record.path), { force: true });
+    if (!existsSync(finalPath)) renameSync(this.contentPath(record), finalPath); else rmSync(this.contentPath(record), { force: true });
     const artifactDirectory = openSync(this.root, 'r');
     try { fsyncSync(artifactDirectory); } finally { closeSync(artifactDirectory); }
     const finalized = { ...record, state: 'finalized', path: finalPath, size: observed.size, sha256: observed.sha256, finalizedAt: new Date().toISOString() };
@@ -79,8 +93,8 @@ export class ArtifactManager {
     const source = hashFile(sourcePath);
     if (source.size > MAX_ARTIFACT_BYTES) throw new Error('artifact source exceeds maximum size');
     const record = this.begin(name, metadata);
-    copyFileSync(sourcePath, String(record.path));
-    const fd = openSync(String(record.path), 'r');
+    copyFileSync(sourcePath, this.contentPath(record));
+    const fd = openSync(this.contentPath(record), 'r');
     try { fsyncSync(fd); } finally { closeSync(fd); }
     return this.finalize(String(record.id), source.size, source.sha256);
   }
@@ -110,7 +124,7 @@ export class ArtifactManager {
 
   abort(id: string): void {
     const record = this.get(id);
-    rmSync(String(record.path), { force: true });
+    rmSync(this.contentPath(record), { force: true });
     this.records.remove(id);
   }
 
@@ -119,7 +133,7 @@ export class ArtifactManager {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_CHUNK) throw new Error(`artifact download limit must be between 0 and ${MAX_CHUNK}`);
     const record = this.get(id);
     if (record.state !== 'finalized') throw new Error('artifact is not finalized');
-    const path = String(record.path);
+    const path = this.contentPath(record);
     const size = statSync(path).size;
     const count = Math.max(0, Math.min(limit, size - offset));
     const buffer = Buffer.alloc(count);
@@ -131,8 +145,9 @@ export class ArtifactManager {
   verify(id: string): JsonObject {
     const record = this.get(id);
     if (record.state !== 'finalized' || typeof record.path !== 'string' || typeof record.size !== 'number' || typeof record.sha256 !== 'string') return { id, valid: false, reason: 'artifact is not finalized' };
-    if (!existsSync(record.path)) return { id, valid: false, reason: 'artifact content is absent' };
-    const observed = hashFile(record.path);
+    const path = this.contentPath(record);
+    if (!existsSync(path)) return { id, valid: false, reason: 'artifact content is absent' };
+    const observed = hashFile(path);
     return { id, valid: observed.size === record.size && observed.sha256 === record.sha256, expectedSize: record.size, observedSize: observed.size, expectedSha256: record.sha256, observedSha256: observed.sha256 };
   }
 }

@@ -144,7 +144,32 @@ class FakeObservation {
   authority = 'release-observation'; samples = [{ observedAt: NOW, signals: { readiness: true, publicProbe: true }, errorRate: 0, latencyMs: 10, processRestarts: 0 }];
   async observe() { return structuredClone(this.samples.shift() ?? { observedAt: NOW, signals: { readiness: true, publicProbe: true }, errorRate: 0, latencyMs: 10, processRestarts: 0 }); }
 }
-class FakeDrain { authority = 'release-drain'; result = { status: 'SUCCEEDED', protocols: { keepAlive: true, websocket: true, sse: true, worker: false, scheduler: false }, bounded: true }; async drain() { return structuredClone(this.result); } }
+class FakeDrain {
+  authority = 'release-drain';
+  result = { classification: 'DRAINED', drained: true, protocols: { keepAlive: true, websocket: true, sse: true, worker: false, scheduler: false }, bounded: true, timeoutMs: 45000 };
+  async drain(record) {
+    const target = structuredClone(record.drainStatus.target);
+    const observedAt = NOW;
+    const observationBase = {
+      schemaVersion: '1.0.0',
+      observationSequence: 1,
+      observedAt,
+      ...target,
+      providerStatus: 'AVAILABLE',
+      activeKeepAliveConnections: 0,
+      activeWebSockets: 0,
+      activeSseStreams: 0,
+      activeLongRunningRequests: 0,
+      activeWorkerTasks: 0,
+      queuedWorkerTasks: 0,
+      activeSchedulerWork: 0,
+      queuedSchedulerWork: 0,
+      applicationStatus: 'DRAINED',
+    };
+    const observation = { ...observationBase, observationDigest: sha256(canonicalize(observationBase)) };
+    return { schemaVersion: '1.0.0', ...structuredClone(this.result), target, observations: [observation], observationCount: 1, finalObservationDigest: observation.observationDigest, completedAt: observedAt };
+  }
+}
 class FakeProof { authority = 'existing-babyx-proof'; fail = false; create(requestId, operation, ok, startedAt, result) { if (this.fail) return { error: { code: 'proof-unavailable' } }; return { requestId, operation, ok, startedAt, resultDigest: sha256(canonicalize(result)), proofId: `proof-${sha256(operation).slice(0, 12)}` }; } }
 
 function fixture(options = {}) {

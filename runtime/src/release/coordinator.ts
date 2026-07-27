@@ -99,6 +99,40 @@ export interface ReleaseObservationAuthority {
   observe(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): Promise<JsonObject>;
 }
 
+export type DrainClassification =
+  | 'DRAINING'
+  | 'DRAINED'
+  | 'TIMED_OUT'
+  | 'UNSUPPORTED'
+  | 'UNKNOWN'
+  | 'IDENTITY_MISMATCH'
+  | 'PROVIDER_FAILED'
+  | 'FORCED_TERMINATION_REQUIRED';
+
+export interface NormalizedDrainPolicy extends JsonObject {
+  schemaVersion: '1.0.0';
+  timeoutMs: number;
+  intervalMs: number;
+  maximumSamples: number;
+  keepAlive: boolean;
+  websocket: boolean;
+  sse: boolean;
+  worker: boolean;
+  scheduler: boolean;
+  keepAliveTimeoutMs: number;
+  websocketMaximumLifetimeMs: number;
+  sseMaximumLifetimeMs: number;
+  workerGracePeriodMs: number;
+  schedulerHandoffRequired: boolean;
+  forceTerminationAfterDeadline: boolean;
+  rollbackBehavior: 'RESTORE_AND_CANCEL_DRAIN' | 'PRESERVE_DRAINING';
+}
+
+export interface ReleaseDrainObservationProvider {
+  readonly authority: 'release-drain-observation';
+  observe(target: JsonObject, policy: NormalizedDrainPolicy, context: RuntimeExecutionContext): Promise<JsonObject>;
+}
+
 export interface ReleaseDrainAuthority {
   readonly authority: 'release-drain';
   drain(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): Promise<JsonObject>;
@@ -162,7 +196,7 @@ export interface NormalizedDeploymentRequest extends JsonObject {
   route: JsonObject;
   approvalPolicy: NormalizedApprovalPolicy;
   observationPolicy: NormalizedObservationPolicy;
-  drainPolicy: JsonObject;
+  drainPolicy: NormalizedDrainPolicy;
   controller: JsonObject;
   triggerSource: 'MANUAL' | 'GITHUB' | 'SCHEDULED' | 'RECONCILIATION';
   triggerIdentity: JsonObject;
@@ -285,6 +319,110 @@ function normalizeApprovalPolicy(value: unknown): NormalizedApprovalPolicy {
   return { mode, expiresAfterMs, ...(requiredPrincipal === undefined ? {} : { requiredPrincipal }) };
 }
 
+export function normalizeDrainPolicy(value: unknown): NormalizedDrainPolicy {
+  const input = strictObject(value ?? {}, 'drainPolicy', [
+    'schemaVersion', 'timeoutMs', 'intervalMs', 'maximumSamples', 'keepAlive', 'websocket', 'sse', 'worker', 'scheduler',
+    'keepAliveTimeoutMs', 'websocketMaximumLifetimeMs', 'sseMaximumLifetimeMs', 'workerGracePeriodMs',
+    'schedulerHandoffRequired', 'forceTerminationAfterDeadline', 'rollbackBehavior',
+  ]);
+  if (input.schemaVersion !== undefined && input.schemaVersion !== '1.0.0') throw new ReleaseCoordinatorError('release_invalid_request', 'drainPolicy.schemaVersion is unsupported');
+  const boolean = (entry: unknown, field: string, defaultValue: boolean): boolean => {
+    if (entry === undefined) return defaultValue;
+    if (typeof entry !== 'boolean') throw new ReleaseCoordinatorError('release_invalid_request', `${field} must be boolean`);
+    return entry;
+  };
+  const rollbackBehavior = input.rollbackBehavior === undefined || input.rollbackBehavior === 'RESTORE_AND_CANCEL_DRAIN'
+    ? 'RESTORE_AND_CANCEL_DRAIN'
+    : input.rollbackBehavior === 'PRESERVE_DRAINING'
+      ? 'PRESERVE_DRAINING'
+      : (() => { throw new ReleaseCoordinatorError('release_invalid_request', 'drainPolicy.rollbackBehavior is invalid'); })();
+  return {
+    schemaVersion:'1.0.0',
+    timeoutMs:input.timeoutMs === undefined ? 45_000 : integer(input.timeoutMs, 'drainPolicy.timeoutMs', 1, 3_600_000),
+    intervalMs:input.intervalMs === undefined ? 250 : integer(input.intervalMs, 'drainPolicy.intervalMs', 1, 60_000),
+    maximumSamples:input.maximumSamples === undefined ? 200 : integer(input.maximumSamples, 'drainPolicy.maximumSamples', 1, 1_000),
+    keepAlive:boolean(input.keepAlive, 'drainPolicy.keepAlive', true),
+    websocket:boolean(input.websocket, 'drainPolicy.websocket', true),
+    sse:boolean(input.sse, 'drainPolicy.sse', true),
+    worker:boolean(input.worker, 'drainPolicy.worker', false),
+    scheduler:boolean(input.scheduler, 'drainPolicy.scheduler', false),
+    keepAliveTimeoutMs:input.keepAliveTimeoutMs === undefined ? 5_000 : integer(input.keepAliveTimeoutMs, 'drainPolicy.keepAliveTimeoutMs', 0, 3_600_000),
+    websocketMaximumLifetimeMs:input.websocketMaximumLifetimeMs === undefined ? 30_000 : integer(input.websocketMaximumLifetimeMs, 'drainPolicy.websocketMaximumLifetimeMs', 0, 86_400_000),
+    sseMaximumLifetimeMs:input.sseMaximumLifetimeMs === undefined ? 30_000 : integer(input.sseMaximumLifetimeMs, 'drainPolicy.sseMaximumLifetimeMs', 0, 86_400_000),
+    workerGracePeriodMs:input.workerGracePeriodMs === undefined ? 30_000 : integer(input.workerGracePeriodMs, 'drainPolicy.workerGracePeriodMs', 0, 86_400_000),
+    schedulerHandoffRequired:boolean(input.schedulerHandoffRequired, 'drainPolicy.schedulerHandoffRequired', false),
+    forceTerminationAfterDeadline:boolean(input.forceTerminationAfterDeadline, 'drainPolicy.forceTerminationAfterDeadline', false),
+    rollbackBehavior,
+  };
+}
+
+
+function normalizeDrainObservation(value: unknown, expectedSequence: number): JsonObject {
+  const input = strictObject(value, 'drain observation', [
+    'schemaVersion', 'observationSequence', 'observedAt', 'serviceId', 'slotId', 'releaseId', 'unitIdentity',
+    'processIdentityDigest', 'routeGeneration', 'providerStatus', 'activeKeepAliveConnections', 'activeWebSockets',
+    'activeSseStreams', 'activeLongRunningRequests', 'activeWorkerTasks', 'queuedWorkerTasks', 'activeSchedulerWork',
+    'queuedSchedulerWork', 'applicationStatus', 'observationDigest',
+  ], [
+    'schemaVersion', 'observationSequence', 'observedAt', 'serviceId', 'slotId', 'releaseId', 'unitIdentity',
+    'processIdentityDigest', 'routeGeneration', 'providerStatus', 'activeKeepAliveConnections', 'activeWebSockets',
+    'activeSseStreams', 'activeLongRunningRequests', 'activeWorkerTasks', 'queuedWorkerTasks', 'activeSchedulerWork',
+    'queuedSchedulerWork',
+  ]);
+  if (input.schemaVersion !== '1.0.0') throw new ReleaseCoordinatorError('release_invalid_request', 'drain observation schemaVersion is unsupported');
+  const observationSequence = integer(input.observationSequence, 'drain observation.observationSequence', 1, Number.MAX_SAFE_INTEGER);
+  if (observationSequence !== expectedSequence) throw new ReleaseCoordinatorError('release_stale_sequence', 'drain observation sequence does not match the durable observation sequence');
+  const providerStatus = input.providerStatus === 'AVAILABLE' || input.providerStatus === 'UNAVAILABLE' || input.providerStatus === 'FAILED' || input.providerStatus === 'UNKNOWN'
+    ? input.providerStatus
+    : (() => { throw new ReleaseCoordinatorError('release_invalid_request', 'drain observation providerStatus is invalid'); })();
+  const applicationStatus = input.applicationStatus === undefined
+    ? undefined
+    : input.applicationStatus === 'DRAINING' || input.applicationStatus === 'DRAINED' || input.applicationStatus === 'FAILED' || input.applicationStatus === 'UNKNOWN'
+      ? input.applicationStatus
+      : (() => { throw new ReleaseCoordinatorError('release_invalid_request', 'drain observation applicationStatus is invalid'); })();
+  const normalized: JsonObject = {
+    schemaVersion:'1.0.0',
+    observationSequence,
+    observedAt:timestamp(input.observedAt, 'drain observation.observedAt'),
+    serviceId:identifier(input.serviceId, 'drain observation.serviceId'),
+    slotId:identifier(input.slotId, 'drain observation.slotId'),
+    releaseId:identifier(input.releaseId, 'drain observation.releaseId'),
+    unitIdentity:text(input.unitIdentity, 'drain observation.unitIdentity', 256),
+    processIdentityDigest:digest(input.processIdentityDigest, 'drain observation.processIdentityDigest'),
+    routeGeneration:digest(input.routeGeneration, 'drain observation.routeGeneration'),
+    providerStatus,
+    activeKeepAliveConnections:integer(input.activeKeepAliveConnections, 'drain observation.activeKeepAliveConnections', 0, 1_000_000_000),
+    activeWebSockets:integer(input.activeWebSockets, 'drain observation.activeWebSockets', 0, 1_000_000_000),
+    activeSseStreams:integer(input.activeSseStreams, 'drain observation.activeSseStreams', 0, 1_000_000_000),
+    activeLongRunningRequests:integer(input.activeLongRunningRequests, 'drain observation.activeLongRunningRequests', 0, 1_000_000_000),
+    activeWorkerTasks:integer(input.activeWorkerTasks, 'drain observation.activeWorkerTasks', 0, 1_000_000_000),
+    queuedWorkerTasks:integer(input.queuedWorkerTasks, 'drain observation.queuedWorkerTasks', 0, 1_000_000_000),
+    activeSchedulerWork:integer(input.activeSchedulerWork, 'drain observation.activeSchedulerWork', 0, 1_000_000_000),
+    queuedSchedulerWork:integer(input.queuedSchedulerWork, 'drain observation.queuedSchedulerWork', 0, 1_000_000_000),
+    ...(applicationStatus === undefined ? {} : { applicationStatus }),
+  };
+  const observationDigest = sha256(canonicalize(normalized));
+  if (input.observationDigest !== undefined && digest(input.observationDigest, 'drain observation.observationDigest') !== observationDigest) {
+    throw new ReleaseCoordinatorError('release_identity_mismatch', 'drain observation digest does not match canonical observation bytes');
+  }
+  return { ...normalized, observationDigest };
+}
+
+function drainWorkState(observation: JsonObject, policy: NormalizedDrainPolicy): { known: boolean; remaining: number; details: JsonObject } {
+  const details: JsonObject = {
+    keepAliveConnections:policy.keepAlive ? integer(observation.activeKeepAliveConnections, 'drain observation.activeKeepAliveConnections', 0) : 0,
+    webSockets:policy.websocket ? integer(observation.activeWebSockets, 'drain observation.activeWebSockets', 0) : 0,
+    sseStreams:policy.sse ? integer(observation.activeSseStreams, 'drain observation.activeSseStreams', 0) : 0,
+    longRunningRequests:integer(observation.activeLongRunningRequests, 'drain observation.activeLongRunningRequests', 0),
+    activeWorkerTasks:policy.worker ? integer(observation.activeWorkerTasks, 'drain observation.activeWorkerTasks', 0) : 0,
+    queuedWorkerTasks:policy.worker ? integer(observation.queuedWorkerTasks, 'drain observation.queuedWorkerTasks', 0) : 0,
+    activeSchedulerWork:policy.scheduler || policy.schedulerHandoffRequired ? integer(observation.activeSchedulerWork, 'drain observation.activeSchedulerWork', 0) : 0,
+    queuedSchedulerWork:policy.scheduler || policy.schedulerHandoffRequired ? integer(observation.queuedSchedulerWork, 'drain observation.queuedSchedulerWork', 0) : 0,
+  };
+  const remaining = Object.values(details).reduce((sum, value) => sum + Number(value), 0);
+  return { known:observation.providerStatus === 'AVAILABLE', remaining, details };
+}
+
 function normalizeObservationPolicy(value: unknown): NormalizedObservationPolicy {
   const input = strictObject(value ?? {}, 'observationPolicy', [
     'minimumDurationMs', 'minimumSamples', 'consecutiveFailureThreshold', 'recoverySamples', 'cooldownMs',
@@ -385,7 +523,7 @@ export function normalizeDeploymentRequest(value: unknown, ownerPrincipal: strin
     route: normalizedJson(input.route, 'route'),
     approvalPolicy: normalizeApprovalPolicy(input.approvalPolicy),
     observationPolicy: normalizeObservationPolicy(input.observationPolicy),
-    drainPolicy: input.drainPolicy === undefined ? {} : normalizedJson(input.drainPolicy, 'drainPolicy'),
+    drainPolicy: normalizeDrainPolicy(input.drainPolicy),
     controller: normalizedJson(input.controller, 'controller'),
     triggerSource,
     triggerIdentity: input.triggerIdentity === undefined ? { kind: triggerSource } : normalizedJson(input.triggerIdentity, 'triggerIdentity'),
@@ -1182,23 +1320,72 @@ export class ReleaseCoordinatorService {
     return this.transition(record, 'DRAINING_PREVIOUS', request.ownerPrincipal, 'observation-passed', `observe-pass-${sha256(String(record.deploymentId)).slice(0, 40)}`, { observationResults: samples, observationState: evaluation, observationCompletedAt: this.now() });
   }
 
-  private async drainPrevious(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): Promise<JsonObject> {
+  private async drainPrevious(recordValue: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): Promise<JsonObject> {
+    let record = recordValue;
     if (request.route.mode !== 'DIRECT') {
       return this.transition(record, 'FINALIZING', request.ownerPrincipal, 'non-direct-route-retained', `finalizing-${sha256(String(record.deploymentId)).slice(0, 40)}`, {
-        drainStatus: { status: 'NOT_APPLICABLE', routeMode: request.route.mode, priorProductionSlotRetained: true },
-        cleanup: { required: false, completed: true, priorSlotRetained: true, candidateActive: false, candidateRouted: true },
+        drainStatus: { schemaVersion:'1.0.0', classification:'NOT_APPLICABLE', drained:false, routeMode:request.route.mode, priorProductionSlotRetained:true, observations:[], observationCount:0 },
+        cleanup: { required:false, completed:true, priorSlotRetained:true, candidateActive:false, candidateRouted:true },
       });
     }
-    const drain = await this.options.drain.drain(record, request, context);
-    if (drain.status !== 'SUCCEEDED' && drain.status !== 'NOT_APPLICABLE') return this.recovery(record, request.ownerPrincipal, 'drain-obstructed', new ReleaseCoordinatorError('release_drain_failed', 'previous slot drain did not complete'), { drainStatus: drain });
-    if (record.priorKnownGoodSlotId !== undefined) {
-      const prior = this.options.slots.getSlot({ serviceId: request.serviceId, slotId: record.priorKnownGoodSlotId }, context).slot as JsonObject;
-      if (prior.state === 'DRAINING') {
-        const stopped = await this.options.slots.stop({ serviceId: request.serviceId, slotId: record.priorKnownGoodSlotId, expectedSequence: prior.sequence }, { ...context, idempotencyKey: `prior-stop-${sha256(String(record.deploymentId)).slice(0, 40)}` });
-        if (stopped.state !== 'STOPPED') return this.recovery(record, request.ownerPrincipal, 'prior-stop-unverified', new ReleaseCoordinatorError('release_cleanup_failed', 'prior slot stop was not positively verified'), { drainStatus: drain });
-      }
+    if (record.priorKnownGoodSlotId === undefined) {
+      return this.transition(record, 'FINALIZING', request.ownerPrincipal, 'no-prior-slot-to-drain', `finalizing-no-prior-${sha256(String(record.deploymentId)).slice(0, 32)}`, {
+        drainStatus: { schemaVersion:'1.0.0', classification:'NOT_APPLICABLE', drained:false, reason:'NO_PRIOR_SLOT', observations:[], observationCount:0 },
+        cleanup: { required:false, completed:true, priorSlotRetained:false, candidateActive:true },
+      });
     }
-    return this.transition(record, 'FINALIZING', request.ownerPrincipal, 'drain-complete', `finalizing-${sha256(String(record.deploymentId)).slice(0, 40)}`, { drainStatus: drain, cleanup: { required: true, completed: true, priorSlotRetained: true, candidateActive: true } });
+
+    const existingDrain = record.drainStatus === undefined ? undefined : object(record.drainStatus, 'record.drainStatus');
+    if (existingDrain?.target === undefined || existingDrain.startedAt === undefined || existingDrain.deadline === undefined || existingDrain.policyDigest === undefined) {
+      const prior = this.options.slots.getSlot({ serviceId:request.serviceId, slotId:record.priorKnownGoodSlotId }, context).slot as JsonObject;
+      const route = object(record.routeRecord, 'record.routeRecord');
+      const observedProcessIdentity = object(prior.observedProcessIdentity, 'priorSlot.observedProcessIdentity');
+      const startedAt = this.now();
+      const target: JsonObject = {
+        serviceId:request.serviceId,
+        slotId:identifier(record.priorKnownGoodSlotId, 'record.priorKnownGoodSlotId'),
+        releaseId:identifier(record.priorKnownGoodReleaseId ?? prior.releaseId, 'record.priorKnownGoodReleaseId'),
+        unitIdentity:text(prior.systemdUnit, 'priorSlot.systemdUnit', 256),
+        processIdentityDigest:sha256(canonicalize(observedProcessIdentity)),
+        routeGeneration:sha256(canonicalize({
+          routeId:route.routeId,
+          sequence:route.sequence,
+          activeConfigReadbackDigest:route.activeConfigReadbackDigest ?? null,
+          observedActiveUpstream:route.observedActiveUpstream ?? null,
+        })),
+      };
+      const intent: JsonObject = {
+        schemaVersion:'1.0.0',
+        classification:'DRAINING',
+        drained:false,
+        startedAt,
+        deadline:new Date(Date.parse(startedAt) + request.drainPolicy.timeoutMs).toISOString(),
+        nextObservationAt:startedAt,
+        policyDigest:sha256(canonicalize(request.drainPolicy)),
+        target,
+        observations:[],
+        observationCount:0,
+        providerConfigured:true,
+      };
+      record = this.transition(record, 'DRAINING_PREVIOUS', request.ownerPrincipal, 'drain-intent-persisted', `drain-intent-${sha256(String(record.deploymentId)).slice(0, 40)}`, { drainStatus:intent });
+    }
+
+    const drain = await this.options.drain.drain(record, request, context);
+    const classification = String(drain.classification ?? 'UNKNOWN');
+    if (classification === 'DRAINING') {
+      if (canonicalize(drain) === canonicalize(record.drainStatus)) return record;
+      return this.transition(record, 'DRAINING_PREVIOUS', request.ownerPrincipal, 'drain-observation-persisted', `drain-observe-${sha256(`${record.deploymentId}:${drain.observationCount ?? 0}`).slice(0, 40)}`, { drainStatus:drain });
+    }
+    if (classification !== 'DRAINED' || drain.drained !== true || !Array.isArray(drain.observations) || drain.observations.length === 0) {
+      const timeout = classification === 'TIMED_OUT' || classification === 'FORCED_TERMINATION_REQUIRED';
+      return this.recovery(record, request.ownerPrincipal, 'drain-obstructed', new ReleaseCoordinatorError(timeout ? 'release_drain_timeout' : 'release_drain_failed', 'previous slot drain did not produce positively observed quiescence', { classification }), { drainStatus:drain }, timeout ? 'release_drain_timeout' : 'release_drain_failed');
+    }
+    const prior = this.options.slots.getSlot({ serviceId:request.serviceId, slotId:record.priorKnownGoodSlotId }, context).slot as JsonObject;
+    if (prior.state === 'DRAINING') {
+      const stopped = await this.options.slots.stop({ serviceId:request.serviceId, slotId:record.priorKnownGoodSlotId, expectedSequence:prior.sequence }, { ...context, idempotencyKey: `prior-stop-${sha256(String(record.deploymentId)).slice(0, 40)}` });
+      if (stopped.state !== 'STOPPED') return this.recovery(record, request.ownerPrincipal, 'prior-stop-unverified', new ReleaseCoordinatorError('release_cleanup_failed', 'prior slot stop was not positively verified'), { drainStatus:drain });
+    }
+    return this.transition(record, 'FINALIZING', request.ownerPrincipal, 'drain-complete', `finalizing-${sha256(String(record.deploymentId)).slice(0, 40)}`, { drainStatus:drain, cleanup: { required:true, completed:true, priorSlotRetained:true, candidateActive:true } });
   }
 
   private finalizeSuccess(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): JsonObject {
@@ -1496,23 +1683,100 @@ export class RouteSlotObservationAuthority implements ReleaseObservationAuthorit
   }
 }
 
+export interface BoundedDrainAuthorityOptions {
+  provider?: ReleaseDrainObservationProvider;
+  now?: () => string;
+}
+
 export class BoundedDrainAuthority implements ReleaseDrainAuthority {
   readonly authority = 'release-drain' as const;
-  constructor(private readonly now: () => string = () => new Date().toISOString()) {}
-  async drain(record: JsonObject, request: NormalizedDeploymentRequest): Promise<JsonObject> {
+  private readonly provider?: ReleaseDrainObservationProvider;
+  private readonly now: () => string;
+  constructor(options: BoundedDrainAuthorityOptions | (() => string) = {}) {
+    const normalized = typeof options === 'function' ? { now:options } : options;
+    this.provider = normalized.provider;
+    this.now = normalized.now ?? (() => new Date().toISOString());
+  }
+  async drain(record: JsonObject, request: NormalizedDeploymentRequest, context: RuntimeExecutionContext): Promise<JsonObject> {
     const policy = request.drainPolicy;
-    const timeoutMs = policy.timeoutMs === undefined ? 45_000 : integer(policy.timeoutMs, 'drainPolicy.timeoutMs', 0, 300_000);
+    if (record.priorKnownGoodSlotId === undefined) return { schemaVersion:'1.0.0', classification:'NOT_APPLICABLE', drained:false, reason:'NO_PRIOR_SLOT', observations:[], observationCount:0 };
+    const intent = object(record.drainStatus, 'record.drainStatus');
+    const target = object(intent.target, 'record.drainStatus.target');
+    const startedAt = timestamp(intent.startedAt, 'record.drainStatus.startedAt');
+    const deadline = timestamp(intent.deadline, 'record.drainStatus.deadline');
+    const policyDigest = digest(intent.policyDigest, 'record.drainStatus.policyDigest');
+    if (policyDigest !== sha256(canonicalize(policy))) throw new ReleaseCoordinatorError('release_identity_mismatch', 'durable drain policy digest changed');
+    const observations = Array.isArray(intent.observations) ? intent.observations.map((entry, index) => object(entry, `record.drainStatus.observations[${index}]`)).slice(-256) : [];
+    const observationCount = intent.observationCount === undefined ? observations.length : integer(intent.observationCount, 'record.drainStatus.observationCount', observations.length, Number.MAX_SAFE_INTEGER);
+    const currentTime = this.now();
+    const currentTimeMs = Date.parse(currentTime);
+    const deadlineMs = Date.parse(deadline);
+    const terminalTimeout = (): JsonObject => ({
+      ...intent,
+      classification:policy.forceTerminationAfterDeadline ? 'FORCED_TERMINATION_REQUIRED' : 'TIMED_OUT',
+      drained:false,
+      completedAt:currentTime,
+      observations,
+      observationCount,
+      providerConfigured:this.provider !== undefined,
+    });
+    if (currentTimeMs >= deadlineMs || observationCount >= policy.maximumSamples) return terminalTimeout();
+    if (this.provider === undefined) return { ...intent, classification:'UNSUPPORTED', drained:false, completedAt:currentTime, observations, observationCount, providerConfigured:false };
+    if (intent.nextObservationAt !== undefined && currentTimeMs < Date.parse(timestamp(intent.nextObservationAt, 'record.drainStatus.nextObservationAt'))) return { ...intent, observations, observationCount, providerConfigured:true };
+
+    let observation: JsonObject;
+    try { observation = normalizeDrainObservation(await this.provider.observe(target, policy, context), observationCount + 1); }
+    catch (error) {
+      return {
+        ...intent,
+        classification:'PROVIDER_FAILED',
+        drained:false,
+        completedAt:this.now(),
+        observations,
+        observationCount,
+        providerConfigured:true,
+        error:{
+          code:'release_provider_failed',
+          message:'drain observation provider failed',
+          retryable:true,
+          phase:'drain-observe',
+          productionImpact:'UNKNOWN',
+          detailsDigest:sha256(error instanceof Error ? error.message : String(error)),
+        },
+      };
+    }
+    const nextObservations = [...observations, observation].slice(-256);
+    const nextCount = observationCount + 1;
+    const base: JsonObject = {
+      ...intent,
+      observations:nextObservations,
+      observationCount:nextCount,
+      finalObservationDigest:observation.observationDigest,
+      providerConfigured:true,
+    };
+    if (
+      observation.serviceId !== target.serviceId || observation.slotId !== target.slotId || observation.releaseId !== target.releaseId
+      || observation.unitIdentity !== target.unitIdentity || observation.processIdentityDigest !== target.processIdentityDigest
+      || observation.routeGeneration !== target.routeGeneration
+    ) return { ...base, classification:'IDENTITY_MISMATCH', drained:false, completedAt:this.now() };
+    if (observation.providerStatus === 'UNAVAILABLE' || observation.providerStatus === 'FAILED') return { ...base, classification:'PROVIDER_FAILED', drained:false, completedAt:this.now() };
+    if (observation.providerStatus === 'UNKNOWN') return { ...base, classification:'UNKNOWN', drained:false, completedAt:this.now() };
+    const work = drainWorkState(observation, policy);
+    if (observation.applicationStatus === 'FAILED') return { ...base, classification:'PROVIDER_FAILED', drained:false, completedAt:this.now(), remainingWork:work.details };
+    if (observation.applicationStatus === 'UNKNOWN') return { ...base, classification:'UNKNOWN', drained:false, completedAt:this.now(), remainingWork:work.details };
+    if (work.known && work.remaining === 0 && (observation.applicationStatus === undefined || observation.applicationStatus === 'DRAINED')) {
+      return { ...base, classification:'DRAINED', drained:true, completedAt:this.now(), remainingWork:work.details };
+    }
+    const observedAtMs = Date.parse(this.now());
+    if (observedAtMs >= deadlineMs || nextCount >= policy.maximumSamples) {
+      return { ...base, classification:policy.forceTerminationAfterDeadline ? 'FORCED_TERMINATION_REQUIRED' : 'TIMED_OUT', drained:false, completedAt:this.now(), remainingWork:work.details };
+    }
     return {
-      status: record.priorKnownGoodSlotId === undefined ? 'NOT_APPLICABLE' : 'SUCCEEDED',
-      startedAt: this.now(), completedAt: this.now(), timeoutMs,
-      protocols: {
-        keepAlive: policy.keepAlive !== false,
-        websocket: policy.websocket !== false,
-        sse: policy.sse !== false,
-        worker: policy.worker === true,
-        scheduler: policy.scheduler === true,
-      },
-      bounded: true,
+      ...base,
+      classification:'DRAINING',
+      drained:false,
+      nextObservationAt:new Date(observedAtMs + policy.intervalMs).toISOString(),
+      remainingWork:work.details,
     };
   }
 }

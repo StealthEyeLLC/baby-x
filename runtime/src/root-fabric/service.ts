@@ -9,6 +9,7 @@ import { RootTrustService } from './trust.ts';
 import { RootEffectTransactionService } from './transactions.ts';
 import { RootObservationService } from './observability.ts';
 import { RootCredentialService } from './credentials.ts';
+import { RootFreezeService, RootRecoveryService, type RecoveryAuthority } from './recovery.ts';
 
 export const ROOT_FABRIC_OPERATION_NAMES = Object.freeze([
   'babyx.root.compatibility.get', 'babyx.root.effect.registry',
@@ -20,6 +21,7 @@ export const ROOT_FABRIC_OPERATION_NAMES = Object.freeze([
   'babyx.root.grant.install', 'babyx.root.grant.get', 'babyx.root.grant.list', 'babyx.root.grant.revoke',
   'babyx.root.observation.start', 'babyx.root.observation.get', 'babyx.root.observation.record', 'babyx.root.observation.finalize',
   'babyx.root.credential.lease', 'babyx.root.credential.deliver', 'babyx.root.credential.get', 'babyx.root.credential.list', 'babyx.root.credential.revoke', 'babyx.root.credential.clean',
+  'babyx.root.freeze.get', 'babyx.root.freeze.set', 'babyx.root.kill', 'babyx.root.reconcile',
 ] as const);
 function envList(name: string): string[] { return (process.env[name] ?? '').split(',').map((value) => value.trim()).filter(Boolean); }
 function keyFrom(directory: string, keyId: string): string | Buffer | undefined { if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(keyId)) return undefined; const path = join(directory, `${keyId}.pub`); return existsSync(path) ? readFileSync(path) : undefined; }
@@ -30,16 +32,31 @@ export class RootFabricService {
   readonly effects: RootEffectRegistry;
   readonly observations: RootObservationService;
   readonly credentials: RootCredentialService;
-  constructor(private readonly options: { stateRoot: string; sourceCommit: string; sourceTree: string; catalogVersion: string; catalogDigest: () => string; publicKey?: (keyId: string) => string | Buffer | undefined; trustDirectory?: string; artifacts?: { spill(name: string, value: JsonObject, metadata: JsonObject): Promise<{ artifactId: string }> }; credentialDeliveryRoot?: string; now?: () => string }) {
+  readonly freezes: RootFreezeService;
+  readonly recovery: RootRecoveryService;
+  constructor(private readonly options: { stateRoot: string; sourceCommit: string; sourceTree: string; catalogVersion: string; catalogDigest: () => string; publicKey?: (keyId: string) => string | Buffer | undefined; trustDirectory?: string; artifacts?: { spill(name: string, value: JsonObject, metadata: JsonObject): Promise<{ artifactId: string }> }; credentialDeliveryRoot?: string; recoveryAuthority?: RecoveryAuthority; now?: () => string }) {
     this.transactions = new RootEffectTransactionService(options.stateRoot, { now: options.now });
     this.trust = new RootTrustService(options.stateRoot, options.publicKey ?? ((keyId) => keyFrom(options.trustDirectory ?? '/etc/baby-x/root-trust', keyId)), { now: options.now });
     this.observations = new RootObservationService(options.stateRoot, options.artifacts, { now: options.now });
     this.credentials = new RootCredentialService(options.stateRoot, undefined, { deliveryRoot: options.credentialDeliveryRoot ?? join(options.stateRoot, 'root-fabric', 'credential-delivery'), now: options.now });
+    this.freezes = new RootFreezeService(options.stateRoot, { now: options.now });
+    const unavailable: RecoveryAuthority = {
+      async inspectUnit() { return { exists: false, matches: false, active: false, terminal: false, identity: {}, resultDigest: null }; },
+      async inspectMachine() { return { exists: false, matches: false, active: false, terminal: false, identity: {}, resultDigest: null }; },
+      async inspectJob() { return { exists: false, matches: false, active: false, terminal: false, identity: {}, resultDigest: null }; },
+      async killUnit() { throw new RootFabricError('resource_unavailable', 'unit recovery authority is unavailable'); },
+      async killMachine() { throw new RootFabricError('resource_unavailable', 'machine recovery authority is unavailable'); },
+      async killJob() { throw new RootFabricError('resource_unavailable', 'job recovery authority is unavailable'); },
+      async verifyUnitAbsent() { return false; },
+      async verifyMachineAbsent() { return false; },
+      async verifyJobTerminal() { return false; },
+    };
+    this.recovery = new RootRecoveryService({ stateRoot: options.stateRoot, transactions: this.transactions, observations: this.observations, credentials: this.credentials, freezes: this.freezes, authority: options.recoveryAuthority ?? unavailable, now: options.now });
     this.effects = new RootEffectRegistry({ storage: new RootStorageEffectAuthority({ datasetRoots: envList('BABYX_ROOT_DATASET_ROOTS'), mountRoots: envList('BABYX_ROOT_MOUNT_ROOTS') }), network: new RootNetworkEffectAuthority({ table: process.env.BABYX_ROOT_NFT_TABLE ?? 'babyx_root' }) });
   }
-  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.0.0', credential: '1.0.0' } }); return value as unknown as JsonObject; }
+  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.0.0', credential: '1.0.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
   async execute(operation: string, payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
-    if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-I root fabric operation ${operation}`);
+    if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-J root fabric operation ${operation}`);
     if (operation === 'babyx.root.compatibility.get') return this.compatibility();
     if (operation === 'babyx.root.effect.registry') return { effects: this.effects.list() };
     if (operation === 'babyx.root.effect.create') { this.assertCreateAllowed(payload, context); return this.transactions.create(payload, context); }
@@ -70,18 +87,23 @@ export class RootFabricService {
     if (operation === 'babyx.root.observation.get') return this.observations.get(payload);
     if (operation === 'babyx.root.observation.record') return this.observations.record(payload, context);
     if (operation === 'babyx.root.observation.finalize') return this.observations.finalize(payload, context);
-    if (operation === 'babyx.root.credential.lease') return this.credentials.lease(payload, context);
+    if (operation === 'babyx.root.credential.lease') { this.assertCredentialAllowed(payload); return this.credentials.lease(payload, context); }
     if (operation === 'babyx.root.credential.deliver') return this.credentials.deliver(payload, context);
     if (operation === 'babyx.root.credential.get') return this.credentials.get(payload);
     if (operation === 'babyx.root.credential.list') return this.credentials.list(payload);
     if (operation === 'babyx.root.credential.revoke') return this.credentials.revoke(payload, context);
-    return this.credentials.clean(payload, context);
+    if (operation === 'babyx.root.credential.clean') return this.credentials.clean(payload, context);
+    if (operation === 'babyx.root.freeze.get') return this.freezes.get(payload);
+    if (operation === 'babyx.root.freeze.set') return this.freezes.set(payload, context);
+    if (operation === 'babyx.root.kill') return this.recovery.kill(payload, context);
+    return this.recovery.reconcile(payload, context);
   }
   verifyBrokerBinding(requestValue: JsonObject): void {
     const request = strictObject(requestValue, 'broker binding', ['protocolVersion', 'requestId', 'transactionId', 'transactionSequence', 'fencingToken', 'ownerPrincipalDigest', 'skillBundleDigest', 'grantDigest', 'policyDecisionDigest', 'operation', 'operationVersion', 'operationInput', 'inputDigest', 'deadline', 'nonce', 'selectedProvider', 'credentialReferences']);
     const transaction = this.transactions.record(text(request.transactionId, 'transactionId', 256));
     if (transaction.lifecycle.persistedState !== 'EXECUTING' || transaction.lifecycle.sequence !== request.transactionSequence || transaction.lease.fencingToken !== request.fencingToken) throw new RootFabricError('fencing_token_stale', 'broker transaction sequence or fencing token mismatch');
     if (transaction.ownerPrincipal.principalDigest !== request.ownerPrincipalDigest || transaction.skill.bundleDigest !== request.skillBundleDigest || transaction.skill.capabilityGrantDigest !== request.grantDigest || transaction.policy.decisionDigest !== request.policyDecisionDigest || transaction.routing.executionProvider !== request.selectedProvider) throw new RootFabricError('principal_mismatch', 'broker request is not bound to the authorized transaction');
+    this.assertNotFrozen({ principalId: transaction.ownerPrincipal.principalId, skillId: transaction.skill.skillId, bundleDigest: transaction.skill.bundleDigest, grantId: transaction.skill.capabilityGrantId, transactionId: transaction.transactionId, provider: String(request.selectedProvider), newExecution: true });
     const step = transaction.plan.steps.find((candidate) => candidate.operation === request.operation && candidate.operationVersion === request.operationVersion && candidate.inputDigest === request.inputDigest);
     if (!step) throw new RootFabricError('unsupported_operation', 'broker request does not match a declared transaction step');
     this.trust.authorize({ grantId: transaction.skill.capabilityGrantId, bundleDigest: transaction.skill.bundleDigest, ownerPrincipal: transaction.ownerPrincipal.principalId, operation: step.operation, provider: request.selectedProvider as RootExecutionProvider, effectClass: step.effectClass, resources: step.resourceSelectors, credentialReferences: request.credentialReferences as string[] });
@@ -90,11 +112,15 @@ export class RootFabricService {
     const payload = object(payloadValue, 'root effect create payload'); const skill = object(payload.skill, 'skill'); const plan = object(payload.plan, 'plan');
     if (!Array.isArray(plan.steps)) throw new RootFabricError('invalid_request', 'plan.steps must be an array');
     const principal = contextPrincipal(context, new Date().toISOString());
+    this.assertNotFrozen({ principalId: principal.principalId, skillId: String(skill.skillId), bundleDigest: String(skill.bundleDigest), grantId: String(skill.capabilityGrantId), newExecution: true });
     for (const raw of plan.steps) { const step = object(raw, 'plan step'); const providers = Array.isArray(step.providerRequirements) ? step.providerRequirements as RootExecutionProvider[] : []; for (const provider of providers) this.trust.authorize({ grantId: String(skill.capabilityGrantId), bundleDigest: String(skill.bundleDigest), ownerPrincipal: principal.principalId, operation: String(step.operation), provider, effectClass: step.effectClass as RootEffectClass, resources: object(step.resourceSelectors, 'resourceSelectors'), credentialReferences: Array.isArray(step.credentialReferences) ? step.credentialReferences as string[] : [] }); }
   }
   private assertAuthorization(payloadValue: JsonObject): void {
     const payload = object(payloadValue, 'authorize payload'); const transaction = this.transactions.record(text(payload.transactionId, 'transactionId', 256)); const provider = text(payload.executionProvider, 'executionProvider', 32) as RootExecutionProvider;
+    this.assertNotFrozen({ principalId: transaction.ownerPrincipal.principalId, skillId: transaction.skill.skillId, bundleDigest: transaction.skill.bundleDigest, grantId: transaction.skill.capabilityGrantId, transactionId: transaction.transactionId, provider, newExecution: true });
     for (const step of transaction.plan.steps) if (step.providerRequirements.includes(provider)) this.trust.authorize({ grantId: transaction.skill.capabilityGrantId, bundleDigest: transaction.skill.bundleDigest, ownerPrincipal: transaction.ownerPrincipal.principalId, operation: step.operation, provider, effectClass: step.effectClass, resources: step.resourceSelectors, credentialReferences: step.credentialReferences });
   }
-  private assertBeginAllowed(payloadValue: JsonObject): void { const payload = object(payloadValue, 'begin payload'); const transaction = this.transactions.record(text(payload.transactionId, 'transactionId', 256)); if (transaction.routing.executionProvider === null) throw new RootFabricError('state_conflict', 'execution provider must be authorized before begin'); }
+  private assertBeginAllowed(payloadValue: JsonObject): void { const payload = object(payloadValue, 'begin payload'); const transaction = this.transactions.record(text(payload.transactionId, 'transactionId', 256)); if (transaction.routing.executionProvider === null) throw new RootFabricError('state_conflict', 'execution provider must be authorized before begin'); this.assertNotFrozen({ principalId: transaction.ownerPrincipal.principalId, skillId: transaction.skill.skillId, bundleDigest: transaction.skill.bundleDigest, grantId: transaction.skill.capabilityGrantId, transactionId: transaction.transactionId, provider: transaction.routing.executionProvider, newExecution: true }); }
+  private assertCredentialAllowed(payloadValue: JsonObject): void { const payload = object(payloadValue, 'credential lease payload'); this.assertNotFrozen({ bundleDigest: String(payload.skillBundleDigest), transactionId: String(payload.transactionId), provider: String(payload.provider), credentialIssuance: true, newExecution: true }); }
+  private assertNotFrozen(input: { principalId?: string; skillId?: string; bundleDigest?: string; grantId?: string; transactionId?: string; provider?: string; credentialIssuance?: boolean; newExecution?: boolean }): void { const result = this.freezes.isFrozen(input); if (result.frozen) throw new RootFabricError('state_conflict', 'root execution is frozen', { freezeIds: result.matches.map((record) => record.freezeId), scopes: result.matches.map((record) => record.scope) }); }
 }

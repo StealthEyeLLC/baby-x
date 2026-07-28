@@ -69,10 +69,10 @@ test('H: observation limits fail closed without losing durable overflow truth', 
 });
 
 test('H: catalog exposes one schema-backed observation surface while preserving A-G', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.3.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 226);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.4.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 230);
   const root = OPERATION_DEFINITIONS.filter((entry) => entry.operation.startsWith('babyx.root.'));
-  assert.equal(root.length, 47);
+  assert.equal(root.length, 51);
   const expected = ['babyx.root.observation.start', 'babyx.root.observation.get', 'babyx.root.observation.record', 'babyx.root.observation.finalize'];
   for (const operation of expected) {
     assert.equal(ROOT_FABRIC_OPERATION_NAMES.filter((name) => name === operation).length, 1);

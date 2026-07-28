@@ -255,15 +255,15 @@ test('G: finite process, service, mount, snapshot, storage and network effects r
 });
 
 test('A-G public surface is exact, dispatcher-backed, duplicate-free and contains no arbitrary root shell', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.3.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 226);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.4.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 230);
   const root = OPERATION_DEFINITIONS.filter(definition => definition.operation.startsWith('babyx.root.')).map(definition => definition.operation);
   const original = ['babyx.root.describe', 'babyx.root.transaction.create', 'babyx.root.transaction.get', 'babyx.root.transaction.list', 'babyx.root.transaction.authorize', 'babyx.root.transaction.begin', 'babyx.root.transaction.observe', 'babyx.root.transaction.commit', 'babyx.root.transaction.rollback', 'babyx.root.transaction.events', 'babyx.root.transaction.verify'];
-  assert.equal(root.length, 47);
-  assert.equal(ROOT_FABRIC_OPERATION_NAMES.length, 36);
-  assert.equal(new Set(root).size, 47);
+  assert.equal(root.length, 51);
+  assert.equal(ROOT_FABRIC_OPERATION_NAMES.length, 40);
+  assert.equal(new Set(root).size, 51);
   for (const operation of [...original, ...ROOT_FABRIC_OPERATION_NAMES]) assert.equal(root.includes(operation), true, operation);
-  const forbiddenSuffixes = ['freeze.', 'kill', 'reconcile'];
+  const forbiddenSuffixes = ['__checkpoint_k_not_implemented__'];
   assert.equal(root.some(operation => forbiddenSuffixes.some(suffix => operation.startsWith(`babyx.root.${suffix}`))), false);
   const source = readFileSync(join(process.cwd(), 'runtime/src/core.ts'), 'utf8');
   assert.match(source, /return \(await this\.rootFabricService\(\)\)\.execute\(operation, payload, context\)/u);

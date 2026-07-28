@@ -308,6 +308,18 @@ export class RootEffectTransactionService {
     return this.transition('babyx.root.effect.repair', payload, context, ['RECOVERY_REQUIRED', 'AMBIGUOUS', 'CLEANING'], nextState, 'repair', (record, inner, occurredAt) => ({ error: { code: 'administrative_repair', message: text(inner.reason, 'reason', 1_024), retryable: false, phase: 'repair', redactedDetails: { priorState: record.lifecycle.persistedState, repairedAt: occurredAt } } }), Object.keys(payload));
   }
 
+  reconcileTransition(transactionId: string, nextState: RootEffectState, reason: string, observations: JsonObject, actor = 'root-reconciler'): RootEffectTransaction {
+    const current = this.read(identifier(transactionId, 'transactionId'));
+    const occurredAt = this.now();
+    const request = sha256(canonicalize({ transactionId, priorState: current.lifecycle.persistedState, nextState, reason, observations, actor, sequence: current.lifecycle.sequence + 1 }));
+    const error = ['FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'EXPIRED'].includes(nextState)
+      ? { code: reason, message: reason, retryable: nextState === 'RECOVERY_REQUIRED', phase: 'reconciliation', redactedDetails: observations }
+      : current.error;
+    const next = appendEvent(current, 'babyx.root.reconcile', 'reconciliation', nextState, request, sha256(`reconcile:${transactionId}:${current.lifecycle.sequence + 1}`), occurredAt, { error }, { actor }, sha256(canonicalize(observations)));
+    this.records.put(transactionId, next);
+    return this.read(transactionId);
+  }
+
   replaceRecord(record: RootEffectTransaction): void { assertTransaction(record); this.records.put(record.transactionId, record); }
   nonterminal(limit = 4096): RootEffectTransaction[] { return this.records.scan((record) => !record.lifecycle.terminal, 0, limit).records.filter((record) => { try { assertTransaction(record); return true; } catch { return false; } }); }
   record(transactionId: string): RootEffectTransaction { return this.read(identifier(transactionId, 'transactionId')); }

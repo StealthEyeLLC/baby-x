@@ -71,6 +71,10 @@ babyx.root.credential.get
 babyx.root.credential.list
 babyx.root.credential.revoke
 babyx.root.credential.clean
+babyx.root.freeze.get
+babyx.root.freeze.set
+babyx.root.kill
+babyx.root.reconcile
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -380,6 +384,10 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.credential.get') return objectSchema({ leaseId }, ['leaseId']);
   if (operation === 'babyx.root.credential.list') return objectSchema({ state: stringValue, transactionId: effectTransactionId, ...effectPage });
   if (operation === 'babyx.root.credential.revoke' || operation === 'babyx.root.credential.clean') return objectSchema({ leaseId, reason: stringValue }, ['leaseId', 'reason']);
+  if (operation === 'babyx.root.freeze.get') return objectSchema({ scope: stringValue, selector: stringValue, ...effectPage });
+  if (operation === 'babyx.root.freeze.set') return objectSchema({ scope: { enum: ['GLOBAL', 'PRINCIPAL', 'SKILL', 'BUNDLE', 'GRANT', 'TRANSACTION', 'PROVIDER', 'CREDENTIAL_ISSUANCE', 'NEW_EXECUTION'] }, selector: stringValue, active: { type: 'boolean' }, reason: stringValue, expiresAt: { anyOf: [{ type: 'null' }, stringValue] } }, ['scope', 'selector', 'active', 'reason']);
+  if (operation === 'babyx.root.kill') return objectSchema({ scope: { enum: ['TRANSACTION', 'SKILL', 'ALL'] }, selector: stringValue, reason: stringValue }, ['scope', 'selector', 'reason']);
+  if (operation === 'babyx.root.reconcile') return objectSchema({ transactionId: effectTransactionId, limit: { type: 'integer', minimum: 1, maximum: 4_096 } });
   if (operation === 'babyx.root.grant.revoke') return objectSchema({ grantId: identifier, reason: stringValue }, ['grantId', 'reason']);
   throw new Error(`missing root operation schema: ${operation}`);
 }
@@ -473,7 +481,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.3.0';
+export const OPERATION_CATALOG_VERSION = '3.4.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

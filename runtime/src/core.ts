@@ -709,6 +709,73 @@ export class BabyXRuntime {
           return { artifactId };
         },
       };
+      const machines = await this.machineService();
+      const recoveryContext = (key: string): RuntimeExecutionContext => ({ subject: 'baby-x-root-recovery', authorityClass: 'unrestricted-owner', idempotencyKey: key });
+      const terminalJobStates = new Set<JobRecord['status']>(['completed', 'failed', 'cancelled', 'lost']);
+      const inspectUnit = async (unitName: string, expectedIdentity: JsonObject): Promise<JsonObject> => {
+        const result = await this.executor.run({ argv: ['/usr/bin/systemctl', 'show', unitName, '--no-pager', '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup'], cwd: '/' });
+        const output = Buffer.from(result.stdout, 'base64').toString('utf8');
+        const properties = Object.fromEntries(output.split('\n').filter((line) => line.includes('=')).map((line) => { const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1)]; }));
+        const exists = result.exitCode === 0 && properties.LoadState !== 'not-found';
+        const active = exists && ['active', 'activating', 'deactivating', 'reloading'].includes(properties.ActiveState ?? '');
+        const expectedPid = Number(expectedIdentity.processId ?? expectedIdentity.pid ?? 0);
+        const actualPid = Number(properties.MainPID ?? 0);
+        const matches = exists && (expectedPid <= 0 || expectedPid === actualPid);
+        const identity = { unitName, loadState: properties.LoadState ?? null, activeState: properties.ActiveState ?? null, subState: properties.SubState ?? null, mainPid: Number.isSafeInteger(actualPid) ? actualPid : 0, controlGroup: properties.ControlGroup ?? null };
+        return { exists, matches, active, terminal: !active, identity, resultDigest: sha256(canonicalize({ identity, exitCode: result.exitCode, signal: result.signal })) };
+      };
+      const recoveryAuthority = {
+        inspectUnit,
+        inspectMachine: async (machineId: string, expectedIdentity: JsonObject): Promise<JsonObject> => {
+          try {
+            const result = await machines.status({ machineId, includeJobs: false, includeRecentEvents: false }, recoveryContext(`root-recovery-machine-status-${machineId}`));
+            const machine = result.machine as JsonObject;
+            const lifecycle = machine.lifecycle as JsonObject;
+            const persistedState = String(lifecycle.persistedState ?? 'UNKNOWN');
+            const observedState = String(lifecycle.observedState ?? 'UNKNOWN');
+            const identity = { machineId: String(machine.machineId ?? machineId), transactionId: machine.transactionId ?? null, persistedState, observedState, stateSequence: lifecycle.stateSequence ?? null };
+            const matches = identity.machineId === machineId && observedState !== 'CONFLICT' && (expectedIdentity.transactionId === undefined || machine.transactionId === expectedIdentity.transactionId);
+            return { exists: true, matches, active: ['STARTING', 'READY', 'EXECUTING', 'STOPPING', 'DESTROYING'].includes(persistedState), terminal: persistedState === 'DESTROYED' && observedState === 'ABSENT', identity, resultDigest: sha256(canonicalize(identity)) };
+          } catch (error) {
+            if (error instanceof Error && /not found/iu.test(error.message)) return { exists: false, matches: true, active: false, terminal: true, identity: { machineId }, resultDigest: null };
+            throw error;
+          }
+        },
+        inspectJob: async (jobId: string): Promise<JsonObject> => {
+          try {
+            const record = this.jobs.reconcile(jobId);
+            const classification = record.reconciliation?.classification ?? null;
+            const identity = { jobId, pid: record.pid ?? null, pgid: record.pgid ?? null, processIdentity: record.processIdentity ?? null, status: record.status, classification };
+            return { exists: true, matches: classification !== 'identity-conflict', active: ['starting', 'running'].includes(record.status), terminal: terminalJobStates.has(record.status), identity, resultDigest: sha256(canonicalize(identity)) };
+          } catch (error) {
+            if (error instanceof Error && /not found/iu.test(error.message)) return { exists: false, matches: true, active: false, terminal: true, identity: { jobId }, resultDigest: null };
+            throw error;
+          }
+        },
+        killUnit: async (unitName: string, signal: string): Promise<JsonObject> => {
+          const result = await this.executor.run({ argv: ['/usr/bin/systemctl', 'kill', `--signal=${signal}`, '--kill-whom=all', unitName], cwd: '/' });
+          if (result.exitCode !== 0) throw new Error(`systemd kill failed for ${unitName}`);
+          return result as unknown as JsonObject;
+        },
+        killMachine: async (machineId: string): Promise<JsonObject> => {
+          const current = await machines.get({ machineId }, recoveryContext(`root-recovery-machine-get-${machineId}`));
+          const machine = current.machine as JsonObject;
+          const lifecycle = machine.lifecycle as JsonObject;
+          const expectedSequence = Number(lifecycle.stateSequence);
+          if (!Number.isSafeInteger(expectedSequence) || expectedSequence < 1) throw new Error(`machine ${machineId} has no valid state sequence`);
+          return machines.destroy({ machineId, expectedSequence, stopIfRunning: true, forceStop: true, stopTimeoutMs: 5_000, reason: 'root emergency kill' }, recoveryContext(`root-recovery-machine-destroy-${machineId}-${expectedSequence}`));
+        },
+        killJob: async (jobId: string, signal: string): Promise<JsonObject> => this.jobs.cancel(jobId, signal) as unknown as JsonObject,
+        verifyUnitAbsent: async (unitName: string): Promise<boolean> => !Boolean((await inspectUnit(unitName, { unitName })).active),
+        verifyMachineAbsent: async (machineId: string): Promise<boolean> => {
+          const readback = await recoveryAuthority.inspectMachine(machineId, { machineId });
+          return readback.exists === false || readback.terminal === true;
+        },
+        verifyJobTerminal: async (jobId: string): Promise<boolean> => {
+          const readback = await recoveryAuthority.inspectJob(jobId);
+          return readback.exists === false || readback.terminal === true;
+        },
+      };
       this.rootFabricServiceInstance = new RootFabricService({
         stateRoot: this.stateRoot,
         sourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? 'unknown',
@@ -717,6 +784,7 @@ export class BabyXRuntime {
         catalogDigest: () => sha256(canonicalize(OPERATION_DEFINITIONS)),
         artifacts: observationArtifacts,
         credentialDeliveryRoot: process.env.BABYX_ROOT_CREDENTIAL_ROOT ?? '/run/baby-x/root-credentials',
+        recoveryAuthority,
       });
     }
     return this.rootFabricServiceInstance;

@@ -96,7 +96,7 @@ export class SystemdManager {
     return this.executor.run({ ...targetPayload(query), argv });
   }
 
-  async run(options: SystemdRequestOptions & { argv: readonly string[]; unit?: string; properties?: Readonly<Record<string, string>> }): Promise<CommandResult> {
+  async run(options: SystemdRequestOptions & { argv: readonly string[]; unit?: string; properties?: Readonly<Record<string, string>>; propertyEntries?: readonly string[] }): Promise<CommandResult> {
     if (options.argv.length === 0 || options.argv.some((value) => value.includes('\0'))) throw new Error('argv must be a non-empty NUL-free string array');
     const argv = ['/usr/bin/systemd-run', '--wait', '--pipe', '--collect', '--quiet'];
     if (options.scope === 'user') argv.push('--user');
@@ -104,6 +104,13 @@ export class SystemdManager {
     for (const [name, value] of Object.entries(options.properties ?? {})) {
       if (!PROPERTY_PATTERN.test(name) || value.includes('\0')) throw new Error(`invalid systemd-run property: ${name}`);
       argv.push(`--property=${name}=${value}`);
+    }
+    for (const entry of options.propertyEntries ?? []) {
+      if (entry.includes('\0')) throw new Error('systemd-run property entry must be NUL-free');
+      const separator = entry.indexOf('=');
+      const name = separator < 1 ? '' : entry.slice(0, separator);
+      if (!PROPERTY_PATTERN.test(name)) throw new Error(`invalid systemd-run property entry: ${name}`);
+      argv.push(`--property=${entry}`);
     }
     argv.push('--', ...options.argv);
     return this.executor.run({ ...targetPayload(options), argv });

@@ -18,3 +18,26 @@ Only implemented providers are registered: the Prompt-1 root authority, the sove
 Support states are `SUPPORTED`, `DEGRADED`, `UNAVAILABLE`, `EXPERIMENTAL`, `DISABLED`, `REVOKED`, and `FAILED`. A provider probe exception is bounded and reported as `FAILED`; source presence alone never produces `SUPPORTED`.
 
 Provider reconciliation uses append-only sidecar records beneath the Baby-X state root. Replays require the same owner, idempotency key, provider, and observed descriptor digest. Prompt-1 records remain readable and verifiable without migration or mutation.
+
+## Checkpoint B
+
+Checkpoint B adds architecture-bound mediation profiles and five compact public operations:
+
+- `babyx.root.mediation.profile.create`
+- `babyx.root.mediation.profile.get`
+- `babyx.root.mediation.profile.list`
+- `babyx.root.mediation.profile.revoke`
+- `babyx.root.mediation.events`
+
+Profiles are strict, digest-stable, owner-bound, expiring, revocable, sequence-checked, and durably replayable. They bind exact Skill and grant digests to selected syscall tables, seccomp actions, notification decisions, bounded equality constraints, Landlock paths and TCP ports, and BPF-LSM observation intent. A profile cannot silently apply a rule outside its declared provider scope.
+
+The tracked native mediation supervisor uses libseccomp to apply filters and receive user notifications. Notification decisions verify kernel notification validity, PID, process start time, cgroup membership, transaction binding, bounded arguments, and a deadline before allow, deny, or selected value emulation. Supervisor loss fails closed. Decision events are bounded and digest-chained.
+
+The live host reports:
+
+- `seccomp-filter`: `SUPPORTED` after a live errno filter test;
+- `seccomp-notify`: `SUPPORTED` after a live notification round trip;
+- `landlock`: `SUPPORTED` at ABI 4, including ABI-supported TCP restrictions;
+- `bpf-lsm`: `UNAVAILABLE` because `bpf` is not active in the host LSM list.
+
+The BPF-LSM source is tracked and digest-bound. A CO-RE observation-only object is built when clang, libbpf headers, bpftool, and kernel BTF are all available. Fixture tests cover load, health, attach, detach, failure, and reconciliation. Enforcement remains disabled and a profile requesting unavailable BPF-LSM behavior fails closed.

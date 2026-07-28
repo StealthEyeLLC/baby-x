@@ -46,7 +46,7 @@ test('describe exposes only implemented operations without duplicate authority p
       assert.ok(Array.isArray(definition.errors));
       assert.ok(Array.isArray(definition.postconditions));
     }
-    assert.equal(description.operationCatalogVersion, '4.0.0');
+    assert.equal(description.operationCatalogVersion, '5.0.0');
     assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     assert.equal(operationDefinitions().length, operations.length);
   } finally { rmSync(root, { recursive: true, force: true }); }

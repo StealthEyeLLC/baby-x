@@ -29,6 +29,11 @@ babyx.root.platform.describe
 babyx.root.provider.list
 babyx.root.provider.get
 babyx.root.provider.reconcile
+babyx.root.mediation.profile.create
+babyx.root.mediation.profile.get
+babyx.root.mediation.profile.list
+babyx.root.mediation.profile.revoke
+babyx.root.mediation.events
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -299,6 +304,29 @@ function rootSchema(operation: string): Record<string, unknown> {
   const providerId = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$' } as const;
   if (operation === 'babyx.root.provider.list') return objectSchema({ family: providerId, supportState: { enum: ['SUPPORTED', 'DEGRADED', 'UNAVAILABLE', 'EXPERIMENTAL', 'DISABLED', 'REVOKED', 'FAILED'] }, ...page });
   if (operation === 'babyx.root.provider.get' || operation === 'babyx.root.provider.reconcile') return objectSchema({ providerId }, ['providerId']);
+  const mediationProfileId = { type: 'string', pattern: '^mpf_[a-f0-9]{32}$' } as const;
+  const mediationSyscall = { type: 'string', pattern: '^[a-z0-9_]{1,64}$' } as const;
+  const mediationProfile = objectSchema({
+    version: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$' },
+    skillBundleDigest: digest,
+    grantDigest: digest,
+    providerScope: { type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: { enum: ['SECCOMP_FILTER', 'SECCOMP_NOTIFY', 'LANDLOCK', 'BPF_LSM'] } },
+    architecture: { enum: ['x86_64', 'aarch64'] },
+    defaultAction: objectSchema({ kind: { enum: ['allow', 'errno', 'kill'] }, errno: { type: ['integer', 'null'], minimum: 1, maximum: 4095 } }, ['kind']),
+    allowedSyscalls: { type: 'array', maxItems: 128, uniqueItems: true, items: mediationSyscall },
+    deniedSyscalls: { type: 'array', maxItems: 128, items: objectSchema({ syscall: mediationSyscall, action: { enum: ['errno', 'kill'] }, errno: { type: ['integer', 'null'], minimum: 1, maximum: 4095 } }, ['syscall', 'action']) },
+    notifiedSyscalls: { type: 'array', maxItems: 128, items: objectSchema({ syscall: mediationSyscall, decision: { enum: ['allow', 'deny', 'emulate'] }, errno: { type: ['integer', 'null'], minimum: 1, maximum: 4095 }, value: { type: ['integer', 'null'], minimum: 0, maximum: Number.MAX_SAFE_INTEGER } }, ['syscall', 'decision']) },
+    argumentConstraints: { type: 'array', maxItems: 128, items: objectSchema({ syscall: mediationSyscall, index: { type: 'integer', minimum: 0, maximum: 5 }, value: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } }, ['syscall', 'index', 'value']) },
+    pathConstraints: { type: 'array', maxItems: 64, items: objectSchema({ path: stringValue, access: { enum: ['read', 'write'] } }, ['path', 'access']) },
+    socketConstraints: { type: 'array', maxItems: 64, items: objectSchema({ protocol: { enum: ['tcp'] }, action: { enum: ['bind', 'connect'] }, port: { type: 'integer', minimum: 0, maximum: 65535 } }, ['protocol', 'action', 'port']) },
+    bpfRules: objectSchema({ mode: { enum: ['observe', 'enforce'] }, hooks: { type: 'array', maxItems: 32, uniqueItems: true, items: stringValue } }, ['mode', 'hooks']),
+    expiresAt: stringValue,
+  }, ['version', 'skillBundleDigest', 'grantDigest', 'providerScope', 'architecture', 'expiresAt']);
+  if (operation === 'babyx.root.mediation.profile.create') return objectSchema({ profile: mediationProfile }, ['profile']);
+  if (operation === 'babyx.root.mediation.profile.get') return objectSchema({ profileId: mediationProfileId }, ['profileId']);
+  if (operation === 'babyx.root.mediation.profile.list') return objectSchema({ ownerPrincipal: identifier, status: { enum: ['ACTIVE', 'REVOKED', 'EXPIRED'] }, ...page });
+  if (operation === 'babyx.root.mediation.profile.revoke') return objectSchema({ profileId: mediationProfileId, expectedSequence, reasonDigest: digest }, ['profileId', 'expectedSequence', 'reasonDigest']);
+  if (operation === 'babyx.root.mediation.events') return objectSchema({ profileId: mediationProfileId, ...page }, ['profileId']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -398,13 +426,14 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (family === 'machine') return ['authoritative_machine_record_persisted', 'observed_state_reported'];
   if (family === 'certification' || family === 'race') return ['durable_record_persisted', 'evidence_references_reported'];
   if (operation === 'babyx.root.provider.reconcile') return ['provider_reconciliation_record_persisted', 'provider_state_observed'];
+  if (operation === 'babyx.root.mediation.profile.create' || operation === 'babyx.root.mediation.profile.revoke') return ['mediation_profile_record_persisted', 'digest_chained_event_appended'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '4.0.0';
+export const OPERATION_CATALOG_VERSION = '5.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

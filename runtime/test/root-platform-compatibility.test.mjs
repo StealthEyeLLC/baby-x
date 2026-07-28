@@ -23,7 +23,7 @@ test('platform description is deterministic and preserves Prompt 1 identity', ()
     const second = instance.platformDescribe();
     assert.equal(ROOT_PLATFORM_SCHEMA_VERSION, '2.0.0');
     assert.equal(ROOT_PLATFORM_PROVIDER_VERSION, 'sovereign-root-platform@2');
-    assert.equal(OPERATION_CATALOG_VERSION, '4.0.0');
+    assert.equal(OPERATION_CATALOG_VERSION, '5.0.0');
     assert.equal(first.platformDigest, second.platformDigest);
     assert.equal(first.prompt1.commit, 'fef1cb3b76a5c6f5beb1ca73499c4d1e5cafe713');
     assert.equal(first.prompt1.tree, 'a98cee4adfed2912bffda2a2fdf5928bcd0b66bf');

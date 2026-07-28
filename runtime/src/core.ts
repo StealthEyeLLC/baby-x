@@ -684,6 +684,14 @@ export class BabyXRuntime {
     }
     return this.candidateRaceServiceInstance;
   }
+  private rootMediationServiceInstance?: import('./root-platform/mediation/service.ts').RootMediationService;
+  private async rootMediationService(): Promise<import('./root-platform/mediation/service.ts').RootMediationService> {
+    if (this.rootMediationServiceInstance === undefined) {
+      const { RootMediationService } = await import('./root-platform/mediation/service.ts');
+      this.rootMediationServiceInstance = new RootMediationService({ stateRoot: this.stateRoot });
+    }
+    return this.rootMediationServiceInstance;
+  }
   private rootPlatformServiceInstance?: import('./root-platform/service.ts').SovereignRootPlatformService;
   private async rootPlatformService(): Promise<import('./root-platform/service.ts').SovereignRootPlatformService> {
     if (this.rootPlatformServiceInstance === undefined) {
@@ -718,6 +726,11 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.provider.list') return (await this.rootPlatformService()).providerList(payload);
       if (operation === 'babyx.root.provider.get') return (await this.rootPlatformService()).providerGet(payload);
       if (operation === 'babyx.root.provider.reconcile') return (await this.rootPlatformService()).providerReconcile(payload, context);
+      if (operation === 'babyx.root.mediation.profile.create') return (await this.rootMediationService()).create(payload, context);
+      if (operation === 'babyx.root.mediation.profile.get') return (await this.rootMediationService()).get(payload);
+      if (operation === 'babyx.root.mediation.profile.list') return (await this.rootMediationService()).list(payload);
+      if (operation === 'babyx.root.mediation.profile.revoke') return (await this.rootMediationService()).revoke(payload, context);
+      if (operation === 'babyx.root.mediation.events') return (await this.rootMediationService()).events(payload);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

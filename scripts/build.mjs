@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
 
 const root = process.cwd();
-const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, copiedDeploymentFiles: 0, copiedNativeArtifacts: 0 };
+const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', mediationSupervisor: 'not-built', bpfLsmObject: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, copiedDeploymentFiles: 0, copiedNativeArtifacts: 0 };
 if (process.version !== 'v24.18.0') throw new Error(`Node.js 24.18.0 required, found ${process.version}`);
 rmSync(join(root, 'dist'), { recursive: true, force: true });
 
@@ -58,6 +58,32 @@ const peerResult = spawnSync(compiler, ['-shared', '-fPIC', '-std=c++20', '-Wall
 if (peerResult.status !== 0) throw new Error(`peer credential addon build failed: ${peerResult.stderr}`);
 copyArtifact('runtime/build/Release/peer_cred.node', 'build/Release/peer_cred.node', 'copiedNativeArtifacts');
 report.peerCredentialAddon = 'built-and-copied';
+
+mkdirSync(join(root, 'runtime/native/mediation-supervisor/build'), { recursive: true });
+const cCompiler = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v cc'], { encoding: 'utf8' }).stdout.trim();
+if (!cCompiler) throw new Error('C compiler is required for the mediation supervisor');
+const mediationResult = spawnSync(cCompiler, ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', 'runtime/native/mediation-supervisor/mediation_supervisor.c', '-lseccomp', '-o', 'runtime/native/mediation-supervisor/build/baby-x-mediation-supervisor'], { cwd: root, encoding: 'utf8' });
+if (mediationResult.status !== 0) throw new Error(`mediation supervisor build failed: ${mediationResult.stderr}`);
+chmodSync(join(root, 'runtime/native/mediation-supervisor/build/baby-x-mediation-supervisor'), 0o755);
+copyArtifact('runtime/native/mediation-supervisor/build/baby-x-mediation-supervisor', 'runtime/native/mediation-supervisor/baby-x-mediation-supervisor', 'copiedNativeArtifacts');
+copyArtifact('runtime/native/bpf-lsm/observe-exec.bpf.c', 'runtime/native/bpf-lsm/observe-exec.bpf.c', 'copiedNativeArtifacts');
+report.mediationSupervisor = 'built-and-copied';
+const clang = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v clang'], { encoding: 'utf8' }).stdout.trim();
+const bpfHeaders = existsSync('/usr/include/bpf/bpf_helpers.h') && existsSync('/usr/include/bpf/bpf_tracing.h');
+const bpftool = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v bpftool'], { encoding: 'utf8' }).stdout.trim();
+const kernelBtf = '/sys/kernel/btf/vmlinux';
+if (clang && bpfHeaders && bpftool && existsSync(kernelBtf)) {
+  const bpfBuild = join(root, 'runtime/native/bpf-lsm/build');
+  mkdirSync(bpfBuild, { recursive: true });
+  const btfResult = spawnSync(bpftool, ['btf', 'dump', 'file', kernelBtf, 'format', 'c'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (btfResult.status !== 0) throw new Error(`BPF vmlinux header generation failed: ${btfResult.stderr}`);
+  writeFileSync(join(bpfBuild, 'vmlinux.h'), btfResult.stdout);
+  const bpfArchitecture = process.arch === 'arm64' ? 'arm64' : 'x86';
+  const bpfResult = spawnSync(clang, ['-target', 'bpf', `-D__TARGET_ARCH_${bpfArchitecture}`, '-O2', '-g', '-I', 'runtime/native/bpf-lsm/build', '-c', 'runtime/native/bpf-lsm/observe-exec.bpf.c', '-o', 'runtime/native/bpf-lsm/build/observe-exec.bpf.o'], { cwd: root, encoding: 'utf8' });
+  if (bpfResult.status !== 0) throw new Error(`BPF LSM object build failed: ${bpfResult.stderr}`);
+  copyArtifact('runtime/native/bpf-lsm/build/observe-exec.bpf.o', 'runtime/native/bpf-lsm/observe-exec.bpf.o', 'copiedNativeArtifacts');
+  report.bpfLsmObject = 'built-and-copied';
+} else report.bpfLsmObject = 'unavailable-toolchain';
 
 const cargo = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v cargo'], { encoding: 'utf8' }).stdout.trim();
 if (cargo) {

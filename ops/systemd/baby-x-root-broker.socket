@@ -1,0 +1,13 @@
+[Unit]
+Description=Baby-X transactional root broker socket
+
+[Socket]
+ListenStream=/run/baby-x/root-broker.sock
+SocketUser=root
+SocketGroup=baby-x
+SocketMode=0660
+RemoveOnStop=yes
+Service=baby-x-root-broker.service
+
+[Install]
+WantedBy=sockets.target

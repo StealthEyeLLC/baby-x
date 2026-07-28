@@ -1,13 +1,18 @@
 [Unit]
 Description=Baby-X transactional root broker socket
+Before=baby-x.service
 
 [Socket]
 ListenStream=/run/baby-x/root-broker.sock
 SocketUser=root
-SocketGroup=baby-x
+SocketGroup=horsey
 SocketMode=0660
+DirectoryMode=0750
+FileDescriptorName=baby-x-root-broker
+Accept=no
 RemoveOnStop=yes
 Service=baby-x-root-broker.service
+Backlog=128
 
 [Install]
 WantedBy=sockets.target

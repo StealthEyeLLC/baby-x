@@ -45,7 +45,23 @@ export function createGatewayServer(options = {}) {
       const url = new URL(request.url ?? '/', config.issuer);
       if (request.method === 'GET' && url.pathname === '/healthz') {
         const catalog = await dynamicCatalog(client);
-        json(response, 200, { ok: true, product: 'baby-x-gateway', publicTool: 'call_x', runtime: { product: catalog.product, protocol: catalog.protocol, operationCount: catalog.operations.length } });
+        json(response, 200, {
+          ok: true,
+          product: 'baby-x-gateway',
+          publicTool: 'call_x',
+          runtime: {
+            product: catalog.product,
+            protocol: catalog.protocol,
+            repository: catalog.repository ?? null,
+            sourceCommit: catalog.sourceCommit ?? null,
+            sourceTree: catalog.sourceTree ?? null,
+            release: catalog.release ?? null,
+            operationCatalogVersion: catalog.operationCatalogVersion ?? null,
+            operationCatalogSha256: catalog.operationCatalogSha256 ?? null,
+            operationCount: catalog.operations.length,
+            catalog: catalog.catalog ?? null,
+          },
+        });
         return;
       }
       if (request.method === 'GET' && (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp')) { json(response, 200, protectedResource(config)); return; }

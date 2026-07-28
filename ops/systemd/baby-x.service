@@ -1,38 +1,48 @@
 [Unit]
-Description=Baby-X unrestricted sovereign runtime
+Description=Baby-X unprivileged transactional runtime
 Requires=baby-x.socket
-After=local-fs.target network.target
+Wants=baby-x-root-broker.socket
+After=local-fs.target network.target baby-x-root-broker.socket
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
 [Service]
 Type=simple
-User=root
-Group=root
-ExecStart=/opt/baby-x/current/runtime/src/cli/main.ts serve
+User=fix-exec
+Group=horsey
+SupplementaryGroups=horsey
+ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/runtime/cli/main.js serve
+WorkingDirectory=/opt/baby-x/current
 Environment=NODE_ENV=production
+Environment=BABY_X_REQUIRE_RELEASE_IDENTITY=1
+Environment=BABY_X_RELEASE_MANIFEST=/opt/baby-x/current/release.json
+Environment=BABYX_ROOT_BROKER_SOCKET=/run/baby-x/root-broker.sock
 EnvironmentFile=-/etc/baby-x/environment
+EnvironmentFile=-/etc/baby-x/runtime-key-environment
+UMask=0077
 Restart=on-failure
 RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=30
 KillMode=mixed
 KillSignal=SIGTERM
-TimeoutStopSec=30
-NoNewPrivileges=false
-ProtectSystem=off
-ProtectHome=false
-PrivateTmp=false
-PrivateDevices=false
-PrivateNetwork=false
-PrivateUsers=false
-ProtectKernelTunables=false
-ProtectKernelModules=false
-ProtectKernelLogs=false
-ProtectControlGroups=false
-RestrictNamespaces=false
-RestrictSUIDSGID=false
-LockPersonality=false
-MemoryDenyWriteExecute=false
-Delegate=yes
-TasksMax=infinity
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/baby-x /run/baby-x/root-credentials
+ReadOnlyPaths=/opt/baby-x/current /etc/baby-x
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+TasksMax=4096
 LimitNOFILE=1048576
-LimitMEMLOCK=infinity
-LimitCORE=infinity
+
 [Install]
 WantedBy=multi-user.target

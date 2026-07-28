@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "rules": [
+    { "id": "durable-storage", "prefixes": ["runtime/src/store", "runtime/src/persistence", "schemas/"] },
+    { "id": "authority-boundaries", "prefixes": ["runtime/src/root-authority/", "runtime/src/root-fabric/", "runtime/src/root-broker-main.ts", "runtime/src/root-broker-entry.ts"] },
+    { "id": "privileged-execution", "prefixes": ["runtime/src/root-platform/", "runtime/native/"] },
+    { "id": "credential-handling", "prefixes": ["runtime/src/secrets/", "scripts/provision-local-keys.sh"] },
+    { "id": "release-activation", "prefixes": ["scripts/activate-release.mjs", "scripts/build-release.mjs", "scripts/lib/release-contract.mjs", "ops/deploy-critical.sh", "ops/deploy-fast.sh"] },
+    { "id": "rollback", "prefixes": ["scripts/rollback-local.sh"] },
+    { "id": "service-definitions", "prefixes": ["ops/systemd/", "ops/tmpfiles/"] },
+    { "id": "protected-snapshot", "prefixes": ["runtime/src/machines/", "runtime/src/certification/"] }
+  ]
+}

@@ -23,6 +23,29 @@ export function appendBoundedRuntimeFrameChunk(pending: Buffer, chunk: Buffer, m
   return next;
 }
 
+export function resolveRuntimeListenOptions(
+  socketPath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  pid = process.pid,
+): { path: string } | { fd: number } {
+  const provided = ['LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES'].filter((name) => environment[name] !== undefined);
+  if (provided.length === 0) return { path: socketPath };
+  if (environment.LISTEN_PID === undefined || environment.LISTEN_FDS === undefined) {
+    throw new Error('incomplete systemd socket activation environment');
+  }
+  const listenPid = Number(environment.LISTEN_PID);
+  const listenFds = Number(environment.LISTEN_FDS);
+  if (!Number.isSafeInteger(listenPid) || listenPid < 1 || !Number.isSafeInteger(listenFds) || listenFds < 0) {
+    throw new Error('invalid systemd socket activation environment');
+  }
+  if (listenPid !== pid) throw new Error('systemd socket activation pid mismatch');
+  if (listenFds !== 1) throw new Error('exactly one systemd socket is required');
+  if (environment.LISTEN_FDNAMES !== undefined && environment.LISTEN_FDNAMES !== '' && environment.LISTEN_FDNAMES !== 'baby-x') {
+    throw new Error('systemd socket activation descriptor name mismatch');
+  }
+  return { fd: 3 };
+}
+
 function unsigned(envelope: Envelope): JsonObject {
   const { signature: _signature, ...value } = envelope;
   return value;
@@ -80,6 +103,6 @@ export function startRuntimeServer(runtime = new BabyXRuntime()): ReturnType<typ
       }
     });
   });
-  server.listen({ path: config.socketPath });
+  server.listen(resolveRuntimeListenOptions(config.socketPath));
   return server;
 }

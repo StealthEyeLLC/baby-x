@@ -2,30 +2,42 @@
 Description=Baby-X transactional root broker
 Requires=baby-x-root-broker.socket
 After=local-fs.target
+StartLimitIntervalSec=30
+StartLimitBurst=5
 
 [Service]
 Type=exec
 User=root
 Group=root
-ExecStart=/opt/baby-x/current/bin/node /opt/baby-x/current/dist/runtime/src/root-broker-main.js
+ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/runtime/root-broker-entry.js
+WorkingDirectory=/opt/baby-x/current
+Environment=NODE_ENV=production
+Environment=BABY_X_REQUIRE_RELEASE_IDENTITY=1
+Environment=BABY_X_RELEASE_MANIFEST=/opt/baby-x/current/release.json
 Environment=BABYX_STATE_ROOT=/var/lib/baby-x
-EnvironmentFile=-/etc/baby-x/root-broker.env
-RuntimeDirectory=baby-x
-StateDirectory=baby-x
+EnvironmentFile=-/etc/baby-x/root-broker-environment
 UMask=0077
 Restart=on-failure
-RestartSec=1s
+RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=30
+KillMode=mixed
 Slice=baby-x-root.slice
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
 ReadWritePaths=/var/lib/baby-x /run/baby-x
+ReadOnlyPaths=/opt/baby-x/current /etc/baby-x
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
+RestrictSUIDSGID=yes
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SETGID CAP_SETUID CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_AUDIT_WRITE CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_MKNOD CAP_NET_ADMIN CAP_NET_RAW CAP_PERFMON CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SYS_NICE CAP_SYS_PTRACE CAP_SYS_RESOURCE
 SystemCallArchitectures=native
 
 [Install]

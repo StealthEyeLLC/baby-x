@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "1.0.0",
+  "services": {
+    "baby-x-root.slice": {
+      "kind": "slice",
+      "privileged": true,
+      "sha256": "23d9225218d9486bd37a92ace0e1375d2dc05089f8e0315a2ca9b31be3eb1017"
+    },
+    "baby-x-root-broker.socket": {
+      "kind": "unix-socket",
+      "path": "/run/baby-x/root-broker.sock",
+      "owner": "root",
+      "group": "horsey",
+      "mode": "0660",
+      "networkExposed": false,
+      "sha256": "8af6c047e5a60565bad31e03d99c947f9f66454ffa26d1509e2190e80da31e3d"
+    },
+    "baby-x-root-broker.service": {
+      "kind": "service",
+      "user": "root",
+      "group": "root",
+      "entrypoint": "/opt/baby-x/current/runtime/root-broker-entry.js",
+      "privileged": true,
+      "sha256": "bcc1cf33397fed1b83b0aa4e6198bd69eca42de2b9bffeb34a964f271021f19d"
+    },
+    "baby-x.socket": {
+      "kind": "unix-socket",
+      "path": "/run/horsey/baby-x.sock",
+      "owner": "root",
+      "group": "horsey",
+      "mode": "0660",
+      "networkExposed": false,
+      "sha256": "226b838a0e17fffa6244396af74828a67c0f6379637a47f2f57e73677072017d"
+    },
+    "baby-x.service": {
+      "kind": "service",
+      "user": "fix-exec",
+      "group": "horsey",
+      "entrypoint": "/opt/baby-x/current/runtime/cli/main.js",
+      "privileged": false,
+      "sha256": "85077d503d06bc2c9cca4271ee843d75c2f20684adc0d45aecbbc19d2722b148"
+    },
+    "baby-x-gateway.service": {
+      "kind": "service",
+      "user": "fix-mcp",
+      "group": "horsey",
+      "entrypoint": "/opt/baby-x/current/gateway/main.js",
+      "privileged": false,
+      "sha256": "3bb184e1a446474ec7cd83a73f9285af666d2a4ae060f8ae6b4ae56abd1ca642"
+    }
+  }
+}

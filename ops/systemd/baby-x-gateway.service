@@ -2,21 +2,37 @@
 Description=Baby-X unprivileged private gateway
 After=network.target baby-x.socket
 Requires=baby-x.socket
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=fix-mcp
 Group=horsey
-ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/gateway/src/main.js
+ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/gateway/main.js
+WorkingDirectory=/opt/baby-x/current
 Environment=NODE_ENV=production
 EnvironmentFile=-/etc/baby-x/gateway-environment
+EnvironmentFile=-/etc/baby-x/gateway-key-environment
 Restart=on-failure
 RestartSec=2
+TimeoutStartSec=15
+TimeoutStopSec=30
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
 ReadWritePaths=/var/lib/baby-x-gateway
+ReadOnlyPaths=/opt/baby-x/current /etc/baby-x
 RestrictSUIDSGID=yes
 LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
 [Install]
 WantedBy=multi-user.target

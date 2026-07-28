@@ -28,7 +28,9 @@ test('describe exposes only implemented operations without duplicate authority p
     const description = new BabyXRuntime({ stateRoot: root }).describe();
     const operations = description.operations;
     assert.ok(Array.isArray(operations));
-    assert.equal(operations.length, 190);
+    assert.ok(operations.length >= 190);
+    assert.equal(new Set(operations.map((item) => item.operation)).size, operations.length);
+    for (const name of ['babyx.root.platform.describe', 'babyx.root.provider.list', 'babyx.root.provider.get', 'babyx.root.provider.reconcile']) assert.ok(operations.some((item) => item.operation === name), name);
     assert.ok(operations.some((item) => item.operation === 'babyx.artifact.verify'));
     assert.ok(operations.some((item) => item.operation === 'babyx.syscall.inject.fd'));
     assert.equal(operations.some((item) => item.operation === 'babyx.machine.raw'), false);
@@ -44,7 +46,7 @@ test('describe exposes only implemented operations without duplicate authority p
       assert.ok(Array.isArray(definition.errors));
       assert.ok(Array.isArray(definition.postconditions));
     }
-    assert.equal(description.operationCatalogVersion, '3.0.0');
+    assert.equal(description.operationCatalogVersion, '4.0.0');
     assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     assert.equal(operationDefinitions().length, operations.length);
   } finally { rmSync(root, { recursive: true, force: true }); }

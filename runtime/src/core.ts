@@ -684,6 +684,23 @@ export class BabyXRuntime {
     }
     return this.candidateRaceServiceInstance;
   }
+  private rootPlatformServiceInstance?: import('./root-platform/service.ts').SovereignRootPlatformService;
+  private async rootPlatformService(): Promise<import('./root-platform/service.ts').SovereignRootPlatformService> {
+    if (this.rootPlatformServiceInstance === undefined) {
+      const { SovereignRootPlatformService } = await import('./root-platform/service.ts');
+      this.rootPlatformServiceInstance = new SovereignRootPlatformService({
+        stateRoot: this.stateRoot,
+        identity: {
+          runningCommit: this.options.sourceCommit ?? process.env.BABY_X_RELEASE_COMMIT ?? process.env.BABY_X_SOURCE_COMMIT ?? 'development',
+          runningTree: this.options.sourceTree ?? process.env.BABY_X_RELEASE_TREE ?? process.env.BABY_X_SOURCE_TREE ?? 'development',
+          protocolVersion: 'QRT1/1.0.0',
+          catalogVersion: OPERATION_CATALOG_VERSION,
+          catalogDigest: sha256(canonicalize(OPERATION_DEFINITIONS)),
+        },
+      });
+    }
+    return this.rootPlatformServiceInstance;
+  }
   private async rootAuthorityService(): Promise<import('./root-authority/service.ts').TransactionalRootAuthorityService> {
     if (this.rootAuthorityServiceInstance === undefined) {
       const { TransactionalRootAuthorityService } = await import('./root-authority/service.ts');
@@ -697,6 +714,10 @@ export class BabyXRuntime {
     if (operation === 'babyx.describe') return this.describe();
     if (operation === 'babyx.health') return this.health();
     if (operation.startsWith('babyx.root.')) {
+      if (operation === 'babyx.root.platform.describe') return (await this.rootPlatformService()).platformDescribe();
+      if (operation === 'babyx.root.provider.list') return (await this.rootPlatformService()).providerList(payload);
+      if (operation === 'babyx.root.provider.get') return (await this.rootPlatformService()).providerGet(payload);
+      if (operation === 'babyx.root.provider.reconcile') return (await this.rootPlatformService()).providerReconcile(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

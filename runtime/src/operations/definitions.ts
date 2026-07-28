@@ -25,6 +25,10 @@ const operations = `
 babyx.describe
 babyx.health
 babyx.root.describe
+babyx.root.platform.describe
+babyx.root.provider.list
+babyx.root.provider.get
+babyx.root.provider.reconcile
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -291,7 +295,10 @@ function rootSchema(operation: string): Record<string, unknown> {
   const transactionId = { type: 'string', pattern: '^rtx_[a-f0-9]{32}$' } as const;
   const expectedSequence = { type: 'integer', minimum: 1, maximum: 10_000_000 } as const;
   const page = { offset: { type: 'integer', minimum: 0, maximum: 10_000_000 }, limit: { type: 'integer', minimum: 1, maximum: 1_000 } } as const;
-  if (operation === 'babyx.root.describe') return objectSchema({});
+  if (operation === 'babyx.root.describe' || operation === 'babyx.root.platform.describe') return objectSchema({});
+  const providerId = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$' } as const;
+  if (operation === 'babyx.root.provider.list') return objectSchema({ family: providerId, supportState: { enum: ['SUPPORTED', 'DEGRADED', 'UNAVAILABLE', 'EXPERIMENTAL', 'DISABLED', 'REVOKED', 'FAILED'] }, ...page });
+  if (operation === 'babyx.root.provider.get' || operation === 'babyx.root.provider.reconcile') return objectSchema({ providerId }, ['providerId']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -390,13 +397,14 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   const family = familyOf(operation);
   if (family === 'machine') return ['authoritative_machine_record_persisted', 'observed_state_reported'];
   if (family === 'certification' || family === 'race') return ['durable_record_persisted', 'evidence_references_reported'];
+  if (operation === 'babyx.root.provider.reconcile') return ['provider_reconciliation_record_persisted', 'provider_state_observed'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.0.0';
+export const OPERATION_CATALOG_VERSION = '4.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

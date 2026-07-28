@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /opt/baby-x/current/bin/node /opt/baby-x/current/dist/runtime/src/rootctl.js "$@"

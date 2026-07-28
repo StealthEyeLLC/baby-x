@@ -1,0 +1,32 @@
+[Unit]
+Description=Baby-X transactional root broker
+Requires=baby-x-root-broker.socket
+After=local-fs.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/opt/baby-x/current/bin/node /opt/baby-x/current/dist/runtime/src/root-broker-main.js
+Environment=BABYX_STATE_ROOT=/var/lib/baby-x
+EnvironmentFile=-/etc/baby-x/root-broker.env
+RuntimeDirectory=baby-x
+StateDirectory=baby-x
+UMask=0077
+Restart=on-failure
+RestartSec=1s
+Slice=baby-x-root.slice
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/baby-x /run/baby-x
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SETGID CAP_SETUID CAP_SYS_ADMIN
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

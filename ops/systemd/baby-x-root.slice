@@ -1,0 +1,10 @@
+[Unit]
+Description=Baby-X root execution resource boundary
+
+[Slice]
+CPUAccounting=yes
+MemoryAccounting=yes
+IOAccounting=yes
+TasksAccounting=yes
+TasksMax=4096
+MemoryMax=8G

@@ -35,6 +35,46 @@ babyx.root.transaction.commit
 babyx.root.transaction.rollback
 babyx.root.transaction.events
 babyx.root.transaction.verify
+babyx.root.compatibility.get
+babyx.root.effect.registry
+babyx.root.effect.create
+babyx.root.effect.get
+babyx.root.effect.list
+babyx.root.effect.events
+babyx.root.effect.lease.acquire
+babyx.root.effect.authorize
+babyx.root.effect.prepare
+babyx.root.effect.begin
+babyx.root.effect.validate
+babyx.root.effect.commit
+babyx.root.effect.cancel
+babyx.root.effect.rollback
+babyx.root.effect.compensate
+babyx.root.effect.clean
+babyx.root.effect.repair
+babyx.root.bundle.verify
+babyx.root.bundle.install
+babyx.root.bundle.get
+babyx.root.bundle.list
+babyx.root.bundle.revoke
+babyx.root.grant.install
+babyx.root.grant.get
+babyx.root.grant.list
+babyx.root.grant.revoke
+babyx.root.observation.start
+babyx.root.observation.get
+babyx.root.observation.record
+babyx.root.observation.finalize
+babyx.root.credential.lease
+babyx.root.credential.deliver
+babyx.root.credential.get
+babyx.root.credential.list
+babyx.root.credential.revoke
+babyx.root.credential.clean
+babyx.root.freeze.get
+babyx.root.freeze.set
+babyx.root.kill
+babyx.root.reconcile
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -214,7 +254,7 @@ babyx.counterexample.replay
 babyx.counterexample.remove
 `.trim().split(/\s+/u);
 
-const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate', 'export', 'wait']);
+const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate', 'verify', 'registry', 'export', 'wait']);
 const durableFamilies = new Set(['machine', 'certification', 'race', 'root']);
 const highRiskFamilies = new Set(['systemd', 'machine', 'debug', 'checkpoint', 'syscall']);
 const conditionalFileSuffixes = new Set(['write', 'replace', 'patch', 'copy', 'move', 'remove']);
@@ -304,6 +344,51 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.transaction.observe') return objectSchema({ transactionId, expectedSequence, phase: { enum: ['execution', 'verification', 'rollback'] }, status: { enum: ['succeeded', 'failed', 'ambiguous'] }, authority: identifier, reference: stringValue, observationDigest: digest }, ['transactionId', 'expectedSequence', 'phase', 'status', 'authority', 'reference', 'observationDigest']);
   if (operation === 'babyx.root.transaction.commit') return objectSchema({ transactionId, expectedSequence, commitDigest: digest, verificationDigest: digest }, ['transactionId', 'expectedSequence', 'commitDigest', 'verificationDigest']);
   if (operation === 'babyx.root.transaction.rollback') return objectSchema({ transactionId, expectedSequence, rollbackDigest: digest, reasonDigest: digest }, ['transactionId', 'expectedSequence', 'rollbackDigest', 'reasonDigest']);
+
+  const effectTransactionId = { type: 'string', pattern: '^rfx_[a-f0-9]{32}$' } as const;
+  const leaseId = { type: 'string', pattern: '^crl_[a-f0-9]{32}$' } as const;
+  const sessionId = { type: 'string', pattern: '^obs_[a-f0-9]{32}$' } as const;
+  const fencingToken = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } as const;
+  const effectPage = { offset: { type: 'integer', minimum: 0, maximum: 10_000_000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } as const;
+  const strictJsonObject = { type: 'object', additionalProperties: true } as const;
+  const boundedSmallStrings = { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 4_096 } } as const;
+  if (operation === 'babyx.root.compatibility.get' || operation === 'babyx.root.effect.registry') return objectSchema({});
+  if (operation === 'babyx.root.effect.create') return objectSchema({ source: strictJsonObject, skill: strictJsonObject, deadline: stringValue, atomicityMode: { enum: ['ATOMIC_WITHIN_PROVIDER', 'SAGA', 'IRREVERSIBLE'] }, plan: strictJsonObject, policy: strictJsonObject, requestedProvider: { enum: ['HOST_ENVELOPE', 'DISPOSABLE_MACHINE', null] }, riskClass: identifier, environmentDigest: digest }, ['source', 'skill', 'deadline', 'atomicityMode', 'plan', 'policy', 'riskClass', 'environmentDigest']);
+  if (operation === 'babyx.root.effect.get') return objectSchema({ transactionId: effectTransactionId }, ['transactionId']);
+  if (operation === 'babyx.root.effect.list') return objectSchema({ state: stringValue, ownerPrincipal: identifier, ...effectPage });
+  if (operation === 'babyx.root.effect.events') return objectSchema({ transactionId: effectTransactionId, ...effectPage }, ['transactionId']);
+  if (operation === 'babyx.root.effect.lease.acquire') return objectSchema({ transactionId: effectTransactionId, expectedSequence, controllerId: identifier, ttlMs: { type: 'integer', minimum: 1_000, maximum: 300_000 }, takeoverReason: stringValue }, ['transactionId', 'expectedSequence', 'controllerId', 'ttlMs']);
+  if (operation === 'babyx.root.effect.authorize') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, decisionDigest: digest, expiresAt: stringValue, executionProvider: { enum: ['HOST_ENVELOPE', 'DISPOSABLE_MACHINE'] }, providerId: identifier, providerVersion: stringValue, providerContractVersion: stringValue, providerProfileDigest: digest }, ['transactionId', 'expectedSequence', 'fencingToken', 'decisionDigest', 'expiresAt', 'executionProvider', 'providerId', 'providerVersion', 'providerContractVersion', 'providerProfileDigest']);
+  if (operation === 'babyx.root.effect.prepare') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, priorStateDigest: digest, artifactIds: boundedSmallStrings, snapshotReferences: boundedSmallStrings, rollbackReady: { type: 'boolean' }, compensationReady: { type: 'boolean' } }, ['transactionId', 'expectedSequence', 'fencingToken', 'priorStateDigest', 'rollbackReady', 'compensationReady']);
+  if (operation === 'babyx.root.effect.begin') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, activeJobIds: boundedSmallStrings, allJobIds: boundedSmallStrings, activeMachineIds: boundedSmallStrings, allMachineIds: boundedSmallStrings, unitNames: boundedSmallStrings, processIdentities: { type: 'array', maxItems: 256, items: strictJsonObject }, providerAttempts: { type: 'array', maxItems: 256, items: strictJsonObject } }, ['transactionId', 'expectedSequence', 'fencingToken']);
+  if (operation === 'babyx.root.effect.validate') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, specification: strictJsonObject, validatorVersion: stringValue, expectedState: {}, observedState: {}, attempts: { type: 'integer', minimum: 1, maximum: 1_000 }, result: { enum: ['SUCCEEDED', 'FAILED', 'AMBIGUOUS'] }, resultDigest: digest, failureReason: { anyOf: [{ type: 'null' }, stringValue] }, executionTerminal: { type: 'boolean' } }, ['transactionId', 'expectedSequence', 'fencingToken', 'specification', 'validatorVersion', 'attempts', 'result', 'resultDigest', 'executionTerminal']);
+  if (operation === 'babyx.root.effect.commit') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, cleanupComplete: { type: 'boolean' }, finalResultDigest: digest }, ['transactionId', 'expectedSequence', 'fencingToken', 'cleanupComplete', 'finalResultDigest']);
+  if (operation === 'babyx.root.effect.cancel') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, reason: stringValue }, ['transactionId', 'expectedSequence', 'fencingToken', 'reason']);
+  if (operation === 'babyx.root.effect.rollback') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, phase: { enum: ['request', 'begin', 'complete'] }, reason: stringValue, restoredStateDigest: { anyOf: [{ type: 'null' }, digest] }, result: stringValue, unresolvedEffects: boundedSmallStrings }, ['transactionId', 'expectedSequence', 'fencingToken', 'phase']);
+  if (operation === 'babyx.root.effect.compensate') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, phase: { enum: ['begin', 'complete'] }, reason: stringValue, result: stringValue, residualDifferences: boundedSmallStrings }, ['transactionId', 'expectedSequence', 'fencingToken', 'phase']);
+  if (operation === 'babyx.root.effect.clean') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, completed: { type: 'boolean' }, terminalState: { enum: ['FAILED', 'ROLLED_BACK', 'COMPENSATED'] }, unitRemoved: { type: 'boolean' }, cgroupEmpty: { type: 'boolean' }, processAbsent: { type: 'boolean' }, machineAbsent: { type: 'boolean' }, mountAbsent: { type: 'boolean' }, temporaryPathAbsent: { type: 'boolean' }, credentialPathAbsent: { type: 'boolean' }, observerStopped: { type: 'boolean' }, sourcePreserved: { type: 'boolean' } }, ['transactionId', 'expectedSequence', 'fencingToken', 'completed']);
+  if (operation === 'babyx.root.effect.repair') return objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken, nextState: { enum: ['ROLLBACK_REQUESTED', 'CLEANING', 'FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'] }, reason: stringValue }, ['transactionId', 'expectedSequence', 'fencingToken', 'nextState', 'reason']);
+  if (operation === 'babyx.root.bundle.verify' || operation === 'babyx.root.bundle.install') return objectSchema({ manifest: strictJsonObject, signature: stringValue }, ['manifest', 'signature']);
+  if (operation === 'babyx.root.bundle.get') return objectSchema({ bundleDigest: digest }, ['bundleDigest']);
+  if (operation === 'babyx.root.bundle.list') return objectSchema({ state: stringValue, ...effectPage });
+  if (operation === 'babyx.root.bundle.revoke') return objectSchema({ bundleDigest: digest, reason: stringValue }, ['bundleDigest', 'reason']);
+  if (operation === 'babyx.root.grant.install') return objectSchema({ grant: strictJsonObject }, ['grant']);
+  if (operation === 'babyx.root.grant.get') return objectSchema({ grantId: identifier }, ['grantId']);
+  if (operation === 'babyx.root.grant.list') return objectSchema({ state: stringValue, ownerPrincipal: identifier, ...effectPage });
+  if (operation === 'babyx.root.grant.revoke') return objectSchema({ grantId: identifier, reason: stringValue }, ['grantId', 'reason']);
+  if (operation === 'babyx.root.observation.start') return objectSchema({ transactionId: effectTransactionId, stepId: identifier, requiredKinds: boundedSmallStrings, requiredSources: boundedSmallStrings, fallbackSources: boundedSmallStrings, maxEvents: { type: 'integer', minimum: 1, maximum: 100_000 }, maxBytes: { type: 'integer', minimum: 1_024, maximum: 67_108_864 }, maxDurationMs: { type: 'integer', minimum: 1_000, maximum: 3_600_000 } }, ['transactionId', 'stepId', 'requiredKinds', 'requiredSources']);
+  if (operation === 'babyx.root.observation.get') return objectSchema({ sessionId, ...effectPage }, ['sessionId']);
+  if (operation === 'babyx.root.observation.record') return objectSchema({ sessionId, transactionId: effectTransactionId, stepId: identifier, kind: stringValue, source: stringValue, occurredAt: stringValue, cgroupId: { anyOf: [{ type: 'null' }, stringValue] }, unitName: { anyOf: [{ type: 'null' }, identifier] }, machineId: { anyOf: [{ type: 'null' }, identifier] }, processId: { anyOf: [{ type: 'null' }, positiveInteger] }, processStartTime: { anyOf: [{ type: 'null' }, stringValue] }, bootId: { anyOf: [{ type: 'null' }, identifier] }, data: strictJsonObject }, ['sessionId', 'transactionId', 'stepId', 'kind', 'source', 'data']);
+  if (operation === 'babyx.root.observation.finalize') return objectSchema({ sessionId, sourceStatus: strictJsonObject, spill: { type: 'boolean' } }, ['sessionId', 'sourceStatus']);
+  if (operation === 'babyx.root.credential.lease') return objectSchema({ credentialReference: stringValue, provider: { enum: ['HOST_ENVELOPE', 'DISPOSABLE_MACHINE'] }, skillBundleDigest: digest, grantDigest: digest, transactionId: effectTransactionId, stepId: identifier, targetType: { enum: ['UNIT', 'MACHINE'] }, targetId: identifier, purpose: stringValue, expiresAt: stringValue, maximumTtlMs: { type: 'integer', minimum: 1_000, maximum: 3_600_000 }, transactionDeadline: stringValue, operationDeadline: stringValue, revocationBehavior: { enum: ['FREEZE', 'CANCEL_AND_ROLLBACK', 'ALLOW_TO_FINISH'] }, authorized: { type: 'boolean' } }, ['credentialReference', 'provider', 'skillBundleDigest', 'grantDigest', 'transactionId', 'stepId', 'targetType', 'targetId', 'purpose', 'expiresAt', 'maximumTtlMs', 'transactionDeadline', 'operationDeadline', 'revocationBehavior', 'authorized']);
+  if (operation === 'babyx.root.credential.deliver') return objectSchema({ leaseId, transactionId: effectTransactionId, stepId: identifier, skillBundleDigest: digest, grantDigest: digest, targetType: { enum: ['UNIT', 'MACHINE'] }, targetId: identifier }, ['leaseId', 'transactionId', 'stepId', 'skillBundleDigest', 'grantDigest', 'targetType', 'targetId']);
+  if (operation === 'babyx.root.credential.get') return objectSchema({ leaseId }, ['leaseId']);
+  if (operation === 'babyx.root.credential.list') return objectSchema({ state: stringValue, transactionId: effectTransactionId, ...effectPage });
+  if (operation === 'babyx.root.credential.revoke' || operation === 'babyx.root.credential.clean') return objectSchema({ leaseId, reason: stringValue }, ['leaseId', 'reason']);
+  if (operation === 'babyx.root.freeze.get') return objectSchema({ scope: stringValue, selector: stringValue, ...effectPage });
+  if (operation === 'babyx.root.freeze.set') return objectSchema({ scope: stringValue, selector: stringValue, active: { type: 'boolean' }, reason: stringValue, expiresAt: { anyOf: [{ type: 'null' }, stringValue] } }, ['scope', 'selector', 'active', 'reason']);
+  if (operation === 'babyx.root.kill') return objectSchema({ scope: { enum: ['TRANSACTION', 'SKILL', 'ALL'] }, selector: stringValue, reason: stringValue }, ['scope', 'selector', 'reason']);
+  if (operation === 'babyx.root.reconcile') return objectSchema({ transactionId: effectTransactionId, limit: { type: 'integer', minimum: 1, maximum: 4_096 } });
   throw new Error(`missing root operation schema: ${operation}`);
 }
 
@@ -396,7 +481,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.0.0';
+export const OPERATION_CATALOG_VERSION = '3.1.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

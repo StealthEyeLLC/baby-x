@@ -614,6 +614,7 @@ export class BabyXRuntime {
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
   private rootAuthorityServiceInstance?: import('./root-authority/service.ts').TransactionalRootAuthorityService;
+  private rootFabricServiceInstance?: import('./root-fabric/service.ts').RootFabricService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -692,6 +693,109 @@ export class BabyXRuntime {
     return this.rootAuthorityServiceInstance;
   }
 
+  private async rootFabricService(): Promise<import('./root-fabric/service.ts').RootFabricService> {
+    if (this.rootFabricServiceInstance === undefined) {
+      const [{ RootFabricService }, { SystemdManager }] = await Promise.all([import('./root-fabric/service.ts'), import('./systemd/manager.ts')]);
+      const artifacts = await this.artifactManager();
+      const artifactAdapter = {
+        capture: async (name: string, bytes: Buffer, metadata: JsonObject) => {
+          const record = artifacts.begin(name, metadata);
+          const artifactId = String(record.id);
+          for (let offset = 0; offset < bytes.length; offset += 65_536) artifacts.upload(artifactId, offset, bytes.subarray(offset, Math.min(offset + 65_536, bytes.length)));
+          const observedSha256 = sha256(bytes);
+          artifacts.finalize(artifactId, bytes.length, observedSha256);
+          return { artifactId, sha256: observedSha256, size: bytes.length };
+        },
+        read: async (artifactId: string) => {
+          const chunks: Buffer[] = [];
+          let offset = 0;
+          for (;;) {
+            const page = artifacts.download(artifactId, offset, 65_536);
+            chunks.push(Buffer.from(String(page.data), 'base64'));
+            offset = Number(page.offset);
+            if (page.eof === true) break;
+          }
+          return Buffer.concat(chunks);
+        },
+        spill: async (name: string, value: JsonObject, metadata: JsonObject) => {
+          const captured = await artifactAdapter.capture(name, Buffer.from(canonicalize(value), 'utf8'), metadata);
+          return { artifactId: captured.artifactId };
+        },
+      };
+      const runtimeContext = (suffix: string): RuntimeExecutionContext => ({ subject: 'stealtheye-owner', authorityClass: 'unrestricted-owner', idempotencyKey: `root-recovery-${suffix}` });
+      const parseProperties = (stdout: string): Record<string, string> => Object.fromEntries(stdout.split('\n').filter(Boolean).map((line) => { const separator = line.indexOf('='); return separator < 1 ? [line, ''] : [line.slice(0, separator), line.slice(separator + 1)]; }));
+      const recoveryAuthority = {
+        inspectUnit: async (unitName: string, expectedIdentity: JsonObject) => {
+          const systemd = new SystemdManager();
+          const result = await systemd.show({ unit: unitName, properties: ['LoadState', 'ActiveState', 'SubState', 'MainPID', 'InvocationID', 'ControlGroup', 'Result', 'ExecMainStatus'] });
+          const values = parseProperties(result.stdout);
+          const exists = result.exitCode === 0 && values.LoadState !== 'not-found';
+          const active = exists && ['active', 'activating', 'reloading'].includes(values.ActiveState ?? '');
+          const terminal = !exists || ['inactive', 'failed'].includes(values.ActiveState ?? '');
+          const matches = exists && (expectedIdentity.invocationId === undefined || String(expectedIdentity.invocationId) === values.InvocationID) && (expectedIdentity.mainPid === undefined || String(expectedIdentity.mainPid) === values.MainPID) && (expectedIdentity.cgroupPath === undefined || String(expectedIdentity.cgroupPath) === values.ControlGroup);
+          return { exists, matches, active, terminal, identity: values, resultDigest: sha256(canonicalize(values)) };
+        },
+        inspectMachine: async (machineId: string, expectedIdentity: JsonObject) => {
+          try {
+            const service = await this.machineService();
+            const result = service.get({ machineId }, runtimeContext(`machine-get-${machineId}`));
+            const machine = result.machine as JsonObject;
+            const lifecycle = machine.lifecycle as JsonObject;
+            const state = String(lifecycle?.persistedState ?? 'UNKNOWN');
+            const matches = machine.machineId === machineId && (expectedIdentity.transactionId === undefined || machine.parentTransactionId === expectedIdentity.transactionId || machine.ownerTransactionId === expectedIdentity.transactionId);
+            return { exists: true, matches, active: ['STARTING', 'RUNNING', 'STOPPING'].includes(state), terminal: ['STOPPED', 'DESTROYED', 'FAILED', 'LOST', 'EXPIRED'].includes(state), identity: machine, resultDigest: sha256(canonicalize(machine)) };
+          } catch { return { exists: false, matches: true, active: false, terminal: true, identity: {}, resultDigest: null }; }
+        },
+        inspectJob: async (jobId: string) => {
+          try {
+            const job = this.jobs.get(jobId);
+            const active = ['pending', 'running', 'cancelling'].includes(job.status);
+            const terminal = ['completed', 'failed', 'cancelled'].includes(job.status);
+            return { exists: true, matches: true, active, terminal, identity: job as unknown as JsonObject, resultDigest: sha256(canonicalize(job as unknown as JsonObject)) };
+          } catch { return { exists: false, matches: true, active: false, terminal: true, identity: {}, resultDigest: null }; }
+        },
+        killUnit: async (unitName: string, signal: string) => new SystemdManager().kill({ unit: unitName, signal, who: 'all' }) as unknown as JsonObject,
+        killMachine: async (machineId: string) => {
+          const service = await this.machineService();
+          const current = service.get({ machineId }, runtimeContext(`machine-kill-get-${machineId}`));
+          const machine = current.machine as JsonObject;
+          const lifecycle = machine.lifecycle as JsonObject;
+          const expectedSequence = Number(lifecycle?.stateSequence ?? 0);
+          const stop = await service.stop({ machineId, expectedSequence }, runtimeContext(`machine-stop-${machineId}-${expectedSequence}`));
+          const stoppedMachine = stop.machine as JsonObject;
+          const stoppedLifecycle = stoppedMachine.lifecycle as JsonObject;
+          const destroySequence = Number(stoppedLifecycle?.stateSequence ?? expectedSequence + 1);
+          const destroy = await service.destroy({ machineId, expectedSequence: destroySequence }, runtimeContext(`machine-destroy-${machineId}-${destroySequence}`));
+          return { stop, destroy };
+        },
+        verifyUnitAbsent: async (unitName: string) => {
+          const result = await new SystemdManager().show({ unit: unitName, properties: ['LoadState', 'ActiveState', 'ControlGroup'] });
+          const values = parseProperties(result.stdout);
+          return result.exitCode !== 0 || values.LoadState === 'not-found' || (['inactive', 'failed'].includes(values.ActiveState ?? '') && (values.ControlGroup ?? '') === '');
+        },
+        verifyMachineAbsent: async (machineId: string) => {
+          try {
+            const service = await this.machineService();
+            const result = service.get({ machineId }, runtimeContext(`machine-absence-${machineId}`));
+            const machine = result.machine as JsonObject;
+            const lifecycle = machine.lifecycle as JsonObject;
+            return ['DESTROYED', 'EXPIRED'].includes(String(lifecycle?.persistedState ?? ''));
+          } catch { return true; }
+        },
+      };
+      this.rootFabricServiceInstance = new RootFabricService({
+        stateRoot: this.stateRoot,
+        sourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? 'development',
+        sourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? 'development',
+        catalogVersion: OPERATION_CATALOG_VERSION,
+        catalogDigest: () => sha256(canonicalize(OPERATION_DEFINITIONS)),
+        artifacts: artifactAdapter,
+        recoveryAuthority,
+      });
+    }
+    return this.rootFabricServiceInstance;
+  }
+
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
@@ -709,7 +813,7 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.transaction.rollback') return service.rollback(payload, context);
       if (operation === 'babyx.root.transaction.events') return service.events(payload);
       if (operation === 'babyx.root.transaction.verify') return service.verify(payload);
-      throw new Error('unsupported root authority operation');
+      return (await this.rootFabricService()).execute(operation, payload, context);
     }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;

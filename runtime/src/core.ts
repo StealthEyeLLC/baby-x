@@ -613,6 +613,8 @@ export class BabyXRuntime {
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
+  private rootAuthorityServiceInstance?: import('./root-authority/service.ts').TransactionalRootAuthorityService;
+  private rootFabricServiceInstance?: import('./root-fabric/service.ts').RootFabricService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -683,10 +685,46 @@ export class BabyXRuntime {
     }
     return this.candidateRaceServiceInstance;
   }
+  private async rootAuthorityService(): Promise<import('./root-authority/service.ts').TransactionalRootAuthorityService> {
+    if (this.rootAuthorityServiceInstance === undefined) {
+      const { TransactionalRootAuthorityService } = await import('./root-authority/service.ts');
+      this.rootAuthorityServiceInstance = new TransactionalRootAuthorityService(this.stateRoot);
+    }
+    return this.rootAuthorityServiceInstance;
+  }
+
+  private async rootFabricService(): Promise<import('./root-fabric/service.ts').RootFabricService> {
+    if (this.rootFabricServiceInstance === undefined) {
+      const { RootFabricService } = await import('./root-fabric/service.ts');
+      this.rootFabricServiceInstance = new RootFabricService({
+        stateRoot: this.stateRoot,
+        sourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? 'unknown',
+        sourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? 'unknown',
+        catalogVersion: OPERATION_CATALOG_VERSION,
+        catalogDigest: () => sha256(canonicalize(OPERATION_DEFINITIONS)),
+      });
+    }
+    return this.rootFabricServiceInstance;
+  }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
     if (operation === 'babyx.describe') return this.describe();
     if (operation === 'babyx.health') return this.health();
+    if (operation.startsWith('babyx.root.')) {
+      const service = await this.rootAuthorityService();
+      if (operation === 'babyx.root.describe') return service.describe();
+      if (operation === 'babyx.root.transaction.create') return service.create(payload, context);
+      if (operation === 'babyx.root.transaction.get') return service.get(payload);
+      if (operation === 'babyx.root.transaction.list') return service.list(payload);
+      if (operation === 'babyx.root.transaction.authorize') return service.authorize(payload, context);
+      if (operation === 'babyx.root.transaction.begin') return service.begin(payload, context);
+      if (operation === 'babyx.root.transaction.observe') return service.observe(payload, context);
+      if (operation === 'babyx.root.transaction.commit') return service.commit(payload, context);
+      if (operation === 'babyx.root.transaction.rollback') return service.rollback(payload, context);
+      if (operation === 'babyx.root.transaction.events') return service.events(payload);
+      if (operation === 'babyx.root.transaction.verify') return service.verify(payload);
+      return (await this.rootFabricService()).execute(operation, payload, context);
+    }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;
     if (operation === 'babyx.job.list') return { jobs: this.jobs.list(payload.limit === undefined ? 1_000 : Number(payload.limit), typeof payload.status === 'string' ? payload.status as JobRecord['status'] : undefined) };

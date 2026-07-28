@@ -79,7 +79,6 @@ export function createRootCompatibilityManifest(options: RootCompatibilityOption
     migrationPaths: { '0.1.0': 'read-only', '1.0.0': 'native' },
     prompt1: { originalRootOperations: 11, newAGOperations: 26, expectedRootOperations: 37, typedEffects: 31 },
     forwardCompatibility: { unknownFields: 'reject', unknownMajorVersions: 'reject', observationReferences: 'identifier-only', credentialReferences: 'identifier-only' },
-    forbiddenRuntimeScopes: ['babyx.root.observation.*', 'babyx.root.credential.*', 'babyx.root.freeze.*', 'babyx.root.kill', 'babyx.root.reconcile'],
   };
   return { manifest, digest: sha256(canonicalize(manifest)) };
 }

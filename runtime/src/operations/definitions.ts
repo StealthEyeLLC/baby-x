@@ -43,6 +43,14 @@ babyx.root.microvm.remove
 babyx.root.microvm.snapshot
 babyx.root.microvm.restore
 babyx.root.microvm.pool.reconcile
+babyx.root.attestation.challenge
+babyx.root.attestation.verify
+babyx.root.attestation.get
+babyx.root.identity.issue
+babyx.root.identity.get
+babyx.root.identity.revoke
+babyx.root.secret.lease
+babyx.root.secret.revoke
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -348,6 +356,26 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.microvm.snapshot') return objectSchema({ vmId: microvmId, expiresAt: stringValue }, ['vmId']);
   if (operation === 'babyx.root.microvm.restore') return objectSchema({ snapshotId, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, policyDigest: digest, networkMode: { const: 'NONE' } }, ['snapshotId','transactionId','skillBundleDigest','grantDigest','policyDigest']);
   if (operation === 'babyx.root.microvm.pool.reconcile') return objectSchema({ action: { enum: ['RECONCILE','ACQUIRE','RELEASE'] }, poolId, snapshotId, desiredWarmCount: { type: 'integer', minimum: 0, maximum: 1 }, maximumWarmCount: { const: 1 }, expiresAt: stringValue, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, policyDigest: digest, vmId: microvmId }, ['action']);
+  const attestationChallengeId = { type: 'string', pattern: '^atc_[a-f0-9]{32}$' } as const;
+  const attestationId = { type: 'string', pattern: '^atv_[a-f0-9]{32}$' } as const;
+  const workloadIdentityId = { type: 'string', pattern: '^wid_[a-f0-9]{32}$' } as const;
+  const secretLeaseId = { type: 'string', pattern: '^sls_[a-f0-9]{32}$' } as const;
+  const nullableDigest = { type: ['string', 'null'], pattern: '^[a-f0-9]{64}$' } as const;
+  const pcr = objectSchema({ index: { type: 'integer', minimum: 0, maximum: 23 }, algorithm: { const: 'sha256' }, value: digest }, ['index', 'algorithm', 'value']);
+  const pcrs = { type: 'array', maxItems: 24, items: pcr } as const;
+  const selector = objectSchema({ type: { enum: ['systemd_unit','uid','gid','executable_path','executable_digest','cgroup','vm_id','transaction_id','skill_bundle_digest'] }, value: { type: 'string', minLength: 1, maxLength: 1024 } }, ['type','value']);
+  if (operation === 'babyx.root.attestation.challenge') return objectSchema({ providerId: { enum: ['hardware-tpm','software-tpm-fixture'] }, pcrSelection: { type: 'array', minItems: 1, maxItems: 24, uniqueItems: true, items: { type: 'integer', minimum: 0, maximum: 23 } }, ttlSeconds: { type: 'integer', minimum: 30, maximum: 900 } });
+  if (operation === 'babyx.root.attestation.verify') return objectSchema({
+    challengeId: attestationChallengeId,
+    quote: objectSchema({ providerId: { enum: ['hardware-tpm','software-tpm-fixture'] }, nonce: digest, pcrs: { ...pcrs, minItems: 1 }, eventLogDigest: nullableDigest, imaDigest: nullableDigest, bootId: identifier, observedAt: stringValue, attestationKeyId: identifier, signature: digest }, ['providerId','nonce','pcrs','eventLogDigest','imaDigest','bootId','observedAt','attestationKeyId','signature']),
+    policy: objectSchema({ expectedPcrs: pcrs, maxAgeSeconds: { type: 'integer', minimum: 1, maximum: 900 }, requireMeasuredBoot: { type: 'boolean' }, requireIma: { type: 'boolean' } }, ['expectedPcrs','maxAgeSeconds','requireMeasuredBoot','requireIma']),
+  }, ['challengeId','quote','policy']);
+  if (operation === 'babyx.root.attestation.get') return objectSchema({ challengeId: attestationChallengeId, attestationId }, [], { anyOf: [{ required: ['challengeId'] }, { required: ['attestationId'] }] });
+  if (operation === 'babyx.root.identity.issue') return objectSchema({ attestationId, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, issuerProviderId: { enum: ['spire-workload-api','sovereign-x509-svid'] }, selectors: { type: 'array', minItems: 1, maxItems: 16, items: selector }, ttlSeconds: { type: 'integer', minimum: 60, maximum: 3600 } }, ['attestationId','transactionId','skillBundleDigest','grantDigest','issuerProviderId','selectors']);
+  if (operation === 'babyx.root.identity.get') return objectSchema({ identityId: workloadIdentityId }, ['identityId']);
+  if (operation === 'babyx.root.identity.revoke') return objectSchema({ identityId: workloadIdentityId, expectedSequence, reasonDigest: digest }, ['identityId','expectedSequence','reasonDigest']);
+  if (operation === 'babyx.root.secret.lease') return objectSchema({ identityId: workloadIdentityId, attestationId, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, providerId: { const: 'local-secret-reference' }, secretReference: { type: 'string', minLength: 1, maxLength: 4096 }, target: objectSchema({ kind: { enum: ['SYSTEMD_UNIT','MICROVM','HOST_ENVELOPE','DISPOSABLE_MACHINE'] }, id: identifier }, ['kind','id']), ttlSeconds: { type: 'integer', minimum: 30, maximum: 3600 } }, ['identityId','attestationId','transactionId','skillBundleDigest','grantDigest','providerId','secretReference','target']);
+  if (operation === 'babyx.root.secret.revoke') return objectSchema({ leaseId: secretLeaseId, expectedSequence, reasonDigest: digest }, ['leaseId','expectedSequence','reasonDigest']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -452,13 +480,17 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (operation === 'babyx.root.microvm.snapshot') return ['microvm_snapshot_record_persisted', 'snapshot_artifact_digests_verified', 'credential_absence_verified', 'source_microvm_cleaned'];
   if (operation === 'babyx.root.microvm.restore') return ['microvm_record_persisted', 'snapshot_compatibility_verified', 'fresh_guest_identity_observed', 'provider_observation_reported'];
   if (operation === 'babyx.root.microvm.pool.reconcile') return ['microvm_pool_record_persisted', 'pool_capacity_bounded', 'lease_state_reconciled', 'provider_observation_reported'];
+  if (operation === 'babyx.root.attestation.challenge') return ['attestation_challenge_persisted', 'nonce_bound', 'provider_support_observed'];
+  if (operation === 'babyx.root.attestation.verify') return ['attestation_verification_persisted', 'nonce_consumed', 'freshness_and_measurements_verified'];
+  if (operation === 'babyx.root.identity.issue' || operation === 'babyx.root.identity.revoke') return ['workload_identity_record_persisted', 'selector_binding_verified', 'private_key_not_returned'];
+  if (operation === 'babyx.root.secret.lease' || operation === 'babyx.root.secret.revoke') return ['secret_lease_record_persisted', 'attestation_and_identity_verified', 'secret_value_not_returned'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '7.0.0';
+export const OPERATION_CATALOG_VERSION = '8.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

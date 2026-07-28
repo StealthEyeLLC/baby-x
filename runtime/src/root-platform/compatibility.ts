@@ -6,6 +6,7 @@ import { ROOT_TRANSACTION_PROVIDER_VERSION, ROOT_TRANSACTION_SCHEMA_VERSION } fr
 import { PROVIDER_CONTRACT_VERSION, ROOT_PLATFORM_PROVIDER_VERSION, ROOT_PLATFORM_SCHEMA_VERSION, type ProviderDefinition, type ProviderObservation } from './schemas.ts';
 import type { RootPlatformProvider } from './provider-registry.ts';
 import { mediationProviders } from './mediation/providers.ts';
+import { identityProviders } from './identity/providers.ts';
 import { MicrovmArtifactRegistry } from './microvm/artifacts.ts';
 
 export const PROMPT1_COMMIT = 'fef1cb3b76a5c6f5beb1ca73499c4d1e5cafe713' as const;
@@ -116,5 +117,6 @@ export function defaultProviders(identity: { runningCommit: string; runningTree:
     { definition: probeDefinition, probe: (): ProviderObservation => { const capabilities = probeHostCapabilities(); return { supportState: 'SUPPORTED', executableIdentity: process.execPath, health: { ok: true, capabilityDigest: sha256(canonicalize(capabilities)) }, observedCapabilities: ['procfs', 'sysfs'] }; } },
     { definition: firecrackerDefinition, probe: (): ProviderObservation => { const observed = microvmRegistry.probe() as { supportState: ProviderObservation['supportState']; health: JsonObject }; let executableIdentity = 'firecracker-v1.15.1:unavailable'; try { const artifacts = microvmRegistry.load(); executableIdentity = `${artifacts.firecrackerPath}:${artifacts.firecrackerDigest}`; } catch {} return { supportState: observed.supportState, executableIdentity, health: observed.health, observedCapabilities: observed.supportState === 'SUPPORTED' ? ['kvm','vsock','systemd'] : [] }; } },
     ...mediationProviders(),
+    ...identityProviders(),
   ];
 }

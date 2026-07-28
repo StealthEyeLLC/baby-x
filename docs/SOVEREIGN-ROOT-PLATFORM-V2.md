@@ -100,3 +100,26 @@ Restore verifies the snapshot record, all artifact digests, Firecracker/kernel/r
 The warm pool is deliberately bounded to one retained snapshot-backed capacity unit. Reconciliation creates or removes that unit to match desired capacity. Acquire binds a fresh restore to a transaction and immediately replenishes capacity; release destroys the leased VM and reconciles the pool. Idempotency, lease state, snapshot state, and events are durable and digest chained. Unknown, expired, contaminated, incompatible, or concurrently leased records fail closed.
 
 Catalog `7.0.0` declares explicit snapshot, restore, and pool postconditions. The combined live certification proves cold boot, snapshot creation, source cleanup, digest readback, identity reseeding, contaminated-snapshot rejection, warm-pool acquire/release/replenishment, provider restart safety, and final zero-resource absence.
+
+## Checkpoint E
+
+Checkpoint E adds an attestation-to-workload-identity chain and eight compact public operations:
+
+- `babyx.root.attestation.challenge`
+- `babyx.root.attestation.verify`
+- `babyx.root.attestation.get`
+- `babyx.root.identity.issue`
+- `babyx.root.identity.get`
+- `babyx.root.identity.revoke`
+- `babyx.root.secret.lease`
+- `babyx.root.secret.revoke`
+
+Attestation challenges are owner-bound, nonce-bound, PCR-selection-bound, expiring, and durably idempotent. Verification consumes one challenge, enforces quote freshness, exact provider binding, requested PCR presence, policy PCR equality, optional measured-boot and IMA evidence requirements, and deterministic quote signatures. A consumed nonce cannot authorize a second verification with different evidence. Hardware TPM private keys are never exported.
+
+The live host has no TPM device, TPM2 tools, EFI measured-boot event log, software TPM binary, or SPIRE binary/socket. The registry therefore reports `hardware-tpm`, `measured-boot-evidence`, and `spire-workload-api` as `UNAVAILABLE`; it does not infer trust from source or configuration presence. The bounded software-TPM provider is `EXPERIMENTAL` and test-only. IMA measurement evidence is `SUPPORTED` in observe-only mode and never enables appraisal. The SPIRE contract is pinned to `spire@1.12.4`; it remains unavailable until an enrolled agent and Workload API socket are present and explicitly enabled.
+
+Workload identities use trust domain `babyx.stealtheye.internal`. Identity records bind the owner, fresh attestation, exact transaction, Skill bundle digest, grant digest, issuer provider, deterministic selectors, SPIFFE ID, certificate digest, TTL, revocation state, and private-key reference digest. Supported selectors include systemd unit, UID, GID, executable path and digest, cgroup, VM ID, transaction ID, and Skill bundle digest. The live host's OpenSSL-backed sovereign X.509-SVID issuer is reported `EXPERIMENTAL`; its provider-owned private material is mode-restricted, is never returned through public operations, rotates through new identity issuance, and is deleted on revocation or expiry.
+
+Secret leases require one active identity, one fresh verified attestation, exact transaction/Skill/grant bindings, and a target selector match. The provider reads only a bounded regular-file secret reference, zeroes the read buffer after hashing, and persists and returns metadata and digests only. Secret values and source paths are never stored in lease records or returned by metadata operations. Identity revocation cascades to active leases. Startup reconciliation expires stale challenges, attestations, identities, and leases; removes expired or revoked identity material; and deletes orphan provider-owned material.
+
+Catalog `8.0.0` preserves the original eleven Prompt-1 root operations unchanged. Focused tests cover live support truth, software-TPM quote verification, nonce replay, PCR mismatch, stale quote rejection, unavailable hardware and SPIRE paths, selector matching and mismatch, SVID rotation, lease allow and denial, restart readback, revocation, expiry, credential cleanup, and public runtime dispatch.

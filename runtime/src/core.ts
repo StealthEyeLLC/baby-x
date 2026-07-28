@@ -692,6 +692,14 @@ export class BabyXRuntime {
     }
     return this.rootMicrovmServiceInstance;
   }
+  private rootIdentityServiceInstance?: import('./root-platform/identity/service.ts').RootIdentityService;
+  private async rootIdentityService(): Promise<import('./root-platform/identity/service.ts').RootIdentityService> {
+    if (this.rootIdentityServiceInstance === undefined) {
+      const { RootIdentityService } = await import('./root-platform/identity/service.ts');
+      this.rootIdentityServiceInstance = new RootIdentityService({ stateRoot: this.stateRoot });
+    }
+    return this.rootIdentityServiceInstance;
+  }
   private rootMediationServiceInstance?: import('./root-platform/mediation/service.ts').RootMediationService;
   private async rootMediationService(): Promise<import('./root-platform/mediation/service.ts').RootMediationService> {
     if (this.rootMediationServiceInstance === undefined) {
@@ -748,6 +756,14 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.microvm.snapshot') return (await this.rootMicrovmService()).snapshot(payload, context);
       if (operation === 'babyx.root.microvm.restore') return (await this.rootMicrovmService()).restore(payload, context);
       if (operation === 'babyx.root.microvm.pool.reconcile') return (await this.rootMicrovmService()).poolReconcile(payload, context);
+      if (operation === 'babyx.root.attestation.challenge') return (await this.rootIdentityService()).attestationChallenge(payload, context);
+      if (operation === 'babyx.root.attestation.verify') return (await this.rootIdentityService()).attestationVerify(payload, context);
+      if (operation === 'babyx.root.attestation.get') return (await this.rootIdentityService()).attestationGet(payload, context);
+      if (operation === 'babyx.root.identity.issue') return (await this.rootIdentityService()).identityIssue(payload, context);
+      if (operation === 'babyx.root.identity.get') return (await this.rootIdentityService()).identityGet(payload, context);
+      if (operation === 'babyx.root.identity.revoke') return (await this.rootIdentityService()).identityRevoke(payload, context);
+      if (operation === 'babyx.root.secret.lease') return (await this.rootIdentityService()).secretLease(payload, context);
+      if (operation === 'babyx.root.secret.revoke') return (await this.rootIdentityService()).secretRevoke(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

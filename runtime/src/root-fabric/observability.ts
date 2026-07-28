@@ -241,7 +241,6 @@ export class RootObservationService {
     const payload = strictObject(payloadValue, 'observation get payload', ['sessionId', 'offset', 'limit']);
     const record = this.read(identifier(payload.sessionId, 'sessionId'));
     const principal = contextPrincipal(context, this.now());
-    const idem = idempotency(context);
     if (principal.principalDigest !== record.ownerPrincipalDigest) throw new RootFabricError('principal_mismatch', 'observation owner mismatch');
     const offset = payload.offset === undefined ? 0 : integer(payload.offset, 'offset', 0, 10_000_000);
     const limit = payload.limit === undefined ? 50 : integer(payload.limit, 'limit', 1, 200);

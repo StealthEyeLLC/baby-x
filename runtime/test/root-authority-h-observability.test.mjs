@@ -49,7 +49,7 @@ test('H: durable observation sessions are idempotent, correlated, redacted, boun
     assert.equal(JSON.stringify(spills[0]).includes('super-secret'), false);
     assert.equal(JSON.stringify(spills[0]).includes('must-not-leak'), false);
     assert.equal((await service.finalize({ sessionId, sourceStatus: { EBPF: 'UNAVAILABLE', BOUNDED_LOG: 'AVAILABLE' }, spill: true }, context('observe-finalize-0001'))).replayed, true);
-    const page = service.get({ sessionId, offset: 0, limit: 1 }, context('observe-get-0001'));
+    const page = service.get({ sessionId, offset: 0, limit: 1 }, { subject: 'owner-a', authorityClass: 'unrestricted-owner' });
     assert.equal(page.session.events.length, 1);
     assert.equal(page.total, 2);
     assert.equal(page.nextOffset, 1);

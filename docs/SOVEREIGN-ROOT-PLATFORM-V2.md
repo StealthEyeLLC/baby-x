@@ -64,3 +64,39 @@ Durable disks and configuration remain beneath the Baby-X state root. Firecracke
 The live x86_64 host reports `firecracker-cold-boot` as `SUPPORTED` only after KVM, vhost-vsock, the exact provider artifacts, cold boot, authenticated guest control, restart adoption, crash classification, and cleanup tests pass. BPF-LSM remains independently `UNAVAILABLE`; its absence does not reduce the microVM provider support state.
 
 The guest is a minimal static PID 1 with no shell. Its authenticated `BABYX-GUEST/1.0.0` protocol supports health, bounded echo, bounded sleep, status, cancellation, and shutdown. The live integration test proves cold boot, authentication failure, typed execution, cancellation, provider restart adoption, forced process crash classification, and complete cleanup.
+
+## Checkpoint D
+
+Checkpoint D extends the Firecracker provider with durable full snapshots, fresh-identity restore, and a bounded warm pool through three additional public operations:
+
+- `babyx.root.microvm.snapshot`
+- `babyx.root.microvm.restore`
+- `babyx.root.microvm.pool.reconcile`
+
+A snapshot request is owner-bound, strictly shaped, expiring, and idempotent. Only an idle `READY` microVM may become a template. The guest must first acknowledge `PREPARE_SNAPSHOT`, clear all task state, clear its authentication token and workload identity, and report that cleanup. The provider independently verifies that the host token file and copied writable disk no longer contain the token before accepting the snapshot. A busy or otherwise non-`READY` source fails closed.
+
+The provider creates a full Firecracker snapshot containing VM state and memory plus a credential-scrubbed writable disk. Durable snapshot truth binds the source VM and transaction, owner, request digest, Firecracker, kernel, base-image, writable-disk, memory, VM-state, CPU architecture and fingerprint, guest CID, resource shape, policy inputs, credential-absence proof, expiry, and record digest chain. The source VM is stopped and removed through the canonical cleanup path, and `READY` snapshot publication requires positive process, socket, and writable-layer absence. Replaying the same request resolves the durable idempotency claim before inspecting the now-destroyed source; conflicting reuse fails closed.
+
+Restore verifies snapshot ownership, status, expiry, revocation, artifact digests, CPU compatibility, and all snapshot files. It copies the immutable snapshot disk, generates a fresh 256-bit host token, loads the full snapshot through the Firecracker API with VMGenID update handling, and completes an authenticated guest bootstrap that rotates workload identity and random epoch. The restored VM inherits the immutable guest CID but not the prior token, workload identity, random epoch, transaction binding, or task state. Network mode remains fixed to `NONE`.
+
+Warm pools are durable, owner-bound, snapshot-bound, expiring, and capped at one available guest because the full snapshot carries an immutable guest CID. `RECONCILE` creates, replenishes, drains, and verifies that bound pool. `ACQUIRE` atomically leases the available VM and supports replay without duplicate allocation. `RELEASE` always destroys the contaminated leased VM and replenishes from the clean snapshot when the desired count remains one. An empty pool may return an explicitly reported cold fallback; it never silently relabels a cold VM as warm.
+
+Snapshot and pool records use authoritative atomic files, strict schemas, stable serialization, deterministic digests, durable idempotency claims, bounded lists, restart verification, and corruption isolation. Provider reconciliation verifies VM, snapshot, and pool stores together, adopts only exact process and guest identities, stops provider-owned orphan units, and never invents records or replacement identity.
+
+The live certification creates and rejects a contaminated snapshot source, creates a scrubbed full snapshot, replays it after source destruction, restores it with fresh identity, executes authenticated work, creates a one-guest warm pool, replays acquisition, destroys and replenishes a released guest, drains the pool, exercises cold fallback, verifies durable integrity, and proves that no transient Firecracker unit remains.
+
+## Checkpoint D
+
+Checkpoint D adds full Firecracker snapshots, identity-safe restore, and a bounded one-instance warm pool through three catalog operations:
+
+- `babyx.root.microvm.snapshot`
+- `babyx.root.microvm.restore`
+- `babyx.root.microvm.pool.reconcile`
+
+Snapshot creation is restricted to an idle, authenticated `READY` VM. The guest is quiesced before Firecracker is paused. The provider writes full memory and VM-state artifacts, records their exact digests and compatibility identity, verifies that bootstrap and runtime credentials are absent from the artifacts, resumes only as required for controlled shutdown, then removes the source VM with positive process/socket/writable-layer absence proof. A snapshot is not usable until its durable record and artifact digests are complete.
+
+Restore verifies the snapshot record, all artifact digests, Firecracker/kernel/root-image/guest-protocol compatibility, expiry, and credential-absence evidence. It launches a new VM identity, injects a fresh one-time bootstrap token, establishes a fresh runtime token, and requires new guest boot, workload, nonce, and random-epoch identities. Snapshot credentials and source identity are never reused.
+
+The warm pool is deliberately bounded to one retained snapshot-backed capacity unit. Reconciliation creates or removes that unit to match desired capacity. Acquire binds a fresh restore to a transaction and immediately replenishes capacity; release destroys the leased VM and reconciles the pool. Idempotency, lease state, snapshot state, and events are durable and digest chained. Unknown, expired, contaminated, incompatible, or concurrently leased records fail closed.
+
+Catalog `7.0.0` declares explicit snapshot, restore, and pool postconditions. The combined live certification proves cold boot, snapshot creation, source cleanup, digest readback, identity reseeding, contaminated-snapshot rejection, warm-pool acquire/release/replenishment, provider restart safety, and final zero-resource absence.

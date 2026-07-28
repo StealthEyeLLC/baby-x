@@ -4,6 +4,7 @@ set -euo pipefail
 root=${BABY_X_INSTALL_ROOT:-/opt/baby-x}
 node_bin=${BABY_X_NODE_BIN:-/opt/node-v24.18.0-linux-x64/bin/node}
 health_url=${BABY_X_GATEWAY_HEALTH_URL:-http://127.0.0.1:2097/healthz}
+asset_root=${BABY_X_MICROVM_ASSET_ROOT:-/var/lib/baby-x/root-platform/microvm/assets}
 current=$(readlink -f "$root/current" 2>/dev/null || true)
 printf 'current=%s\n' "$current"
 [[ -n "$current" && -d "$current" ]]
@@ -13,6 +14,19 @@ cli="$current/runtime/cli/main.js"
 if [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]]; then
   systemctl is-active --quiet baby-x.socket
   systemctl is-active --quiet baby-x-gateway.service
+  if [[ -f /etc/systemd/system/baby-x-root-provider.socket ]]; then
+    systemctl is-enabled --quiet baby-x-root-provider.socket
+    systemctl is-active --quiet baby-x-root-provider.socket
+    "$node_bin" --input-type=module - "$current" "$asset_root" <<'NODE'
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+const [current, assetRoot] = process.argv.slice(2);
+const { MicrovmArtifactRegistry } = await import(pathToFileURL(join(current, 'runtime/root-platform/microvm/artifacts.js')).href);
+const artifacts = new MicrovmArtifactRegistry(assetRoot).load();
+process.stdout.write(`${JSON.stringify({ microvmAssets: { firecrackerVersion: artifacts.firecrackerVersion, firecrackerDigest: artifacts.firecrackerDigest, kernelDigest: artifacts.kernelDigest, rootImageDigest: artifacts.baseRootImageDigest, guestAgentDigest: artifacts.guestAgentDigest, resolvedManifestDigest: artifacts.resolvedManifestDigest } })}
+`);
+NODE
+  fi
   "$node_bin" --input-type=module - "$cli" "$health_url" <<'NODE'
 import { execFileSync } from 'node:child_process';
 

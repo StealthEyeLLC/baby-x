@@ -13,8 +13,40 @@ FC_URL=https://github.com/firecracker-microvm/firecracker/releases/download/v1.1
 FC_SUM_URL=https://github.com/firecracker-microvm/firecracker/releases/download/v1.15.1/firecracker-v1.15.1-x86_64.tgz.sha256.txt
 KERNEL_URL=https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155
 [[ $(uname -m) == x86_64 ]] || { echo 'x86_64 is required' >&2; exit 1; }
-for tool in curl tar sha256sum gcc strip mkfs.ext4; do command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }; done
+for tool in curl tar sha256sum mkfs.ext4; do command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }; done
 [[ -x $NODE ]] || { echo 'Node.js 24.18.0 is required' >&2; exit 1; }
+AGENT_PREBUILT="$ROOT/runtime/native/microvm-guest-agent/baby-x-microvm-guest-agent"
+AGENT_SOURCE="$ROOT/runtime/native/microvm-guest-agent/guest_agent.c"
+AGENT_BUILD="$ROOT/runtime/native/microvm-guest-agent/build/baby-x-microvm-guest-agent"
+if [[ -x "$AGENT_PREBUILT" ]]; then
+  AGENT_INPUT="$AGENT_PREBUILT"
+elif [[ -f "$AGENT_SOURCE" ]]; then
+  for tool in gcc strip; do command -v "$tool" >/dev/null || { echo "$tool is required to build the guest agent" >&2; exit 1; }; done
+  mkdir -p "$(dirname "$AGENT_BUILD")"
+  gcc -static -O2 -pthread -Wall -Wextra -Werror -o "$AGENT_BUILD" "$AGENT_SOURCE"
+  strip "$AGENT_BUILD"
+  AGENT_INPUT="$AGENT_BUILD"
+else
+  echo 'release does not contain a microVM guest agent binary or source' >&2
+  exit 1
+fi
+CURRENT_AGENT_DIGEST=$(sha256sum "$AGENT_INPUT" | awk '{print $1}')
+ARTIFACTS_MODULE="$ROOT/runtime/root-platform/microvm/artifacts.js"
+[[ -f "$ARTIFACTS_MODULE" ]] || ARTIFACTS_MODULE="$ROOT/dist/runtime/root-platform/microvm/artifacts.js"
+if [[ -f "$ASSET_ROOT/resolved-manifest.json" && -f "$ARTIFACTS_MODULE" ]]; then
+  if ASSET_ROOT="$ASSET_ROOT" ARTIFACTS_MODULE="$ARTIFACTS_MODULE" CURRENT_AGENT_DIGEST="$CURRENT_AGENT_DIGEST" "$NODE" --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { MicrovmArtifactRegistry } = await import(pathToFileURL(process.env.ARTIFACTS_MODULE).href);
+const manifest = JSON.parse(readFileSync(`${process.env.ASSET_ROOT}/resolved-manifest.json`, 'utf8'));
+if (manifest.guestAgentDigest !== process.env.CURRENT_AGENT_DIGEST) throw new Error('resolved guest agent does not match the current release');
+new MicrovmArtifactRegistry(process.env.ASSET_ROOT).load();
+NODE
+  then
+    printf 'microVM assets already verified for the current release at %s\n' "$ASSET_ROOT"
+    exit 0
+  fi
+fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/download" "$TMP/rootfs"/{sbin,etc,dev,proc,sys,run,tmp} "$ASSET_ROOT/bin" "$ASSET_ROOT/images"
@@ -32,12 +64,8 @@ install -m 0555 "$JAILER_SOURCE" "$ASSET_ROOT/bin/jailer-v1.15.1-x86_64"
 curl -fsSL --proto '=https' --tlsv1.2 --max-time 180 -o "$ASSET_ROOT/images/$KERNEL_NAME" "$KERNEL_URL"
 [[ $(sha256sum "$ASSET_ROOT/images/$KERNEL_NAME" | awk '{print $1}') == "$KERNEL_SHA" ]] || { echo 'kernel digest mismatch' >&2; exit 1; }
 chmod 0444 "$ASSET_ROOT/images/$KERNEL_NAME"
-AGENT_BUILD="$ROOT/runtime/native/microvm-guest-agent/build/baby-x-microvm-guest-agent"
-mkdir -p "$(dirname "$AGENT_BUILD")"
-gcc -static -O2 -pthread -Wall -Wextra -Werror -o "$AGENT_BUILD" "$ROOT/runtime/native/microvm-guest-agent/guest_agent.c"
-strip "$AGENT_BUILD"
-install -m 0555 "$AGENT_BUILD" "$ASSET_ROOT/bin/baby-x-microvm-guest-agent"
-install -m 0555 "$AGENT_BUILD" "$TMP/rootfs/sbin/init"
+install -m 0555 "$AGENT_INPUT" "$ASSET_ROOT/bin/baby-x-microvm-guest-agent"
+install -m 0555 "$AGENT_INPUT" "$TMP/rootfs/sbin/init"
 truncate -s 64M "$ASSET_ROOT/images/baby-x-rootfs-v1.ext4"
 mkfs.ext4 -q -F -d "$TMP/rootfs" -U 8b3baf52-4fcb-4c47-9cd1-c0e528d98301 -E lazy_itable_init=0,lazy_journal_init=0 "$ASSET_ROOT/images/baby-x-rootfs-v1.ext4"
 chmod 0444 "$ASSET_ROOT/images/baby-x-rootfs-v1.ext4"

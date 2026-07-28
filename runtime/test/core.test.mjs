@@ -46,7 +46,13 @@ test('describe exposes only implemented operations without duplicate authority p
       assert.ok(Array.isArray(definition.errors));
       assert.ok(Array.isArray(definition.postconditions));
     }
-    assert.equal(description.operationCatalogVersion, '6.0.0');
+    assert.equal(description.operationCatalogVersion, '7.0.0');
+    const snapshot = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.snapshot');
+    const restore = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.restore');
+    const pool = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.pool.reconcile');
+    assert.deepEqual(snapshot.postconditions, ['microvm_snapshot_record_persisted', 'snapshot_artifact_digests_verified', 'credential_absence_verified', 'source_microvm_cleaned']);
+    assert.deepEqual(restore.postconditions, ['microvm_record_persisted', 'snapshot_compatibility_verified', 'fresh_guest_identity_observed', 'provider_observation_reported']);
+    assert.deepEqual(pool.postconditions, ['microvm_pool_record_persisted', 'pool_capacity_bounded', 'lease_state_reconciled', 'provider_observation_reported']);
     assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     assert.equal(operationDefinitions().length, operations.length);
   } finally { rmSync(root, { recursive: true, force: true }); }

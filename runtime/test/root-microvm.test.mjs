@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   createRequestDigest,
   normalizeCreateRequest,
   normalizeExecRequest,
   normalizeListRequest,
+  normalizePoolRequest,
+  normalizeRestoreRequest,
+  normalizeSnapshotRequest,
   normalizeVmSelector,
 } from '../../dist/runtime/root-platform/microvm/schemas.js';
 import { canonicalize, sha256 } from '../../dist/runtime/core.js';
@@ -18,6 +22,13 @@ import {
   verifyMicrovmEvent,
   verifyMicrovmRecord,
 } from '../../dist/runtime/root-platform/microvm/records.js';
+import {
+  initialPoolRecord,
+  initialSnapshotRecord,
+  SnapshotPoolStore,
+  verifyPoolRecord,
+  verifySnapshotRecord,
+} from '../../dist/runtime/root-platform/microvm/snapshot-store.js';
 
 const digest = (character) => character.repeat(64);
 const createPayload = {
@@ -72,6 +83,156 @@ test('microVM schemas are strict, bounded, digest-bound, and default to no netwo
   assert.deepEqual(normalizeListRequest({ lifecycle: 'READY', offset: 2, limit: 3 }), { ownerPrincipal: undefined, lifecycle: 'READY', offset: 2, limit: 3 });
   assert.deepEqual(normalizeExecRequest({ vmId: 'mvm_0123456789abcdef0123456789abcdef', action: 'ECHO', taskId: 'task_echo_0001', input: 'hello' }).request, { action: 'ECHO', taskId: 'task_echo_0001', input: 'hello' });
   assert.throws(() => normalizeExecRequest({ vmId: 'mvm_0123456789abcdef0123456789abcdef', action: 'ECHO', taskId: 'task_echo_0001', input: 'x'.repeat(1025) }), (error) => error.code === 'microvm_invalid_request');
+});
+
+test('microVM snapshot, restore, and pool schemas are strict and bounded', () => {
+  const now = new Date('2026-07-28T00:00:00.000Z');
+  const vmId = 'mvm_0123456789abcdef0123456789abcdef';
+  const snapshotId = 'mvs_0123456789abcdef0123456789abcdef';
+  const poolId = 'mvp_0123456789abcdef0123456789abcdef';
+  const snapshot = normalizeSnapshotRequest({ vmId }, now);
+  assert.deepEqual(snapshot, { vmId, expiresAt: '2026-07-29T00:00:00.000Z' });
+  assert.throws(() => normalizeSnapshotRequest({ vmId, unexpected: true }, now), (error) => error.code === 'microvm_invalid_request');
+  assert.throws(() => normalizeSnapshotRequest({ vmId, expiresAt: '2026-07-27T00:00:00.000Z' }, now), (error) => error.code === 'microvm_invalid_request');
+
+  const restore = normalizeRestoreRequest({
+    snapshotId,
+    transactionId: 'rtx_snapshot_restore_0001',
+    skillBundleDigest: digest('a'),
+    grantDigest: digest('b'),
+    policyDigest: digest('c'),
+  });
+  assert.equal(restore.networkMode, 'NONE');
+  assert.throws(() => normalizeRestoreRequest({ ...restore, networkMode: 'TAP' }), (error) => error.code === 'microvm_invalid_request');
+
+  const reconcile = normalizePoolRequest({ action: 'RECONCILE', snapshotId }, now);
+  assert.deepEqual(reconcile, {
+    action: 'RECONCILE',
+    poolId: undefined,
+    snapshotId,
+    desiredWarmCount: 1,
+    expiresAt: '2026-07-29T00:00:00.000Z',
+  });
+  assert.throws(() => normalizePoolRequest({ action: 'RECONCILE', snapshotId, maximumWarmCount: 2 }, now), (error) => error.code === 'microvm_invalid_request');
+  assert.throws(() => normalizePoolRequest({ action: 'ACQUIRE', poolId }), (error) => error.code === 'microvm_invalid_request');
+  assert.deepEqual(normalizePoolRequest({
+    action: 'ACQUIRE',
+    poolId,
+    transactionId: 'rtx_pool_acquire_0001',
+    skillBundleDigest: digest('d'),
+    grantDigest: digest('e'),
+    policyDigest: digest('f'),
+  }, now), {
+    action: 'ACQUIRE',
+    poolId,
+    transactionId: 'rtx_pool_acquire_0001',
+    skillBundleDigest: digest('d'),
+    grantDigest: digest('e'),
+    policyDigest: digest('f'),
+  });
+  assert.deepEqual(normalizePoolRequest({ action: 'RELEASE', poolId, vmId }, now), { action: 'RELEASE', poolId, vmId });
+});
+
+test('snapshot and warm-pool records are durable, digest-bound, restart-safe, and idempotent', () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-microvm-snapshot-store-'));
+  const ownerPrincipal = 'owner:microvm-snapshot-unit';
+  const now = '2026-07-28T00:00:00.000Z';
+  const expiresAt = '2026-07-29T00:00:00.000Z';
+  try {
+    const store = new SnapshotPoolStore(root, { now: () => now });
+    const snapshotClaim = store.claimSnapshot(ownerPrincipal, 'snapshot-unit-0001', digest('1'));
+    assert.equal(snapshotClaim.replayed, false);
+    assert.match(snapshotClaim.snapshotId, /^mvs_[a-f0-9]{32}$/u);
+    assert.deepEqual(store.claimSnapshot(ownerPrincipal, 'snapshot-unit-0001', digest('1')), { snapshotId: snapshotClaim.snapshotId, replayed: true });
+    assert.throws(() => store.claimSnapshot(ownerPrincipal, 'snapshot-unit-0001', digest('2')), (error) => error.code === 'microvm_idempotency_conflict');
+
+    const snapshot = initialSnapshotRecord({
+      snapshotId: snapshotClaim.snapshotId,
+      ownerPrincipal,
+      requestDigest: digest('1'),
+      idempotencyKeyDigest: digest('2'),
+      sourceVmId: 'mvm_0123456789abcdef0123456789abcdef',
+      sourceTransactionId: 'rtx_snapshot_source_0001',
+      providerVersion: 'firecracker-v1.15.1+babyx-provider-1.1.0',
+      firecrackerDigest: digest('3'),
+      cpuArchitecture: 'x64',
+      cpuFingerprint: digest('4'),
+      kernelDigest: digest('5'),
+      baseRootImageDigest: digest('6'),
+      writableDiskDigest: null,
+      memoryDigest: null,
+      vmStateDigest: null,
+      memoryPath: '/tmp/snapshot/memory.bin',
+      vmStatePath: '/tmp/snapshot/vmstate.bin',
+      diskPath: '/tmp/snapshot/rootfs.ext4',
+      guestCid: 10000,
+      vcpuCount: 1,
+      memoryMiB: 128,
+      skillBundleDigest: digest('7'),
+      grantDigest: digest('8'),
+      policyDigest: digest('9'),
+      vsockResetRequired: true,
+      networkResetRequired: true,
+      rngReseedingRequired: true,
+      vmGenIdHandling: 'FIRECRACKER_LOAD_UPDATES',
+      credentialAbsence: {
+        taskStateEmpty: false,
+        guestTokenCleared: false,
+        guestIdentityCleared: false,
+        hostTokenAbsent: false,
+        diskTokenAbsent: false,
+        verifiedAt: null,
+        verificationDigest: null,
+      },
+      expiresAt,
+      revokedAt: null,
+      error: null,
+      now,
+    });
+    store.createSnapshot(snapshot);
+    const ready = store.transitionSnapshot(snapshot.snapshotId, 'READY', {
+      writableDiskDigest: digest('a'),
+      memoryDigest: digest('b'),
+      vmStateDigest: digest('c'),
+      credentialAbsence: {
+        taskStateEmpty: true,
+        guestTokenCleared: true,
+        guestIdentityCleared: true,
+        hostTokenAbsent: true,
+        diskTokenAbsent: true,
+        verifiedAt: now,
+        verificationDigest: digest('d'),
+      },
+    });
+    assert.equal(verifySnapshotRecord(ready).valid, true);
+
+    const poolClaim = store.claimPool(ownerPrincipal, 'pool-unit-0001', digest('e'));
+    assert.equal(poolClaim.replayed, false);
+    const pool = initialPoolRecord({ poolId: poolClaim.poolId, ownerPrincipal, snapshotId: ready.snapshotId, desiredWarmCount: 1, expiresAt, now });
+    store.createPool(pool);
+    const healthy = store.updatePool(pool.poolId, {
+      status: 'HEALTHY',
+      availableVmIds: ['mvm_fedcba9876543210fedcba9876543210'],
+      health: { ok: true, availableCount: 1, leasedCount: 0, failedCount: 0 },
+    });
+    assert.equal(verifyPoolRecord(healthy).valid, true);
+    assert.throws(() => store.updatePool(pool.poolId, { maximumWarmCount: 2 }), (error) => error.code === 'microvm_ambiguous');
+
+    const restarted = new SnapshotPoolStore(root, { now: () => now });
+    assert.equal(restarted.getSnapshot(ready.snapshotId).recordDigest, ready.recordDigest);
+    assert.equal(restarted.getPool(healthy.poolId).recordDigest, healthy.recordDigest);
+    assert.deepEqual(restarted.verify(), {
+      ok: true,
+      snapshots: 1,
+      pools: 1,
+      corruptSnapshotIds: [],
+      corruptPoolIds: [],
+      invalidSnapshots: [],
+      invalidPools: [],
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('microVM record and event chains remain valid across transitions and restart', () => {
@@ -160,6 +321,34 @@ test('microVM asset registry rejects binary, root-image, and symlink substitutio
     symlinkSync(source.guestAgentPath, unsigned.guestAgentPath);
     assert.throws(() => new MicrovmArtifactRegistry(root).load(), (error) => error.code === 'microvm_asset_integrity_failure' && /escapes the provider asset root/u.test(error.message));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('microVM startup ignores a transient pre-exec MainPID but accepts only the expected executable digest', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'baby-x-microvm-startup-race-'));
+  const child = spawn('/usr/bin/sleep', ['30'], { stdio: 'ignore' });
+  try {
+    assert.ok(child.pid);
+    const expectedPath = realpathSync('/usr/bin/sleep');
+    const expectedDigest = sha256(readFileSync(expectedPath));
+    let observations = 0;
+    const run = (_command, args) => {
+      if (args[0] === 'show') {
+        observations += 1;
+        return { status: 0, stdout: `${observations === 1 ? process.pid : child.pid}\n`, stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    const { FirecrackerMicrovmProvider } = await import('../../dist/runtime/root-platform/microvm/provider.js');
+    const provider = new FirecrackerMicrovmProvider({ stateRoot: root, assetRoot: root, run });
+    const identity = await provider.waitForProcess('baby-x-microvm-startup-race.service', expectedDigest);
+    assert.equal(identity.pid, child.pid);
+    assert.equal(identity.executablePath, expectedPath);
+    assert.equal(identity.executableDigest, expectedDigest);
+    assert.ok(observations >= 2);
+  } finally {
+    child.kill('SIGKILL');
     rmSync(root, { recursive: true, force: true });
   }
 });

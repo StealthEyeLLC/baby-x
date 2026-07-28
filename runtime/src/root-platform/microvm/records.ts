@@ -47,6 +47,12 @@ export interface MicrovmRecord extends JsonObject {
   tapIdentity: null;
   networkMode: 'NONE';
   guestAgentState: 'UNKNOWN' | 'READY' | 'FAILED' | 'STOPPED';
+  sourceSnapshotId: string | null;
+  poolId: string | null;
+  leaseState: 'NONE' | 'AVAILABLE' | 'LEASED';
+  workloadIdentityDigest: string | null;
+  randomEpochDigest: string | null;
+  inheritedGuestCid: boolean;
   cleanup: { requested: boolean; completed: boolean; processAbsent: boolean; socketAbsent: boolean; writableLayerAbsent: boolean; completedAt: string | null };
   error: { code: string; message: string; phase: string } | null;
   createdAt: string;
@@ -156,6 +162,6 @@ export class MicrovmRecordStore {
 }
 
 export function initialMicrovmRecord(input:{vmId:string;ownerPrincipal:string;request:MicrovmCreateRequest;requestDigest:string;idempotencyKey:string;artifacts:{firecrackerDigest:string;kernelDigest:string;rootImageDigest:string;guestAgentDigest:string;guestAgentProtocol:string};writableLayerIdentity:string;writableLayerDigest:string;systemdUnit:string;vsockCid:number;vsockSocketIdentity:string;hostBootId:string;now:string}):MicrovmRecord {
-  const base={schemaVersion:MICROVM_RECORD_SCHEMA_VERSION,vmId:input.vmId,transactionId:input.request.transactionId,ownerPrincipal:input.ownerPrincipal,sequence:1,lifecycle:'REQUESTED' as const,requestDigest:input.requestDigest,idempotencyKeyDigest:sha256(input.idempotencyKey),skillBundleDigest:input.request.skillBundleDigest,grantDigest:input.request.grantDigest,policyDigest:input.request.policyDigest,firecrackerVersion:input.request.firecrackerVersion,firecrackerDigest:input.artifacts.firecrackerDigest,kernelDigest:input.artifacts.kernelDigest,rootImageDigest:input.artifacts.rootImageDigest,guestAgentDigest:input.artifacts.guestAgentDigest,guestAgentProtocol:input.artifacts.guestAgentProtocol,writableLayerIdentity:input.writableLayerIdentity,writableLayerDigest:input.writableLayerDigest,vcpuCount:input.request.vcpuCount,memoryMiB:input.request.memoryMiB,cgroup:'',systemdUnit:input.systemdUnit,processIdentity:null,hostBootId:input.hostBootId,guestBootId:null,vsockCid:input.vsockCid,vsockSocketIdentity:input.vsockSocketIdentity,tapIdentity:null,networkMode:'NONE' as const,guestAgentState:'UNKNOWN' as const,cleanup:{requested:false,completed:false,processAbsent:false,socketAbsent:false,writableLayerAbsent:false,completedAt:null},error:null,createdAt:input.now,updatedAt:input.now,priorRecordDigest:null};
+  const base={schemaVersion:MICROVM_RECORD_SCHEMA_VERSION,vmId:input.vmId,transactionId:input.request.transactionId,ownerPrincipal:input.ownerPrincipal,sequence:1,lifecycle:'REQUESTED' as const,requestDigest:input.requestDigest,idempotencyKeyDigest:sha256(input.idempotencyKey),skillBundleDigest:input.request.skillBundleDigest,grantDigest:input.request.grantDigest,policyDigest:input.request.policyDigest,firecrackerVersion:input.request.firecrackerVersion,firecrackerDigest:input.artifacts.firecrackerDigest,kernelDigest:input.artifacts.kernelDigest,rootImageDigest:input.artifacts.rootImageDigest,guestAgentDigest:input.artifacts.guestAgentDigest,guestAgentProtocol:input.artifacts.guestAgentProtocol,writableLayerIdentity:input.writableLayerIdentity,writableLayerDigest:input.writableLayerDigest,vcpuCount:input.request.vcpuCount,memoryMiB:input.request.memoryMiB,cgroup:'',systemdUnit:input.systemdUnit,processIdentity:null,hostBootId:input.hostBootId,guestBootId:null,vsockCid:input.vsockCid,vsockSocketIdentity:input.vsockSocketIdentity,tapIdentity:null,networkMode:'NONE' as const,guestAgentState:'UNKNOWN' as const,sourceSnapshotId:null,poolId:null,leaseState:'NONE' as const,workloadIdentityDigest:null,randomEpochDigest:null,inheritedGuestCid:false,cleanup:{requested:false,completed:false,processAbsent:false,socketAbsent:false,writableLayerAbsent:false,completedAt:null},error:null,createdAt:input.now,updatedAt:input.now,priorRecordDigest:null};
   return {...base,recordDigest:sha256(canonicalize(base))} as MicrovmRecord;
 }

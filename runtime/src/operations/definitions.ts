@@ -40,6 +40,9 @@ babyx.root.microvm.list
 babyx.root.microvm.exec
 babyx.root.microvm.stop
 babyx.root.microvm.remove
+babyx.root.microvm.snapshot
+babyx.root.microvm.restore
+babyx.root.microvm.pool.reconcile
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -340,6 +343,11 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.microvm.get' || operation === 'babyx.root.microvm.stop' || operation === 'babyx.root.microvm.remove') return objectSchema({ vmId: microvmId }, ['vmId']);
   if (operation === 'babyx.root.microvm.list') return objectSchema({ ownerPrincipal: identifier, lifecycle: microvmLifecycle, ...page });
   if (operation === 'babyx.root.microvm.exec') return objectSchema({ vmId: microvmId, action: { enum: ['ECHO','SLEEP','STATUS','CANCEL'] }, taskId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$' }, input: { type: 'string', maxLength: 1024 }, durationMs: { type: 'integer', minimum: 0, maximum: 60000 } }, ['vmId','action','taskId']);
+  const snapshotId = { type: 'string', pattern: '^mvs_[a-f0-9]{32}$' } as const;
+  const poolId = { type: 'string', pattern: '^mvp_[a-f0-9]{32}$' } as const;
+  if (operation === 'babyx.root.microvm.snapshot') return objectSchema({ vmId: microvmId, expiresAt: stringValue }, ['vmId']);
+  if (operation === 'babyx.root.microvm.restore') return objectSchema({ snapshotId, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, policyDigest: digest, networkMode: { const: 'NONE' } }, ['snapshotId','transactionId','skillBundleDigest','grantDigest','policyDigest']);
+  if (operation === 'babyx.root.microvm.pool.reconcile') return objectSchema({ action: { enum: ['RECONCILE','ACQUIRE','RELEASE'] }, poolId, snapshotId, desiredWarmCount: { type: 'integer', minimum: 0, maximum: 1 }, maximumWarmCount: { const: 1 }, expiresAt: stringValue, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, policyDigest: digest, vmId: microvmId }, ['action']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -441,13 +449,16 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (operation === 'babyx.root.provider.reconcile') return ['provider_reconciliation_record_persisted', 'provider_state_observed'];
   if (operation === 'babyx.root.mediation.profile.create' || operation === 'babyx.root.mediation.profile.revoke') return ['mediation_profile_record_persisted', 'digest_chained_event_appended'];
   if (operation === 'babyx.root.microvm.create' || operation === 'babyx.root.microvm.exec' || operation === 'babyx.root.microvm.stop' || operation === 'babyx.root.microvm.remove') return ['microvm_record_persisted', 'provider_observation_reported'];
+  if (operation === 'babyx.root.microvm.snapshot') return ['microvm_snapshot_record_persisted', 'snapshot_artifact_digests_verified', 'credential_absence_verified', 'source_microvm_cleaned'];
+  if (operation === 'babyx.root.microvm.restore') return ['microvm_record_persisted', 'snapshot_compatibility_verified', 'fresh_guest_identity_observed', 'provider_observation_reported'];
+  if (operation === 'babyx.root.microvm.pool.reconcile') return ['microvm_pool_record_persisted', 'pool_capacity_bounded', 'lease_state_reconciled', 'provider_observation_reported'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '6.0.0';
+export const OPERATION_CATALOG_VERSION = '7.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

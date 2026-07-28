@@ -134,3 +134,121 @@ test('cold-boot Firecracker provider preserves identity across restart and class
     rmSync(runtimeRoot, { recursive: true, force: true });
   }
 });
+
+test('full Firecracker snapshots restore fresh identity and warm pools destroy contaminated instances', { skip: livePrerequisites ? false : 'requires root, systemd, KVM, vhost-vsock, and provisioned exact assets', timeout: 240_000 }, async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), 'baby-x-microvm-snapshot-native-'));
+  const socketPath = join(stateRoot, 'root-provider.sock');
+  const runtimeRoot = join(tmpdir(), `bxs-${basename(stateRoot).slice(-6)}`);
+  const priorSocket = process.env.BABY_X_ROOT_PROVIDER_SOCKET;
+  const priorState = process.env.BABY_X_STATE_ROOT;
+  const priorAssets = process.env.BABY_X_MICROVM_ASSET_ROOT;
+  process.env.BABY_X_ROOT_PROVIDER_SOCKET = socketPath;
+  process.env.BABY_X_STATE_ROOT = stateRoot;
+  process.env.BABY_X_MICROVM_ASSET_ROOT = assetRoot;
+  let server;
+  const units = new Set();
+  try {
+    const artifacts = new MicrovmArtifactRegistry(assetRoot).load();
+    const provider = new FirecrackerMicrovmProvider({ stateRoot, assetRoot, runtimeRoot });
+    server = startRootProviderServer(provider, { socketPath, allowedUid: process.getuid(), listen: { path: socketPath } });
+    await once(server, 'listening');
+    const runtime = new BabyXRuntime({ stateRoot, sourceCommit: 'c'.repeat(40), sourceTree: 'd'.repeat(40) });
+    const request = (transactionId) => ({ transactionId, skillBundleDigest: '4'.repeat(64), grantDigest: '5'.repeat(64), policyDigest: '6'.repeat(64), firecrackerVersion: 'v1.15.1', kernelDigest: artifacts.kernelDigest, rootImageDigest: artifacts.baseRootImageDigest, vcpuCount: 1, memoryMiB: 128, networkMode: 'NONE' });
+
+    const contaminated = await runtime.execute('babyx.root.microvm.create', request('rtx_snapshot_contaminated_0001'), context('snapshot-contaminated-create-0001'));
+    units.add(contaminated.microvm.systemdUnit);
+    await runtime.execute('babyx.root.microvm.exec', { vmId: contaminated.microvm.vmId, action: 'SLEEP', taskId: 'task_snapshot_busy_0001', durationMs: 5000 }, context('snapshot-contaminated-sleep-0001'));
+    await assert.rejects(() => runtime.execute('babyx.root.microvm.snapshot', { vmId: contaminated.microvm.vmId }, context('snapshot-contaminated-attempt-0001')), (error) => error.code === 'microvm_state_conflict');
+    await runtime.execute('babyx.root.microvm.remove', { vmId: contaminated.microvm.vmId }, context('snapshot-contaminated-remove-0001'));
+
+    const source = await runtime.execute('babyx.root.microvm.create', request('rtx_snapshot_source_0001'), context('snapshot-source-create-0001'));
+    units.add(source.microvm.systemdUnit);
+    const sourceIdentity = source.microvm.workloadIdentityDigest;
+    const sourceRandomEpoch = source.microvm.randomEpochDigest;
+    const snapshotExpiresAt = new Date(Date.now() + 86_400_000).toISOString();
+    const snapshotResult = await runtime.execute('babyx.root.microvm.snapshot', { vmId: source.microvm.vmId, expiresAt: snapshotExpiresAt }, context('snapshot-create-0001'));
+    const snapshot = snapshotResult.snapshot;
+    assert.equal(snapshot.status, 'READY');
+    assert.equal(snapshot.credentialAbsence.taskStateEmpty, true);
+    assert.equal(snapshot.credentialAbsence.guestTokenCleared, true);
+    assert.equal(snapshot.credentialAbsence.guestIdentityCleared, true);
+    assert.equal(snapshot.credentialAbsence.hostTokenAbsent, true);
+    assert.equal(snapshot.credentialAbsence.diskTokenAbsent, true);
+    assert.match(snapshot.memoryDigest, /^[a-f0-9]{64}$/u);
+    assert.match(snapshot.vmStateDigest, /^[a-f0-9]{64}$/u);
+    assert.match(snapshot.writableDiskDigest, /^[a-f0-9]{64}$/u);
+    assert.equal(snapshot.vmGenIdHandling, 'FIRECRACKER_LOAD_UPDATES');
+    assert.equal(snapshotResult.sourceMicrovm.lifecycle, 'CLEANED');
+    assert.equal(existsSync(source.microvm.writableLayerIdentity), false);
+    const snapshotReplay = await runtime.execute('babyx.root.microvm.snapshot', { vmId: source.microvm.vmId, expiresAt: snapshotExpiresAt }, context('snapshot-create-0001'));
+    assert.equal(snapshotReplay.replayed, true);
+    assert.equal(snapshotReplay.snapshot.snapshotId, snapshot.snapshotId);
+    assert.equal(snapshotReplay.snapshot.recordDigest, snapshot.recordDigest);
+    assert.equal(snapshotReplay.sourceMicrovm.lifecycle, 'CLEANED');
+
+    const restoredResult = await runtime.execute('babyx.root.microvm.restore', { snapshotId: snapshot.snapshotId, transactionId: 'rtx_snapshot_restore_0001', skillBundleDigest: '7'.repeat(64), grantDigest: '8'.repeat(64), policyDigest: '9'.repeat(64), networkMode: 'NONE' }, context('snapshot-restore-0001'));
+    const restored = restoredResult.microvm;
+    units.add(restored.systemdUnit);
+    assert.notEqual(restored.vmId, source.microvm.vmId);
+    assert.notEqual(restored.vsockSocketIdentity, source.microvm.vsockSocketIdentity);
+    assert.equal(restored.sourceSnapshotId, snapshot.snapshotId);
+    assert.equal(restored.inheritedGuestCid, true);
+    assert.equal(restored.vsockCid, snapshot.guestCid);
+    assert.notEqual(restored.workloadIdentityDigest, sourceIdentity);
+    assert.notEqual(restored.randomEpochDigest, sourceRandomEpoch);
+    const echo = await runtime.execute('babyx.root.microvm.exec', { vmId: restored.vmId, action: 'ECHO', taskId: 'task_restore_echo_0001', input: 'restored' }, context('snapshot-restore-echo-0001'));
+    assert.equal(echo.task.output, 'restored');
+    await runtime.execute('babyx.root.microvm.remove', { vmId: restored.vmId }, context('snapshot-restore-remove-0001'));
+
+    const poolResult = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'RECONCILE', snapshotId: snapshot.snapshotId, desiredWarmCount: 1, maximumWarmCount: 1, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }, context('snapshot-pool-create-0001'));
+    let pool = poolResult.pool;
+    assert.equal(pool.status, 'HEALTHY');
+    assert.equal(pool.maximumWarmCount, 1);
+    assert.equal(pool.availableVmIds.length, 1);
+    const warmVmId = pool.availableVmIds[0];
+    const warmRecord = (await runtime.execute('babyx.root.microvm.get', { vmId: warmVmId }, context('snapshot-pool-warm-get-0001'))).microvm;
+    units.add(warmRecord.systemdUnit);
+    assert.equal(warmRecord.leaseState, 'AVAILABLE');
+
+    const acquired = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'ACQUIRE', poolId: pool.poolId, transactionId: 'rtx_snapshot_pool_lease_0001', skillBundleDigest: 'a'.repeat(64), grantDigest: 'b'.repeat(64), policyDigest: 'c'.repeat(64) }, context('snapshot-pool-acquire-0001'));
+    assert.equal(acquired.warm, true);
+    assert.equal(acquired.coldFallback, false);
+    assert.equal(acquired.microvm.vmId, warmVmId);
+    assert.equal(acquired.microvm.leaseState, 'LEASED');
+    const acquiredReplay = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'ACQUIRE', poolId: pool.poolId, transactionId: 'rtx_snapshot_pool_lease_0001', skillBundleDigest: 'a'.repeat(64), grantDigest: 'b'.repeat(64), policyDigest: 'c'.repeat(64) }, context('snapshot-pool-acquire-0001'));
+    assert.equal(acquiredReplay.replayed, true);
+    assert.equal(acquiredReplay.microvm.vmId, acquired.microvm.vmId);
+    const poolEcho = await runtime.execute('babyx.root.microvm.exec', { vmId: acquired.microvm.vmId, action: 'ECHO', taskId: 'task_pool_echo_0001', input: 'warm' }, context('snapshot-pool-echo-0001'));
+    assert.equal(poolEcho.task.output, 'warm');
+    const released = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'RELEASE', poolId: pool.poolId, vmId: acquired.microvm.vmId }, context('snapshot-pool-release-0001'));
+    assert.equal(released.destroyed, true);
+    assert.equal((await runtime.execute('babyx.root.microvm.get', { vmId: acquired.microvm.vmId }, context('snapshot-pool-destroyed-get-0001'))).microvm.lifecycle, 'CLEANED');
+    pool = released.pool;
+    assert.equal(pool.availableVmIds.length, 1);
+    assert.notEqual(pool.availableVmIds[0], acquired.microvm.vmId);
+    const replacement = (await runtime.execute('babyx.root.microvm.get', { vmId: pool.availableVmIds[0] }, context('snapshot-pool-replacement-get-0001'))).microvm;
+    units.add(replacement.systemdUnit);
+
+    const drained = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'RECONCILE', poolId: pool.poolId, snapshotId: snapshot.snapshotId, desiredWarmCount: 0, maximumWarmCount: 1, expiresAt: pool.expiresAt }, context('snapshot-pool-drain-0001'));
+    assert.equal(drained.pool.availableVmIds.length, 0);
+    const fallback = await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'ACQUIRE', poolId: pool.poolId, transactionId: 'rtx_snapshot_pool_fallback_0001', skillBundleDigest: 'd'.repeat(64), grantDigest: 'e'.repeat(64), policyDigest: 'f'.repeat(64) }, context('snapshot-pool-fallback-0001'));
+    assert.equal(fallback.warm, false);
+    assert.equal(fallback.coldFallback, true);
+    units.add(fallback.microvm.systemdUnit);
+    await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'RELEASE', poolId: pool.poolId, vmId: fallback.microvm.vmId }, context('snapshot-pool-fallback-release-0001'));
+    await runtime.execute('babyx.root.microvm.pool.reconcile', { action: 'RECONCILE', poolId: pool.poolId, snapshotId: snapshot.snapshotId, desiredWarmCount: 0, maximumWarmCount: 1, expiresAt: pool.expiresAt }, context('snapshot-pool-final-drain-0001'));
+
+    const integrity = await new RootProviderClient(socketPath).call('reconcile', {}, context('snapshot-final-reconcile-0001'));
+    assert.equal(integrity.integrity.ok, true);
+    assert.equal(integrity.snapshotPoolIntegrity.ok, true);
+    assert.equal(integrity.orphanUnits.length, 0);
+  } finally {
+    if (server) await closeServer(server);
+    for (const unit of units) await stopAndReset(unit);
+    if (priorSocket === undefined) delete process.env.BABY_X_ROOT_PROVIDER_SOCKET; else process.env.BABY_X_ROOT_PROVIDER_SOCKET = priorSocket;
+    if (priorState === undefined) delete process.env.BABY_X_STATE_ROOT; else process.env.BABY_X_STATE_ROOT = priorState;
+    if (priorAssets === undefined) delete process.env.BABY_X_MICROVM_ASSET_ROOT; else process.env.BABY_X_MICROVM_ASSET_ROOT = priorAssets;
+    rmSync(stateRoot, { recursive: true, force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});

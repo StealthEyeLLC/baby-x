@@ -105,8 +105,8 @@ export function defaultProviders(identity: { runningCommit: string; runningTree:
   });
   const microvmRegistry = new MicrovmArtifactRegistry();
   const firecrackerDefinition = definition({
-    providerId: 'firecracker-cold-boot', family: 'microvm', implementationVersion: 'firecracker-v1.15.1+babyx-provider-1.0.0',
-    requiredCapabilities: ['kvm', 'vsock', 'systemd'], limits: { maximumVcpus: 8, maximumMemoryMiB: 4096, maximumGuestRequestBytes: 4096 }, restartBehavior: 'reconcile_exact_process_and_guest_identity',
+    providerId: 'firecracker-cold-boot', family: 'microvm', implementationVersion: 'firecracker-v1.15.1+babyx-provider-1.1.0',
+    requiredCapabilities: ['kvm', 'vsock', 'systemd'], limits: { maximumVcpus: 8, maximumMemoryMiB: 4096, maximumGuestRequestBytes: 4096, maximumWarmCount: 1 }, restartBehavior: 'reconcile_exact_process_and_guest_identity',
     cancellationBehavior: 'typed_guest_task_cancellation_only', cleanupBehavior: 'stop_process_remove_socket_and_writable_layer_verify_absence', errors: ['microvm_asset_integrity_failure','microvm_process_identity_conflict','microvm_cleanup_failed'],
     configuration: { firecrackerVersion: 'v1.15.1', kernelDigest: 'e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2', networkDefault: 'NONE', guestProtocol: 'BABYX-GUEST/1.0.0' },
   });

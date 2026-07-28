@@ -745,6 +745,9 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.microvm.exec') return (await this.rootMicrovmService()).exec(payload, context);
       if (operation === 'babyx.root.microvm.stop') return (await this.rootMicrovmService()).stop(payload, context);
       if (operation === 'babyx.root.microvm.remove') return (await this.rootMicrovmService()).remove(payload, context);
+      if (operation === 'babyx.root.microvm.snapshot') return (await this.rootMicrovmService()).snapshot(payload, context);
+      if (operation === 'babyx.root.microvm.restore') return (await this.rootMicrovmService()).restore(payload, context);
+      if (operation === 'babyx.root.microvm.pool.reconcile') return (await this.rootMicrovmService()).poolReconcile(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

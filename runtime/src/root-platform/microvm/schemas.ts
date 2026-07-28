@@ -99,3 +99,54 @@ export function normalizeExecRequest(value: unknown): { vmId: string; request: M
 export function createRequestDigest(ownerPrincipal: string, request: MicrovmCreateRequest): string {
   return sha256(canonicalize({ operation: 'babyx.root.microvm.create', ownerPrincipal, request }));
 }
+
+
+const SNAPSHOT_ID = /^mvs_[a-f0-9]{32}$/u;
+const POOL_ID = /^mvp_[a-f0-9]{32}$/u;
+
+export function normalizeSnapshotRequest(value: unknown, now = new Date()): { vmId: string; expiresAt: string } {
+  const input = strictObject(value, 'microVM snapshot payload', ['vmId', 'expiresAt']);
+  const vmId = text(input, 'vmId', VM_ID);
+  const expiresAt = input.expiresAt === undefined ? new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString() : String(input.expiresAt);
+  const parsed = Date.parse(expiresAt);
+  if (!Number.isFinite(parsed) || parsed <= now.getTime() || parsed > now.getTime() + 30 * 24 * 60 * 60 * 1000) throw new MicrovmError('microvm_invalid_request', 'expiresAt must be a future ISO-8601 time within 30 days');
+  return { vmId, expiresAt: new Date(parsed).toISOString() };
+}
+
+export interface MicrovmRestoreRequest extends JsonObject {
+  snapshotId: string;
+  transactionId: string;
+  skillBundleDigest: string;
+  grantDigest: string;
+  policyDigest: string;
+  networkMode: 'NONE';
+}
+
+export function normalizeRestoreRequest(value: unknown): MicrovmRestoreRequest {
+  const input = strictObject(value, 'microVM restore payload', ['snapshotId', 'transactionId', 'skillBundleDigest', 'grantDigest', 'policyDigest', 'networkMode']);
+  const networkMode = input.networkMode ?? 'NONE';
+  if (networkMode !== 'NONE') throw new MicrovmError('microvm_invalid_request', 'snapshot restore networking is disabled');
+  return { snapshotId: text(input, 'snapshotId', SNAPSHOT_ID), transactionId: text(input, 'transactionId', TRANSACTION), skillBundleDigest: text(input, 'skillBundleDigest', DIGEST), grantDigest: text(input, 'grantDigest', DIGEST), policyDigest: text(input, 'policyDigest', DIGEST), networkMode };
+}
+
+export type MicrovmPoolAction =
+  | { action: 'RECONCILE'; poolId?: string; snapshotId: string; desiredWarmCount: number; expiresAt: string }
+  | { action: 'ACQUIRE'; poolId: string; transactionId: string; skillBundleDigest: string; grantDigest: string; policyDigest: string }
+  | { action: 'RELEASE'; poolId: string; vmId: string };
+
+export function normalizePoolRequest(value: unknown, now = new Date()): MicrovmPoolAction {
+  const input = strictObject(value, 'microVM pool payload', ['action', 'poolId', 'snapshotId', 'desiredWarmCount', 'maximumWarmCount', 'expiresAt', 'transactionId', 'skillBundleDigest', 'grantDigest', 'policyDigest', 'vmId']);
+  const action = input.action;
+  if (action === 'RECONCILE') {
+    const maximumWarmCount = input.maximumWarmCount === undefined ? 1 : Number(input.maximumWarmCount);
+    if (maximumWarmCount !== 1) throw new MicrovmError('microvm_invalid_request', 'Firecracker v1.15.1 snapshot pools support maximumWarmCount 1 because guest CID cannot be rewritten');
+    const desiredWarmCount = integer(input, 'desiredWarmCount', 0, 1, 1);
+    const expiresAt = input.expiresAt === undefined ? new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString() : String(input.expiresAt);
+    const parsed = Date.parse(expiresAt);
+    if (!Number.isFinite(parsed) || parsed <= now.getTime() || parsed > now.getTime() + 30 * 24 * 60 * 60 * 1000) throw new MicrovmError('microvm_invalid_request', 'expiresAt must be a future ISO-8601 time within 30 days');
+    return { action, poolId: input.poolId === undefined ? undefined : text(input, 'poolId', POOL_ID), snapshotId: text(input, 'snapshotId', SNAPSHOT_ID), desiredWarmCount, expiresAt: new Date(parsed).toISOString() };
+  }
+  if (action === 'ACQUIRE') return { action, poolId: text(input, 'poolId', POOL_ID), transactionId: text(input, 'transactionId', TRANSACTION), skillBundleDigest: text(input, 'skillBundleDigest', DIGEST), grantDigest: text(input, 'grantDigest', DIGEST), policyDigest: text(input, 'policyDigest', DIGEST) };
+  if (action === 'RELEASE') return { action, poolId: text(input, 'poolId', POOL_ID), vmId: text(input, 'vmId', VM_ID) };
+  throw new MicrovmError('microvm_invalid_request', 'pool action is invalid');
+}

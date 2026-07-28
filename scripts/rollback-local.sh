@@ -18,6 +18,14 @@ install_units_from() {
   [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]] || return 0
   "$source/scripts/provision-local-keys.sh" || return
   cp "$source/ops/systemd/baby-x.service" "$source/ops/systemd/baby-x.socket" "$source/ops/systemd/baby-x-gateway.service" /etc/systemd/system/ || return
+  if [[ -f "$source/ops/systemd/baby-x-root-provider.service" && -f "$source/ops/systemd/baby-x-root-provider.socket" && -x "$source/scripts/provision-microvm-assets.sh" ]]; then
+    BABY_X_MICROVM_ASSET_ROOT=${BABY_X_MICROVM_ASSET_ROOT:-/var/lib/baby-x/root-platform/microvm/assets}       NODE=${BABY_X_NODE_BIN:-/opt/node-v24.18.0-linux-x64/bin/node}       "$source/scripts/provision-microvm-assets.sh" "${BABY_X_MICROVM_ASSET_ROOT:-/var/lib/baby-x/root-platform/microvm/assets}" || return
+    cp "$source/ops/systemd/baby-x-root-provider.service" "$source/ops/systemd/baby-x-root-provider.socket" /etc/systemd/system/ || return
+  else
+    systemctl stop baby-x-root-provider.service baby-x-root-provider.socket 2>/dev/null || true
+    systemctl disable baby-x-root-provider.socket 2>/dev/null || true
+    rm -f /etc/systemd/system/baby-x-root-provider.service /etc/systemd/system/baby-x-root-provider.socket
+  fi
   cp "$source/ops/tmpfiles/baby-x.conf" /etc/tmpfiles.d/ || return
   systemd-tmpfiles --create /etc/tmpfiles.d/baby-x.conf || return
   systemctl daemon-reload || return
@@ -25,9 +33,14 @@ install_units_from() {
 
 restart_units() {
   [[ ${BABY_X_INSTALL_UNITS:-0} == 1 ]] || return 0
-  systemctl stop baby-x.service 2>/dev/null || true
-  systemctl reset-failed baby-x.service baby-x-gateway.service 2>/dev/null || true
+  systemctl stop baby-x.service baby-x-root-provider.service 2>/dev/null || true
+  systemctl reset-failed baby-x.service baby-x-gateway.service baby-x-root-provider.service 2>/dev/null || true
+  systemctl enable baby-x.socket baby-x-gateway.service >/dev/null || return
   systemctl restart baby-x.socket baby-x-gateway.service || return
+  if [[ -f /etc/systemd/system/baby-x-root-provider.socket ]]; then
+    systemctl enable baby-x-root-provider.socket >/dev/null || return
+    systemctl restart baby-x-root-provider.socket || return
+  fi
 }
 
 activate_and_verify() {

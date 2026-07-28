@@ -6,6 +6,7 @@ import { ROOT_TRANSACTION_PROVIDER_VERSION, ROOT_TRANSACTION_SCHEMA_VERSION } fr
 import { PROVIDER_CONTRACT_VERSION, ROOT_PLATFORM_PROVIDER_VERSION, ROOT_PLATFORM_SCHEMA_VERSION, type ProviderDefinition, type ProviderObservation } from './schemas.ts';
 import type { RootPlatformProvider } from './provider-registry.ts';
 import { mediationProviders } from './mediation/providers.ts';
+import { MicrovmArtifactRegistry } from './microvm/artifacts.ts';
 
 export const PROMPT1_COMMIT = 'fef1cb3b76a5c6f5beb1ca73499c4d1e5cafe713' as const;
 export const PROMPT1_TREE = 'a98cee4adfed2912bffda2a2fdf5928bcd0b66bf' as const;
@@ -102,10 +103,18 @@ export function defaultProviders(identity: { runningCommit: string; runningTree:
     cancellationBehavior: 'bounded_synchronous_probes', cleanupBehavior: 'no_owned_resources', errors: ['host_probe_failed'],
     configuration: { probeSet: ['architecture', 'kernel', 'systemd', 'cgroup', 'kvm', 'seccomp', 'landlock', 'bpf', 'tpm', 'vsock', 'tap', 'criu', 'rr', 'zfs', 'nspawn'] },
   });
+  const microvmRegistry = new MicrovmArtifactRegistry();
+  const firecrackerDefinition = definition({
+    providerId: 'firecracker-cold-boot', family: 'microvm', implementationVersion: 'firecracker-v1.15.1+babyx-provider-1.0.0',
+    requiredCapabilities: ['kvm', 'vsock', 'systemd'], limits: { maximumVcpus: 8, maximumMemoryMiB: 4096, maximumGuestRequestBytes: 4096 }, restartBehavior: 'reconcile_exact_process_and_guest_identity',
+    cancellationBehavior: 'typed_guest_task_cancellation_only', cleanupBehavior: 'stop_process_remove_socket_and_writable_layer_verify_absence', errors: ['microvm_asset_integrity_failure','microvm_process_identity_conflict','microvm_cleanup_failed'],
+    configuration: { firecrackerVersion: 'v1.15.1', kernelDigest: 'e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2', networkDefault: 'NONE', guestProtocol: 'BABYX-GUEST/1.0.0' },
+  });
   return [
     { definition: prompt1Definition, probe: (): ProviderObservation => ({ supportState: 'SUPPORTED', executableIdentity: `${identity.runningCommit}:${identity.runningTree}`, health: { ok: true, coordinationOnly: true }, observedCapabilities: [] }) },
     { definition: platformDefinition, probe: (): ProviderObservation => ({ supportState: 'SUPPORTED', executableIdentity: `${process.execPath}:${identity.runningCommit}:${identity.runningTree}`, health: { ok: true, schemaVersion: ROOT_PLATFORM_SCHEMA_VERSION }, observedCapabilities: ['filesystem'] }) },
     { definition: probeDefinition, probe: (): ProviderObservation => { const capabilities = probeHostCapabilities(); return { supportState: 'SUPPORTED', executableIdentity: process.execPath, health: { ok: true, capabilityDigest: sha256(canonicalize(capabilities)) }, observedCapabilities: ['procfs', 'sysfs'] }; } },
+    { definition: firecrackerDefinition, probe: (): ProviderObservation => { const observed = microvmRegistry.probe() as { supportState: ProviderObservation['supportState']; health: JsonObject }; let executableIdentity = 'firecracker-v1.15.1:unavailable'; try { const artifacts = microvmRegistry.load(); executableIdentity = `${artifacts.firecrackerPath}:${artifacts.firecrackerDigest}`; } catch {} return { supportState: observed.supportState, executableIdentity, health: observed.health, observedCapabilities: observed.supportState === 'SUPPORTED' ? ['kvm','vsock','systemd'] : [] }; } },
     ...mediationProviders(),
   ];
 }

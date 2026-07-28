@@ -684,6 +684,14 @@ export class BabyXRuntime {
     }
     return this.candidateRaceServiceInstance;
   }
+  private rootMicrovmServiceInstance?: import('./root-platform/microvm/service.ts').RootMicrovmService;
+  private async rootMicrovmService(): Promise<import('./root-platform/microvm/service.ts').RootMicrovmService> {
+    if (this.rootMicrovmServiceInstance === undefined) {
+      const { RootMicrovmService } = await import('./root-platform/microvm/service.ts');
+      this.rootMicrovmServiceInstance = new RootMicrovmService();
+    }
+    return this.rootMicrovmServiceInstance;
+  }
   private rootMediationServiceInstance?: import('./root-platform/mediation/service.ts').RootMediationService;
   private async rootMediationService(): Promise<import('./root-platform/mediation/service.ts').RootMediationService> {
     if (this.rootMediationServiceInstance === undefined) {
@@ -731,6 +739,12 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.mediation.profile.list') return (await this.rootMediationService()).list(payload);
       if (operation === 'babyx.root.mediation.profile.revoke') return (await this.rootMediationService()).revoke(payload, context);
       if (operation === 'babyx.root.mediation.events') return (await this.rootMediationService()).events(payload);
+      if (operation === 'babyx.root.microvm.create') return (await this.rootMicrovmService()).create(payload, context);
+      if (operation === 'babyx.root.microvm.get') return (await this.rootMicrovmService()).get(payload, context);
+      if (operation === 'babyx.root.microvm.list') return (await this.rootMicrovmService()).list(payload, context);
+      if (operation === 'babyx.root.microvm.exec') return (await this.rootMicrovmService()).exec(payload, context);
+      if (operation === 'babyx.root.microvm.stop') return (await this.rootMicrovmService()).stop(payload, context);
+      if (operation === 'babyx.root.microvm.remove') return (await this.rootMicrovmService()).remove(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

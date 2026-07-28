@@ -13,3 +13,5 @@ release/
 *.pcapng
 *.core
 *.img
+
+.baby-x-test-assets/

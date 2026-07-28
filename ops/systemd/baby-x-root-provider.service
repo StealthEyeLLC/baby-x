@@ -1,0 +1,33 @@
+[Unit]
+Description=Baby-X privileged root provider
+Requires=baby-x-root-provider.socket
+After=local-fs.target baby-x-root-provider.socket
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/baby-x/current
+User=root
+Group=root
+ExecStart=/opt/node-v24.18.0-linux-x64/bin/node /opt/baby-x/current/runtime/root-provider-main.js
+Environment=NODE_ENV=production
+Environment=BABY_X_STATE_ROOT=/var/lib/baby-x
+Environment=BABY_X_MICROVM_ASSET_ROOT=/var/lib/baby-x/root-platform/microvm/assets
+Environment=BABY_X_MICROVM_RUNTIME_ROOT=/run/baby-x/microvm
+Environment=BABY_X_ROOT_PROVIDER_SOCKET=/run/baby-x/root-provider.sock
+Environment=BABY_X_ROOT_PROVIDER_CLIENT_UID=0
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=30
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=1048576
+NoNewPrivileges=no
+ProtectSystem=off
+ProtectHome=false
+PrivateTmp=false
+PrivateDevices=false
+PrivateNetwork=false
+
+[Install]
+WantedBy=multi-user.target

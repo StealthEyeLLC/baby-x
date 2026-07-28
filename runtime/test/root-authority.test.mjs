@@ -104,7 +104,7 @@ test('root catalog is finite, truthful, and dispatcher-backed', async () => {
     const runtime = new BabyXRuntime({ stateRoot: root });
     const description = runtime.describe();
     const roots = description.operations.filter((entry) => entry.operation.startsWith('babyx.root.'));
-    assert.equal(description.operationCatalogVersion, '5.0.0');
+    assert.equal(description.operationCatalogVersion, '6.0.0');
     assert.ok(roots.length >= 11);
     assert.equal(new Set(roots.map((entry) => entry.operation)).size, roots.length);
     for (const name of ['babyx.root.describe', 'babyx.root.transaction.create', 'babyx.root.transaction.get', 'babyx.root.transaction.list', 'babyx.root.transaction.authorize', 'babyx.root.transaction.begin', 'babyx.root.transaction.observe', 'babyx.root.transaction.commit', 'babyx.root.transaction.rollback', 'babyx.root.transaction.events', 'babyx.root.transaction.verify']) assert.ok(roots.some((entry) => entry.operation === name), name);

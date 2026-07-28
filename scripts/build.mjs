@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
 
 const root = process.cwd();
-const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', mediationSupervisor: 'not-built', bpfLsmObject: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, copiedDeploymentFiles: 0, copiedNativeArtifacts: 0 };
+const report = { node: process.version, peerCredentialAddon: 'not-built', seccompSupervisor: 'not-built', mediationSupervisor: 'not-built', microvmGuestAgent: 'not-built', bpfLsmObject: 'not-built', transformedTypeScript: 0, copiedJavaScript: 0, copiedDeploymentFiles: 0, copiedNativeArtifacts: 0 };
 if (process.version !== 'v24.18.0') throw new Error(`Node.js 24.18.0 required, found ${process.version}`);
 rmSync(join(root, 'dist'), { recursive: true, force: true });
 
@@ -46,7 +46,11 @@ for (const path of [
   'ops/systemd/baby-x.service',
   'ops/systemd/baby-x.socket',
   'ops/systemd/baby-x-gateway.service',
+  'ops/systemd/baby-x-root-provider.socket',
+  'ops/systemd/baby-x-root-provider.service',
   'ops/tmpfiles/baby-x.conf',
+  'scripts/provision-microvm-assets.sh',
+  'runtime/assets/microvm/firecracker-v1.15.1-x86_64.json',
 ]) copyArtifact(path, path, 'copiedDeploymentFiles');
 
 const compiler = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v c++'], { encoding: 'utf8' }).stdout.trim();
@@ -68,6 +72,13 @@ chmodSync(join(root, 'runtime/native/mediation-supervisor/build/baby-x-mediation
 copyArtifact('runtime/native/mediation-supervisor/build/baby-x-mediation-supervisor', 'runtime/native/mediation-supervisor/baby-x-mediation-supervisor', 'copiedNativeArtifacts');
 copyArtifact('runtime/native/bpf-lsm/observe-exec.bpf.c', 'runtime/native/bpf-lsm/observe-exec.bpf.c', 'copiedNativeArtifacts');
 report.mediationSupervisor = 'built-and-copied';
+
+mkdirSync(join(root, 'runtime/native/microvm-guest-agent/build'), { recursive: true });
+const guestAgentResult = spawnSync(cCompiler, ['-static', '-O2', '-pthread', '-Wall', '-Wextra', '-Werror', 'runtime/native/microvm-guest-agent/guest_agent.c', '-o', 'runtime/native/microvm-guest-agent/build/baby-x-microvm-guest-agent'], { cwd: root, encoding: 'utf8' });
+if (guestAgentResult.status !== 0) throw new Error(`microVM guest agent build failed: ${guestAgentResult.stderr}`);
+chmodSync(join(root, 'runtime/native/microvm-guest-agent/build/baby-x-microvm-guest-agent'), 0o755);
+copyArtifact('runtime/native/microvm-guest-agent/build/baby-x-microvm-guest-agent', 'runtime/native/microvm-guest-agent/baby-x-microvm-guest-agent', 'copiedNativeArtifacts');
+report.microvmGuestAgent = 'built-and-copied';
 const clang = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v clang'], { encoding: 'utf8' }).stdout.trim();
 const bpfHeaders = existsSync('/usr/include/bpf/bpf_helpers.h') && existsSync('/usr/include/bpf/bpf_tracing.h');
 const bpftool = spawnSync('/usr/bin/env', ['bash', '-lc', 'command -v bpftool'], { encoding: 'utf8' }).stdout.trim();

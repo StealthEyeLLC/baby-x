@@ -1,0 +1,15 @@
+import { rmSync } from 'node:fs';
+import { FirecrackerMicrovmProvider } from './root-platform/microvm/provider.ts';
+import { resolveProviderListenOptions, startRootProviderServer } from './root-platform/microvm/provider-server.ts';
+const stateRoot=process.env.BABY_X_STATE_ROOT??'/var/lib/baby-x';
+const assetRoot=process.env.BABY_X_MICROVM_ASSET_ROOT??'/var/lib/baby-x/root-platform/microvm/assets';
+const socketPath=process.env.BABY_X_ROOT_PROVIDER_SOCKET??'/run/baby-x/root-provider.sock';
+const runtimeRoot=process.env.BABY_X_MICROVM_RUNTIME_ROOT??'/run/baby-x/microvm';
+const allowedUid=Number(process.env.BABY_X_ROOT_PROVIDER_CLIENT_UID??'0');
+if(!Number.isSafeInteger(allowedUid)||allowedUid<0)throw new Error('BABY_X_ROOT_PROVIDER_CLIENT_UID is invalid');
+const provider=new FirecrackerMicrovmProvider({stateRoot,assetRoot,runtimeRoot});
+const listen=resolveProviderListenOptions(socketPath);
+if ('path' in listen) rmSync(listen.path,{force:true});
+await provider.reconcile();
+const server=startRootProviderServer(provider,{socketPath,allowedUid,listen});
+server.on('listening',()=>process.stdout.write(`${JSON.stringify({ok:true,provider:'firecracker-cold-boot',socketPath})}\n`));

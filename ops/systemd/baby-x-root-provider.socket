@@ -1,0 +1,16 @@
+[Unit]
+Description=Baby-X sovereign root provider socket
+
+[Socket]
+ListenStream=/run/baby-x/root-provider.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0750
+Accept=no
+RemoveOnStop=yes
+Service=baby-x-root-provider.service
+Backlog=64
+
+[Install]
+WantedBy=sockets.target

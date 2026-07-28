@@ -41,3 +41,26 @@ The live host reports:
 - `bpf-lsm`: `UNAVAILABLE` because `bpf` is not active in the host LSM list.
 
 The BPF-LSM source is tracked and digest-bound. A CO-RE observation-only object is built when clang, libbpf headers, bpftool, and kernel BTF are all available. Fixture tests cover load, health, attach, detach, failure, and reconciliation. Enforcement remains disabled and a profile requesting unavailable BPF-LSM behavior fails closed.
+
+## Checkpoint C
+
+Checkpoint C adds a cold-boot Firecracker microVM provider and six compact public operations:
+
+- `babyx.root.microvm.create`
+- `babyx.root.microvm.get`
+- `babyx.root.microvm.list`
+- `babyx.root.microvm.exec`
+- `babyx.root.microvm.stop`
+- `babyx.root.microvm.remove`
+
+The provider is an effect sidecar behind the root-only `baby-x-root-provider` Unix socket. The Baby-X runtime remains the public operation authority. Peer credentials are checked with `SO_PEERCRED`, request framing is bounded to one JSON line per connection, and the sidecar accepts typed microVM actions only. It does not expose a shell passthrough.
+
+The compatibility pair is fixed to Firecracker `v1.15.1` and the matching `v1.15` CI kernel `vmlinux-6.1.155`. The official Firecracker archive SHA-256 is `d4a32ab2322d887ca1bc4a4e7afa9cc35393e6362dfc2b3becb389d362e4275a`; the kernel SHA-256 is `e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2`. The release manifest and the resolved local asset manifest bind the Firecracker, jailer, kernel, base root image, and static guest-agent digests. A create request must repeat the exact registered kernel and root-image digests. Network mode is fixed to `NONE`.
+
+MicroVM truth is durable and owner-bound. Records contain the transaction, Skill bundle, grant, policy, provider artifacts, writable layer, systemd unit, cgroup, exact PID/start-time/executable identity, host and guest boot IDs, vsock identity, lifecycle, cleanup observations, and digest chain. Idempotent create replay returns the original VM; a conflicting replay fails closed.
+
+Durable disks and configuration remain beneath the Baby-X state root. Firecracker API and vsock Unix sockets use the bounded runtime root `/run/baby-x/microvm` so a long durable state path cannot violate the kernel Unix-socket path limit. Provider restart adopts a VM only when its exact process identity and authenticated guest boot identity still match. Missing or conflicting process truth transitions a live record to `LOST`; it is never silently replaced. Normal and recovery removal both require positive process, socket, and writable-layer absence before `CLEANED`.
+
+The live x86_64 host reports `firecracker-cold-boot` as `SUPPORTED` only after KVM, vhost-vsock, the exact provider artifacts, cold boot, authenticated guest control, restart adoption, crash classification, and cleanup tests pass. BPF-LSM remains independently `UNAVAILABLE`; its absence does not reduce the microVM provider support state.
+
+The guest is a minimal static PID 1 with no shell. Its authenticated `BABYX-GUEST/1.0.0` protocol supports health, bounded echo, bounded sleep, status, cancellation, and shutdown. The live integration test proves cold boot, authentication failure, typed execution, cancellation, provider restart adoption, forced process crash classification, and complete cleanup.

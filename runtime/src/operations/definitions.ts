@@ -34,6 +34,12 @@ babyx.root.mediation.profile.get
 babyx.root.mediation.profile.list
 babyx.root.mediation.profile.revoke
 babyx.root.mediation.events
+babyx.root.microvm.create
+babyx.root.microvm.get
+babyx.root.microvm.list
+babyx.root.microvm.exec
+babyx.root.microvm.stop
+babyx.root.microvm.remove
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -327,6 +333,13 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.mediation.profile.list') return objectSchema({ ownerPrincipal: identifier, status: { enum: ['ACTIVE', 'REVOKED', 'EXPIRED'] }, ...page });
   if (operation === 'babyx.root.mediation.profile.revoke') return objectSchema({ profileId: mediationProfileId, expectedSequence, reasonDigest: digest }, ['profileId', 'expectedSequence', 'reasonDigest']);
   if (operation === 'babyx.root.mediation.events') return objectSchema({ profileId: mediationProfileId, ...page }, ['profileId']);
+  const microvmId = { type: 'string', pattern: '^mvm_[a-f0-9]{32}$' } as const;
+  const microvmTransactionId = { type: 'string', pattern: '^rtx_[A-Za-z0-9_-]{8,128}$' } as const;
+  const microvmLifecycle = { enum: ['REQUESTED','PREPARING','STARTING','BOOTING','READY','RUNNING','STOPPING','STOPPED','FAILED','LOST','CLEANING','CLEANED','AMBIGUOUS','RECOVERY_REQUIRED'] } as const;
+  if (operation === 'babyx.root.microvm.create') return objectSchema({ transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, policyDigest: digest, firecrackerVersion: { const: 'v1.15.1' }, kernelDigest: digest, rootImageDigest: digest, vcpuCount: { type: 'integer', minimum: 1, maximum: 8 }, memoryMiB: { type: 'integer', minimum: 128, maximum: 4096 }, networkMode: { const: 'NONE' } }, ['transactionId','skillBundleDigest','grantDigest','policyDigest','kernelDigest','rootImageDigest']);
+  if (operation === 'babyx.root.microvm.get' || operation === 'babyx.root.microvm.stop' || operation === 'babyx.root.microvm.remove') return objectSchema({ vmId: microvmId }, ['vmId']);
+  if (operation === 'babyx.root.microvm.list') return objectSchema({ ownerPrincipal: identifier, lifecycle: microvmLifecycle, ...page });
+  if (operation === 'babyx.root.microvm.exec') return objectSchema({ vmId: microvmId, action: { enum: ['ECHO','SLEEP','STATUS','CANCEL'] }, taskId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$' }, input: { type: 'string', maxLength: 1024 }, durationMs: { type: 'integer', minimum: 0, maximum: 60000 } }, ['vmId','action','taskId']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -427,13 +440,14 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (family === 'certification' || family === 'race') return ['durable_record_persisted', 'evidence_references_reported'];
   if (operation === 'babyx.root.provider.reconcile') return ['provider_reconciliation_record_persisted', 'provider_state_observed'];
   if (operation === 'babyx.root.mediation.profile.create' || operation === 'babyx.root.mediation.profile.revoke') return ['mediation_profile_record_persisted', 'digest_chained_event_appended'];
+  if (operation === 'babyx.root.microvm.create' || operation === 'babyx.root.microvm.exec' || operation === 'babyx.root.microvm.stop' || operation === 'babyx.root.microvm.remove') return ['microvm_record_persisted', 'provider_observation_reported'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '5.0.0';
+export const OPERATION_CATALOG_VERSION = '6.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

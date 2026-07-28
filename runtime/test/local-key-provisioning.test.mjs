@@ -99,7 +99,7 @@ test('key provisioning is durable, idempotent, private, and complete', (context)
 test('immutable build contains key provisioning and key-wired units', () => {
   assert.equal(readFileSync('dist/scripts/provision-local-keys.sh').equals(readFileSync('scripts/provision-local-keys.sh')), true);
   const report = JSON.parse(readFileSync('dist/build-report.json', 'utf8'));
-  assert.equal(report.copiedDeploymentFiles, 8);
+  assert.equal(report.copiedDeploymentFiles, 12);
   const runtimeUnit = readFileSync('dist/ops/systemd/baby-x.service', 'utf8');
   const gatewayUnit = readFileSync('dist/ops/systemd/baby-x-gateway.service', 'utf8');
   assert.match(runtimeUnit, /EnvironmentFile=-\/etc\/baby-x\/runtime-key-environment/u);

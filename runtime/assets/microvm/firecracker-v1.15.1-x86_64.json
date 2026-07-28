@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "firecrackerVersion": "v1.15.1",
+  "architecture": "x86_64",
+  "archiveUrl": "https://github.com/firecracker-microvm/firecracker/releases/download/v1.15.1/firecracker-v1.15.1-x86_64.tgz",
+  "archiveSha256": "d4a32ab2322d887ca1bc4a4e7afa9cc35393e6362dfc2b3becb389d362e4275a",
+  "verification": "official adjacent SHA-256 asset",
+  "kernelVersion": "6.1.155",
+  "kernelUrl": "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-6.1.155",
+  "kernelSha256": "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2",
+  "networkDefault": "NONE",
+  "guestAgentProtocol": "BABYX-GUEST/1.0.0"
+}

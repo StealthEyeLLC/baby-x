@@ -61,6 +61,10 @@ babyx.root.grant.install
 babyx.root.grant.get
 babyx.root.grant.list
 babyx.root.grant.revoke
+babyx.root.observation.start
+babyx.root.observation.get
+babyx.root.observation.record
+babyx.root.observation.finalize
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -361,6 +365,10 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.grant.install') return objectSchema({ grant: strictJsonObject }, ['grant']);
   if (operation === 'babyx.root.grant.get') return objectSchema({ grantId: identifier }, ['grantId']);
   if (operation === 'babyx.root.grant.list') return objectSchema({ state: stringValue, ownerPrincipal: identifier, ...effectPage });
+  if (operation === 'babyx.root.observation.start') return objectSchema({ transactionId: effectTransactionId, stepId: identifier, requiredKinds: boundedSmallStrings, requiredSources: boundedSmallStrings, fallbackSources: boundedSmallStrings, maxEvents: { type: 'integer', minimum: 1, maximum: 100_000 }, maxBytes: { type: 'integer', minimum: 1_024, maximum: 67_108_864 }, maxDurationMs: { type: 'integer', minimum: 1_000, maximum: 3_600_000 } }, ['transactionId', 'stepId', 'requiredKinds', 'requiredSources']);
+  if (operation === 'babyx.root.observation.get') return objectSchema({ sessionId, ...effectPage }, ['sessionId']);
+  if (operation === 'babyx.root.observation.record') return objectSchema({ sessionId, transactionId: effectTransactionId, stepId: identifier, kind: identifier, source: identifier, occurredAt: stringValue, cgroupId: { anyOf: [{ type: 'null' }, stringValue] }, unitName: { anyOf: [{ type: 'null' }, identifier] }, machineId: { anyOf: [{ type: 'null' }, identifier] }, processId: { anyOf: [{ type: 'null' }, positiveInteger] }, processStartTime: { anyOf: [{ type: 'null' }, stringValue] }, bootId: { anyOf: [{ type: 'null' }, identifier] }, data: strictJsonObject }, ['sessionId', 'transactionId', 'stepId', 'kind', 'source', 'data']);
+  if (operation === 'babyx.root.observation.finalize') return objectSchema({ sessionId, sourceStatus: strictJsonObject, spill: { type: 'boolean' } }, ['sessionId', 'sourceStatus']);
   if (operation === 'babyx.root.grant.revoke') return objectSchema({ grantId: identifier, reason: stringValue }, ['grantId', 'reason']);
   throw new Error(`missing root operation schema: ${operation}`);
 }
@@ -454,7 +462,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.1.0';
+export const OPERATION_CATALOG_VERSION = '3.2.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

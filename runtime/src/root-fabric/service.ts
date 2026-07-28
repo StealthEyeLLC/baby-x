@@ -7,6 +7,7 @@ import { RootEffectRegistry } from './effects.ts';
 import { ROOT_FABRIC_PROVIDER_VERSION, ROOT_FABRIC_SCHEMA_VERSION, RootFabricError, contextPrincipal, object, strictObject, text, type RootEffectClass, type RootExecutionProvider } from './model.ts';
 import { RootTrustService } from './trust.ts';
 import { RootEffectTransactionService } from './transactions.ts';
+import { RootObservationService } from './observability.ts';
 
 export const ROOT_FABRIC_OPERATION_NAMES = Object.freeze([
   'babyx.root.compatibility.get', 'babyx.root.effect.registry',
@@ -16,6 +17,7 @@ export const ROOT_FABRIC_OPERATION_NAMES = Object.freeze([
   'babyx.root.effect.compensate', 'babyx.root.effect.clean', 'babyx.root.effect.repair',
   'babyx.root.bundle.verify', 'babyx.root.bundle.install', 'babyx.root.bundle.get', 'babyx.root.bundle.list', 'babyx.root.bundle.revoke',
   'babyx.root.grant.install', 'babyx.root.grant.get', 'babyx.root.grant.list', 'babyx.root.grant.revoke',
+  'babyx.root.observation.start', 'babyx.root.observation.get', 'babyx.root.observation.record', 'babyx.root.observation.finalize',
 ] as const);
 function envList(name: string): string[] { return (process.env[name] ?? '').split(',').map((value) => value.trim()).filter(Boolean); }
 function keyFrom(directory: string, keyId: string): string | Buffer | undefined { if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(keyId)) return undefined; const path = join(directory, `${keyId}.pub`); return existsSync(path) ? readFileSync(path) : undefined; }
@@ -24,14 +26,16 @@ export class RootFabricService {
   readonly transactions: RootEffectTransactionService;
   readonly trust: RootTrustService;
   readonly effects: RootEffectRegistry;
-  constructor(private readonly options: { stateRoot: string; sourceCommit: string; sourceTree: string; catalogVersion: string; catalogDigest: () => string; publicKey?: (keyId: string) => string | Buffer | undefined; trustDirectory?: string; now?: () => string }) {
+  readonly observations: RootObservationService;
+  constructor(private readonly options: { stateRoot: string; sourceCommit: string; sourceTree: string; catalogVersion: string; catalogDigest: () => string; publicKey?: (keyId: string) => string | Buffer | undefined; trustDirectory?: string; artifacts?: { spill(name: string, value: JsonObject, metadata: JsonObject): Promise<{ artifactId: string }> }; now?: () => string }) {
     this.transactions = new RootEffectTransactionService(options.stateRoot, { now: options.now });
     this.trust = new RootTrustService(options.stateRoot, options.publicKey ?? ((keyId) => keyFrom(options.trustDirectory ?? '/etc/baby-x/root-trust', keyId)), { now: options.now });
+    this.observations = new RootObservationService(options.stateRoot, options.artifacts, { now: options.now });
     this.effects = new RootEffectRegistry({ storage: new RootStorageEffectAuthority({ datasetRoots: envList('BABYX_ROOT_DATASET_ROOTS'), mountRoots: envList('BABYX_ROOT_MOUNT_ROOTS') }), network: new RootNetworkEffectAuthority({ table: process.env.BABYX_ROOT_NFT_TABLE ?? 'babyx_root' }) });
   }
-  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0' } }); return value as unknown as JsonObject; }
+  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.0.0' } }); return value as unknown as JsonObject; }
   async execute(operation: string, payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
-    if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-G root fabric operation ${operation}`);
+    if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-H root fabric operation ${operation}`);
     if (operation === 'babyx.root.compatibility.get') return this.compatibility();
     if (operation === 'babyx.root.effect.registry') return { effects: this.effects.list() };
     if (operation === 'babyx.root.effect.create') { this.assertCreateAllowed(payload, context); return this.transactions.create(payload, context); }
@@ -57,7 +61,11 @@ export class RootFabricService {
     if (operation === 'babyx.root.grant.install') return this.trust.grantInstall(payload, context);
     if (operation === 'babyx.root.grant.get') return this.trust.grantGet(payload);
     if (operation === 'babyx.root.grant.list') return this.trust.grantList(payload);
-    return this.trust.grantRevoke(payload, context);
+    if (operation === 'babyx.root.grant.revoke') return this.trust.grantRevoke(payload, context);
+    if (operation === 'babyx.root.observation.start') return this.observations.start(payload, context);
+    if (operation === 'babyx.root.observation.get') return this.observations.get(payload);
+    if (operation === 'babyx.root.observation.record') return this.observations.record(payload, context);
+    return this.observations.finalize(payload, context);
   }
   verifyBrokerBinding(requestValue: JsonObject): void {
     const request = strictObject(requestValue, 'broker binding', ['protocolVersion', 'requestId', 'transactionId', 'transactionSequence', 'fencingToken', 'ownerPrincipalDigest', 'skillBundleDigest', 'grantDigest', 'policyDecisionDigest', 'operation', 'operationVersion', 'operationInput', 'inputDigest', 'deadline', 'nonce', 'selectedProvider', 'credentialReferences']);

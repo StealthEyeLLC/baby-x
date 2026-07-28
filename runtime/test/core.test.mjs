@@ -28,11 +28,11 @@ test('describe exposes only implemented operations without duplicate authority p
     const description = new BabyXRuntime({ stateRoot: root }).describe();
     const operations = description.operations;
     assert.ok(Array.isArray(operations));
-    assert.equal(operations.length, 216);
+    assert.equal(operations.length, 220);
     const rootOperations = operations.filter((item) => item.operation.startsWith('babyx.root.'));
-    assert.equal(rootOperations.length, 37);
+    assert.equal(rootOperations.length, 41);
     assert.equal(rootOperations.filter((item) => item.operation.startsWith('babyx.root.effect.') || item.operation.startsWith('babyx.root.bundle.') || item.operation.startsWith('babyx.root.grant.') || item.operation === 'babyx.root.compatibility.get').length, 26);
-    assert.equal(rootOperations.some((item) => /babyx\.root\.(?:observation\.|credential\.|freeze\.|kill$|reconcile$)/u.test(item.operation)), false);
+    assert.equal(rootOperations.some((item) => /babyx\.root\.(?:credential\.|freeze\.|kill$|reconcile$)/u.test(item.operation)), false);
     assert.ok(operations.some((item) => item.operation === 'babyx.artifact.verify'));
     assert.ok(operations.some((item) => item.operation === 'babyx.syscall.inject.fd'));
     assert.equal(operations.some((item) => item.operation === 'babyx.machine.raw'), false);
@@ -48,7 +48,7 @@ test('describe exposes only implemented operations without duplicate authority p
       assert.ok(Array.isArray(definition.errors));
       assert.ok(Array.isArray(definition.postconditions));
     }
-    assert.equal(description.operationCatalogVersion, '3.1.0');
+    assert.equal(description.operationCatalogVersion, '3.2.0');
     assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     assert.equal(operationDefinitions().length, operations.length);
   } finally { rmSync(root, { recursive: true, force: true }); }

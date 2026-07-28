@@ -696,12 +696,26 @@ export class BabyXRuntime {
   private async rootFabricService(): Promise<import('./root-fabric/service.ts').RootFabricService> {
     if (this.rootFabricServiceInstance === undefined) {
       const { RootFabricService } = await import('./root-fabric/service.ts');
+      const artifacts = await this.artifactManager();
+      const observationArtifacts = {
+        spill: async (name: string, value: JsonObject, metadata: JsonObject) => {
+          const bytes = Buffer.from(canonicalize(value), 'utf8');
+          const record = artifacts.begin(name, metadata);
+          const artifactId = String(record.id);
+          for (let offset = 0; offset < bytes.length; offset += 65_536) {
+            artifacts.upload(artifactId, offset, bytes.subarray(offset, Math.min(offset + 65_536, bytes.length)));
+          }
+          artifacts.finalize(artifactId, bytes.length, sha256(bytes));
+          return { artifactId };
+        },
+      };
       this.rootFabricServiceInstance = new RootFabricService({
         stateRoot: this.stateRoot,
         sourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? 'unknown',
         sourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? 'unknown',
         catalogVersion: OPERATION_CATALOG_VERSION,
         catalogDigest: () => sha256(canonicalize(OPERATION_DEFINITIONS)),
+        artifacts: observationArtifacts,
       });
     }
     return this.rootFabricServiceInstance;

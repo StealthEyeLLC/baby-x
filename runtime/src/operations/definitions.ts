@@ -57,6 +57,11 @@ babyx.root.bundle.cache
 babyx.root.provenance.verify
 babyx.root.transparency.verify
 babyx.root.transparency.status
+babyx.root.checkpoint.create
+babyx.root.checkpoint.get
+babyx.root.checkpoint.restore
+babyx.root.replay.run
+babyx.root.replay.get
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -430,6 +435,24 @@ function rootSchema(operation: string): Record<string, unknown> {
     maximumCheckpointAgeSeconds: { type: 'integer', minimum: 1, maximum: 31_536_000 },
   }, ['logId','entryDigest','checkpoint','checkpointPublicKeyPem','inclusionProof','consistencyProof']);
   if (operation === 'babyx.root.transparency.status') return objectSchema({ logId: identifier }, ['logId']);
+  const rootCheckpointId = { type: 'string', pattern: '^rcp_[a-f0-9]{32}$' } as const;
+  const rootReplayId = { type: 'string', pattern: '^rrp_[a-f0-9]{32}$' } as const;
+  const replayTransactionId = { type: ['string','null'], pattern: '^rtx_[A-Za-z0-9_-]{8,128}$' } as const;
+  const replayCompatibility = objectSchema({ architecture: { enum: ['x86_64','aarch64'] }, kernelRelease: stringValue, providerId, providerVersion: stringValue, configurationDigest: digest }, ['architecture','kernelRelease','providerId','providerVersion','configurationDigest']);
+  const replayProcess = objectSchema({ pid: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, processStartTime: stringValue, executablePath: stringValue, pgid: { type: ['integer','null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, bootId: identifier }, ['pid','processStartTime','executablePath','bootId']);
+  if (operation === 'babyx.root.checkpoint.create') return objectSchema({
+    kind: { enum: ['CRIU_PROCESS','RR_TRACE','MICROVM_SNAPSHOT'] }, transactionId: replayTransactionId, process: replayProcess,
+    imagesDir: stringValue, traceReference: stringValue, traceDigest: digest, traceSizeBytes: { type: ['integer','null'], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    vmId: microvmId, expiresAt: stringValue, compatibility: replayCompatibility,
+  }, ['kind','compatibility']);
+  if (operation === 'babyx.root.checkpoint.get') return objectSchema({ checkpointId: rootCheckpointId }, ['checkpointId']);
+  if (operation === 'babyx.root.checkpoint.restore') return objectSchema({ checkpointId: rootCheckpointId, authorizationDigest: digest, transactionId: replayTransactionId, target: jsonObject }, ['checkpointId','authorizationDigest']);
+  if (operation === 'babyx.root.replay.run') return objectSchema({
+    kind: { enum: ['REQUEST_REPLAY','OBSERVATION_REPLAY','CRIU_CHECKPOINT_RESTORE','RR_FORENSIC_REPLAY','MICROVM_SNAPSHOT_RESTORE'] },
+    transactionId: replayTransactionId, checkpointId: { anyOf: [{ type: 'null' }, rootCheckpointId] }, canonicalInput: { anyOf: [{ type: 'null' }, jsonObject] },
+    dryRun: { type: 'boolean' }, authorizationDigest: { anyOf: [{ type: 'null' }, digest] }, effectTransactionId: replayTransactionId, target: jsonObject,
+  }, ['kind']);
+  if (operation === 'babyx.root.replay.get') return objectSchema({ replayId: rootReplayId }, ['replayId']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -543,13 +566,16 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (operation === 'babyx.root.bundle.cache') return ['content_addressed_cache_verified', 'all_oci_blob_digests_verified', 'atomic_cache_state_persisted'];
   if (operation === 'babyx.root.provenance.verify') return ['provenance_verification_record_persisted', 'dsse_signature_verified', 'source_builder_materials_and_products_verified'];
   if (operation === 'babyx.root.transparency.verify') return ['transparency_monitor_record_persisted', 'signed_checkpoint_and_inclusion_verified', 'consistency_or_conflict_state_persisted'];
+  if (operation === 'babyx.root.checkpoint.create') return ['digest_sealed_checkpoint_record_persisted', 'provider_compatibility_bound', 'artifact_integrity_recorded'];
+  if (operation === 'babyx.root.checkpoint.restore') return ['explicit_authorization_verified', 'provider_compatibility_revalidated', 'restore_observation_persisted'];
+  if (operation === 'babyx.root.replay.run') return ['digest_sealed_replay_record_persisted', 'dry_run_default_enforced', 'no_alternate_effect_authority_created'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '9.0.0';
+export const OPERATION_CATALOG_VERSION = '10.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

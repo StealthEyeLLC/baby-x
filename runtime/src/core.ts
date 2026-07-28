@@ -692,6 +692,14 @@ export class BabyXRuntime {
     }
     return this.rootMicrovmServiceInstance;
   }
+  private rootReplayServiceInstance?: import('./root-platform/replay/service.ts').RootReplayService;
+  private async rootReplayService(): Promise<import('./root-platform/replay/service.ts').RootReplayService> {
+    if (this.rootReplayServiceInstance === undefined) {
+      const { RootReplayService } = await import('./root-platform/replay/service.ts');
+      this.rootReplayServiceInstance = new RootReplayService(this.stateRoot, { microvmService: await this.rootMicrovmService() });
+    }
+    return this.rootReplayServiceInstance;
+  }
   private rootTrustServiceInstance?: import('./root-platform/trust/service.ts').RootTrustService;
   private async rootTrustService(): Promise<import('./root-platform/trust/service.ts').RootTrustService> {
     if (this.rootTrustServiceInstance === undefined) {
@@ -778,6 +786,11 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.provenance.verify') return (await this.rootTrustService()).provenanceVerify(payload, context);
       if (operation === 'babyx.root.transparency.verify') return (await this.rootTrustService()).transparencyVerify(payload, context);
       if (operation === 'babyx.root.transparency.status') return (await this.rootTrustService()).transparencyStatus(payload, context);
+      if (operation === 'babyx.root.checkpoint.create') return (await this.rootReplayService()).createCheckpoint(payload, context);
+      if (operation === 'babyx.root.checkpoint.get') return (await this.rootReplayService()).getCheckpoint(payload, context);
+      if (operation === 'babyx.root.checkpoint.restore') return (await this.rootReplayService()).restoreCheckpoint(payload, context);
+      if (operation === 'babyx.root.replay.run') return (await this.rootReplayService()).runReplay(payload, context);
+      if (operation === 'babyx.root.replay.get') return (await this.rootReplayService()).getReplay(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

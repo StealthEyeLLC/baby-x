@@ -151,3 +151,33 @@ Live provider states are:
 - `transparency-monitor`: `DEGRADED`
 
 Catalog `9.0.0` preserves all Prompt-1 operations. Focused tests cover mutable-tag rejection, exact digest resolution, media-type rejection, blob substitution, cache reconciliation, keyed and configured-keyless signatures, signature failure, signer revocation, certificate identity mismatch, source mismatch, builder mismatch, dependency mismatch, product mismatch, inclusion verification, missing monitor evidence, consistency failure, stale checkpoints, terminal conflicts, offline verification, public dispatch, and restart readback.
+
+## Checkpoint G
+
+Checkpoint G adds five compact public checkpoint and replay operations:
+
+- `babyx.root.checkpoint.create`
+- `babyx.root.checkpoint.get`
+- `babyx.root.checkpoint.restore`
+- `babyx.root.replay.run`
+- `babyx.root.replay.get`
+
+Checkpoint records and replay records are strict, versioned, digest-sealed sidecars. They bind the owner principal, request digest, idempotency-key digest, provider identity and configuration, host architecture and kernel release, external artifact identity and content digest, state sequence, timestamps, and restore or replay observations. Authoritative root transaction records remain owned by the existing root transaction authority. Checkpoint G coordinates replay and delegates effects; it does not add a scheduler, executor, transaction authority, microVM authority, artifact authority, or secret store.
+
+Request replay reconstructs the canonical root-transaction creation input from the durable source and intent. It defaults to dry-run and never executes the original mutation. A non-dry request replay requires a distinct, unexpired, authorized root transaction whose source and intent exactly match; the replay record becomes `AUTHORIZED_PENDING` and points back to `babyx.root.transaction.*` as the execution authority. Observation replay re-verifies the digest-sealed root transaction and deterministically summarizes its state, event head, and observations without mutation.
+
+CRIU process checkpoints bind exact process identity, image-directory content, provider configuration, architecture, and kernel release. Restores require an exact root-transaction authorization digest and revalidate compatibility and artifact integrity before delegating through the existing CRIU manager. rr traces are forensic-only, bind an exact file or directory digest and size, and are revalidated before dry-run or delegated replay. microVM snapshots and restores reuse the existing microVM snapshot authority and its cleanup and absence-verification rules.
+
+Replay inputs reject secret-bearing fields before persistence. Paths must be absolute, artifact trees reject symbolic links and unsupported entry types, records reject digest tampering, conflicting idempotency keys fail closed, and restarts reload the same durable records. Failed create, restore, or replay attempts retain explicit failed truth rather than being reported as success.
+
+Live provider states on the certification host are:
+
+- `request-replay`: `SUPPORTED`
+- `observation-replay`: `SUPPORTED`
+- `criu-checkpoint-restore`: `UNAVAILABLE` because CRIU is absent
+- `rr-forensic-replay`: `UNAVAILABLE` because rr is absent and `perf_event_paranoid=4`
+- `microvm-snapshot-replay`: delegated to the existing microVM provider and limited by its exact asset and KVM availability
+
+The CRIU and rr paths are fixture-certified with injected providers, exact authorization checks, restore observations, restart readback, idempotency conflict rejection, and artifact tamper detection. No live-host support is claimed for absent prerequisites.
+
+Catalog `10.0.0` exposes 227 operations, including 48 `babyx.root.*` operations, with no duplicates. The root platform schema is `3.0.0` and the provider contract implementation is `sovereign-root-platform@3`.

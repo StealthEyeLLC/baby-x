@@ -43,7 +43,7 @@ test('OCI trust, provenance, transparency, cache, and restart readback dispatch 
     const options = { stateRoot: root, sourceCommit: '1'.repeat(40), sourceTree: '2'.repeat(40) };
     const runtime = new BabyXRuntime(options);
     const described = runtime.describe();
-    assert.equal(described.operationCatalogVersion, '9.0.0');
+    assert.equal(described.operationCatalogVersion, '10.0.0');
     for (const operation of [...originalRootOperations, ...trustOperations]) {
       assert.equal(described.operations.some((entry) => entry.operation === operation), true, operation);
     }

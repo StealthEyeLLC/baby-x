@@ -1,8 +1,8 @@
 import { canonicalize, sha256, type JsonObject } from '../core.ts';
 import { RootPlatformError } from './errors.ts';
 
-export const ROOT_PLATFORM_SCHEMA_VERSION = '2.0.0' as const;
-export const ROOT_PLATFORM_PROVIDER_VERSION = 'sovereign-root-platform@2' as const;
+export const ROOT_PLATFORM_SCHEMA_VERSION = '3.0.0' as const;
+export const ROOT_PLATFORM_PROVIDER_VERSION = 'sovereign-root-platform@3' as const;
 export const PROVIDER_CONTRACT_VERSION = '1.0.0' as const;
 export const PROVIDER_SUPPORT_STATES = ['SUPPORTED', 'DEGRADED', 'UNAVAILABLE', 'EXPERIMENTAL', 'DISABLED', 'REVOKED', 'FAILED'] as const;
 export type ProviderSupportState = typeof PROVIDER_SUPPORT_STATES[number];

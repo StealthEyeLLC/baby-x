@@ -28,7 +28,7 @@ test('root identity public operations dispatch through the built catalog and rem
     const options = { stateRoot: root, sourceCommit: '1'.repeat(40), sourceTree: '2'.repeat(40) };
     const runtime = new BabyXRuntime(options);
     const described = runtime.describe();
-    assert.equal(described.operationCatalogVersion, '9.0.0');
+    assert.equal(described.operationCatalogVersion, '10.0.0');
     for (const operation of originalRootOperations) assert.equal(described.operations.some((entry) => entry.operation === operation), true, operation);
     for (const operation of ['babyx.root.attestation.challenge','babyx.root.attestation.verify','babyx.root.attestation.get','babyx.root.identity.issue','babyx.root.identity.get','babyx.root.identity.revoke','babyx.root.secret.lease','babyx.root.secret.revoke']) {
       assert.equal(described.operations.some((entry) => entry.operation === operation), true, operation);

@@ -8,6 +8,7 @@ import type { RootPlatformProvider } from './provider-registry.ts';
 import { mediationProviders } from './mediation/providers.ts';
 import { identityProviders } from './identity/providers.ts';
 import { trustProviders } from './trust/providers.ts';
+import { replayProviders } from './replay/providers.ts';
 import { MicrovmArtifactRegistry } from './microvm/artifacts.ts';
 
 export const PROMPT1_COMMIT = 'fef1cb3b76a5c6f5beb1ca73499c4d1e5cafe713' as const;
@@ -120,5 +121,6 @@ export function defaultProviders(identity: { runningCommit: string; runningTree:
     ...mediationProviders(),
     ...identityProviders(),
     ...trustProviders(),
+    ...replayProviders(),
   ];
 }

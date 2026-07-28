@@ -104,9 +104,23 @@ test('root catalog is finite, truthful, and dispatcher-backed', async () => {
     const runtime = new BabyXRuntime({ stateRoot: root });
     const description = runtime.describe();
     const roots = description.operations.filter((entry) => entry.operation.startsWith('babyx.root.'));
-    assert.equal(description.operationCatalogVersion, '3.0.0');
-    assert.equal(roots.length, 11);
-    assert.equal(new Set(roots.map((entry) => entry.operation)).size, 11);
+    assert.equal(description.operationCatalogVersion, '3.1.0');
+    const legacyRoots = [
+      'babyx.root.describe',
+      'babyx.root.transaction.create',
+      'babyx.root.transaction.get',
+      'babyx.root.transaction.list',
+      'babyx.root.transaction.authorize',
+      'babyx.root.transaction.begin',
+      'babyx.root.transaction.observe',
+      'babyx.root.transaction.commit',
+      'babyx.root.transaction.rollback',
+      'babyx.root.transaction.events',
+      'babyx.root.transaction.verify',
+    ];
+    assert.equal(roots.length, 51);
+    assert.equal(new Set(roots.map((entry) => entry.operation)).size, 51);
+    for (const operation of legacyRoots) assert.equal(roots.some((entry) => entry.operation === operation), true);
     assert.equal(roots.find((entry) => entry.operation === 'babyx.root.transaction.create').idempotency, 'caller_key');
     assert.equal(roots.find((entry) => entry.operation === 'babyx.root.transaction.get').mutation, false);
     const surface = await runtime.execute('babyx.root.describe', {});

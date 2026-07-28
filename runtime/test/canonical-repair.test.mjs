@@ -110,7 +110,7 @@ test('public operation definitions expose finite honest execution contracts', ()
   const root = mkdtempSync(join(tmpdir(), 'baby-x-contract-repair-'));
   try {
     const description = new BabyXRuntime({ stateRoot: root }).describe();
-    assert.equal(description.operationCatalogVersion, '3.0.0');
+    assert.equal(description.operationCatalogVersion, '3.1.0');
     assert.match(description.operationCatalogSha256, /^[a-f0-9]{64}$/u);
     for (const definition of description.operations) {
       assert.equal(definition.input.type, 'object');

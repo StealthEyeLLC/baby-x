@@ -115,7 +115,7 @@ export class DurableRecordStore<T extends JsonObject> {
   }
 }
 
-interface DurableClaim<T extends JsonObject> extends JsonObject {
+export interface DurableClaim<T extends JsonObject> extends JsonObject {
   key: string;
   requestDigest: string;
   recordId: string;
@@ -143,5 +143,18 @@ export class DurableClaimStore<T extends JsonObject> {
     const existing = this.get(key);
     if (existing === undefined) throw new Error('idempotency claim disappeared');
     return existing;
+  }
+
+  scan(limit = 10_000): DurableClaim<T>[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('claim limit must be between 1 and 10000');
+    const files = readdirSync(this.root).filter((name) => name.endsWith('.json')).sort();
+    if (files.length > limit) throw new Error('claim scan exceeds the bounded limit');
+    return files.map((name) => {
+      let claim: DurableClaim<T>;
+      try { claim = JSON.parse(readFileSync(join(this.root, name), 'utf8')) as DurableClaim<T>; }
+      catch (error) { throw new Error(`idempotency claim ${name.slice(0, -5)} is corrupt`, { cause: error }); }
+      if (typeof claim.key !== 'string' || this.path(claim.key) !== join(this.root, name) || typeof claim.requestDigest !== 'string' || typeof claim.recordId !== 'string' || claim.record === null || typeof claim.record !== 'object' || Array.isArray(claim.record)) throw new Error(`idempotency claim ${name.slice(0, -5)} is invalid`);
+      return structuredClone(claim);
+    });
   }
 }

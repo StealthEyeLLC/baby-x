@@ -8,7 +8,7 @@ import { ROOT_FABRIC_PROVIDER_VERSION, ROOT_FABRIC_SCHEMA_VERSION, RootFabricErr
 import { RootTrustService } from './trust.ts';
 import { RootEffectTransactionService } from './transactions.ts';
 import { RootObservationService } from './observability.ts';
-import { RootCredentialService } from './credentials.ts';
+import { RootCredentialService, type CredentialAuthorizationBinding, type RootCredentialLease } from './credentials.ts';
 import { RootFreezeService, RootRecoveryService, type RecoveryAuthority } from './recovery.ts';
 
 export const ROOT_FABRIC_OPERATION_NAMES = Object.freeze([
@@ -66,7 +66,49 @@ export class RootFabricService {
       },
     };
     this.observations = new RootObservationService(options.stateRoot, options.artifacts, { now: options.now, authority: observationAuthority });
-    this.credentials = new RootCredentialService(options.stateRoot, undefined, { deliveryRoot: options.credentialDeliveryRoot ?? join(options.stateRoot, 'root-fabric', 'credential-delivery'), now: options.now });
+    const resolveCredentialBinding = (input: { transactionId: string; stepId: string; credentialReference: string; principalId: string; principalDigest: string; occurredAt: string }): CredentialAuthorizationBinding => {
+      const transaction = this.transactions.record(input.transactionId);
+      if (transaction.ownerPrincipal.principalId !== input.principalId || transaction.ownerPrincipal.principalDigest !== input.principalDigest) throw new RootFabricError('principal_mismatch', 'credential transaction owner mismatch');
+      if (transaction.lifecycle.persistedState !== 'EXECUTING' || transaction.lifecycle.terminal) throw new RootFabricError('transaction_state_conflict', 'transaction lifecycle does not permit credential issuance');
+      if (transaction.lease.controllerId === null || transaction.lease.fencingToken < 1 || transaction.lease.expiresAt === null || Date.parse(transaction.lease.expiresAt) <= Date.parse(input.occurredAt)) throw new RootFabricError('fencing_token_stale', 'credential issuance requires a current controller lease and fencing token');
+      const step = transaction.plan.steps.find((candidate) => candidate.stepId === input.stepId);
+      if (!step) throw new RootFabricError('unsupported_operation', 'credential step is not declared by the transaction');
+      if (!step.credentialReferences.includes(input.credentialReference)) throw new RootFabricError('grant_denied', 'credential reference is not declared by the transaction step');
+      const provider = transaction.routing.executionProvider;
+      if (provider === null || !step.providerRequirements.includes(provider)) throw new RootFabricError('unsupported_provider', 'credential step is not bound to the selected provider');
+      if (transaction.routing.providerId === null || transaction.routing.providerVersion === null || transaction.routing.providerProfileDigest === null) throw new RootFabricError('credential_unavailable', 'credential provider identity is incomplete');
+      if (typeof transaction.policy.decisionDigest !== 'string' || typeof transaction.policy.expiresAt !== 'string' || Date.parse(transaction.policy.expiresAt) <= Date.parse(input.occurredAt)) throw new RootFabricError('policy_denied', 'transaction policy authorization is absent or expired');
+      const grant = this.trust.authorize({ grantId: transaction.skill.capabilityGrantId, bundleDigest: transaction.skill.bundleDigest, ownerPrincipal: transaction.ownerPrincipal.principalId, operation: step.operation, provider, effectClass: step.effectClass, resources: step.resourceSelectors, credentialReferences: [input.credentialReference] });
+      if (grant.grantDigest !== transaction.skill.capabilityGrantDigest) throw new RootFabricError('grant_denied', 'transaction grant digest does not match the authoritative grant');
+      let targetType: 'UNIT' | 'MACHINE'; let targetId: string;
+      if (provider === 'HOST_ENVELOPE') {
+        const units = Array.isArray(transaction.execution.unitNames) ? [...new Set(transaction.execution.unitNames as string[])] : [];
+        if (units.length !== 1) throw new RootFabricError('credential_unavailable', 'host credential issuance requires exactly one authoritative unit target');
+        targetType = 'UNIT'; targetId = units[0]!;
+      } else {
+        const machines = Array.isArray(transaction.execution.activeMachineIds) ? [...new Set(transaction.execution.activeMachineIds as string[])] : [];
+        if (machines.length !== 1) throw new RootFabricError('credential_unavailable', 'machine credential issuance requires exactly one authoritative active machine target');
+        targetType = 'MACHINE'; targetId = machines[0]!;
+      }
+      this.assertNotFrozen({ principalId: transaction.ownerPrincipal.principalId, skillId: transaction.skill.skillId, bundleDigest: transaction.skill.bundleDigest, grantId: transaction.skill.capabilityGrantId, transactionId: transaction.transactionId, provider, credentialIssuance: true, newExecution: true });
+      const limitValue = grant.limits.maximumCredentialTtlMs ?? grant.limits.credentialTtlMs;
+      const maximumTtlMs = Number.isSafeInteger(limitValue) && Number(limitValue) >= 1_000 && Number(limitValue) <= 3_600_000 ? Number(limitValue) : Math.min(Math.max(step.timeoutMs, 1_000), 300_000);
+      const configuredRevocation = grant.limits.credentialRevocationBehavior;
+      const revocationBehavior = configuredRevocation === 'FREEZE' || configuredRevocation === 'ALLOW_TO_FINISH' || configuredRevocation === 'CANCEL_AND_ROLLBACK' ? configuredRevocation : 'CANCEL_AND_ROLLBACK';
+      const operationDeadline = new Date(Math.min(Date.parse(transaction.lifecycle.deadline), Date.parse(transaction.policy.expiresAt), Date.parse(input.occurredAt) + step.timeoutMs)).toISOString();
+      const authorizationDigest = sha256(canonicalize({ transactionId: transaction.transactionId, transactionSequence: transaction.lifecycle.sequence, fencingToken: transaction.lease.fencingToken, ownerPrincipalDigest: transaction.ownerPrincipal.principalDigest, stepId: step.stepId, operation: step.operation, credentialReference: input.credentialReference, provider, providerId: transaction.routing.providerId, providerVersion: transaction.routing.providerVersion, providerProfileDigest: transaction.routing.providerProfileDigest, targetType, targetId, bundleDigest: transaction.skill.bundleDigest, grantDigest: grant.grantDigest, policyDecisionDigest: transaction.policy.decisionDigest, policyVersion: grant.policyVersion, maximumTtlMs, revocationBehavior }));
+      return { transactionId: transaction.transactionId, stepId: step.stepId, ownerPrincipalId: transaction.ownerPrincipal.principalId, ownerPrincipalDigest: transaction.ownerPrincipal.principalDigest, credentialReference: input.credentialReference, provider, providerId: transaction.routing.providerId, providerVersion: transaction.routing.providerVersion, providerProfileDigest: transaction.routing.providerProfileDigest, skillBundleDigest: transaction.skill.bundleDigest, grantId: grant.grantId, grantDigest: grant.grantDigest, policyDecisionDigest: transaction.policy.decisionDigest, policyVersion: grant.policyVersion, transactionSequence: transaction.lifecycle.sequence, fencingToken: transaction.lease.fencingToken, targetType, targetId, purpose: step.operation, transactionDeadline: transaction.lifecycle.deadline, operationDeadline, maximumTtlMs, revocationBehavior, authorizationDigest };
+    };
+    const credentialAuthority = {
+      resolve: resolveCredentialBinding,
+      assertCurrent: (lease: RootCredentialLease, input: { principalId: string; principalDigest: string; occurredAt: string }) => {
+        const current = resolveCredentialBinding({ transactionId: lease.transactionId, stepId: lease.stepId, credentialReference: lease.credentialReference, principalId: input.principalId, principalDigest: input.principalDigest, occurredAt: input.occurredAt });
+        const exact = lease.ownerPrincipalId === current.ownerPrincipalId && lease.principalDigest === current.ownerPrincipalDigest && lease.provider === current.provider && lease.providerId === current.providerId && lease.providerVersion === current.providerVersion && lease.providerProfileDigest === current.providerProfileDigest && lease.skillBundleDigest === current.skillBundleDigest && lease.grantId === current.grantId && lease.grantDigest === current.grantDigest && lease.policyDecisionDigest === current.policyDecisionDigest && lease.policyVersion === current.policyVersion && lease.transactionSequence === current.transactionSequence && lease.fencingToken === current.fencingToken && lease.targetType === current.targetType && lease.targetId === current.targetId && lease.purpose === current.purpose && lease.transactionDeadline === current.transactionDeadline && lease.maximumTtlMs === current.maximumTtlMs && lease.revocationBehavior === current.revocationBehavior && lease.authorizationDigest === current.authorizationDigest;
+        if (!exact) throw new RootFabricError('fencing_token_stale', 'credential lease no longer matches the authoritative transaction, grant, policy, provider, or target');
+        if (Date.parse(lease.operationDeadline) <= Date.parse(input.occurredAt) || Date.parse(lease.operationDeadline) > Date.parse(current.transactionDeadline)) throw new RootFabricError('deadline_exceeded', 'credential operation deadline is no longer valid');
+      },
+    };
+    this.credentials = new RootCredentialService(options.stateRoot, undefined, { deliveryRoot: options.credentialDeliveryRoot ?? join(options.stateRoot, 'root-fabric', 'credential-delivery'), now: options.now, authority: credentialAuthority });
     this.freezes = new RootFreezeService(options.stateRoot, { now: options.now });
     const unavailable: RecoveryAuthority = {
       async inspectUnit() { return { exists: false, matches: false, active: false, terminal: false, identity: {}, resultDigest: null }; },
@@ -82,7 +124,7 @@ export class RootFabricService {
     this.recovery = new RootRecoveryService({ stateRoot: options.stateRoot, transactions: this.transactions, observations: this.observations, credentials: this.credentials, freezes: this.freezes, authority: options.recoveryAuthority ?? unavailable, now: options.now });
     this.effects = new RootEffectRegistry({ storage: new RootStorageEffectAuthority({ datasetRoots: envList('BABYX_ROOT_DATASET_ROOTS'), mountRoots: envList('BABYX_ROOT_MOUNT_ROOTS') }), network: new RootNetworkEffectAuthority({ table: process.env.BABYX_ROOT_NFT_TABLE ?? 'babyx_root' }) });
   }
-  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.1.0', credential: '1.0.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
+  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.1.0', credential: '1.1.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
   async execute(operation: string, payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
     if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-J root fabric operation ${operation}`);
     if (operation === 'babyx.root.compatibility.get') return this.compatibility();
@@ -115,10 +157,10 @@ export class RootFabricService {
     if (operation === 'babyx.root.observation.get') return this.observations.get(payload, context);
     if (operation === 'babyx.root.observation.record') return this.observations.record(payload, context);
     if (operation === 'babyx.root.observation.finalize') return this.observations.finalize(payload, context);
-    if (operation === 'babyx.root.credential.lease') { this.assertCredentialAllowed(payload); return this.credentials.lease(payload, context); }
+    if (operation === 'babyx.root.credential.lease') return this.credentials.lease(payload, context);
     if (operation === 'babyx.root.credential.deliver') return this.credentials.deliver(payload, context);
-    if (operation === 'babyx.root.credential.get') return this.credentials.get(payload);
-    if (operation === 'babyx.root.credential.list') return this.credentials.list(payload);
+    if (operation === 'babyx.root.credential.get') return this.credentials.get(payload, context);
+    if (operation === 'babyx.root.credential.list') return this.credentials.list(payload, context);
     if (operation === 'babyx.root.credential.revoke') return this.credentials.revoke(payload, context);
     if (operation === 'babyx.root.credential.clean') return this.credentials.clean(payload, context);
     if (operation === 'babyx.root.freeze.get') return this.freezes.get(payload);
@@ -149,6 +191,5 @@ export class RootFabricService {
     for (const step of transaction.plan.steps) if (step.providerRequirements.includes(provider)) this.trust.authorize({ grantId: transaction.skill.capabilityGrantId, bundleDigest: transaction.skill.bundleDigest, ownerPrincipal: transaction.ownerPrincipal.principalId, operation: step.operation, provider, effectClass: step.effectClass, resources: step.resourceSelectors, credentialReferences: step.credentialReferences });
   }
   private assertBeginAllowed(payloadValue: JsonObject): void { const payload = object(payloadValue, 'begin payload'); const transaction = this.transactions.record(text(payload.transactionId, 'transactionId', 256)); if (transaction.routing.executionProvider === null) throw new RootFabricError('state_conflict', 'execution provider must be authorized before begin'); this.assertNotFrozen({ principalId: transaction.ownerPrincipal.principalId, skillId: transaction.skill.skillId, bundleDigest: transaction.skill.bundleDigest, grantId: transaction.skill.capabilityGrantId, transactionId: transaction.transactionId, provider: transaction.routing.executionProvider, newExecution: true }); }
-  private assertCredentialAllowed(payloadValue: JsonObject): void { const payload = object(payloadValue, 'credential lease payload'); this.assertNotFrozen({ bundleDigest: String(payload.skillBundleDigest), transactionId: String(payload.transactionId), provider: String(payload.provider), credentialIssuance: true, newExecution: true }); }
   private assertNotFrozen(input: { principalId?: string; skillId?: string; bundleDigest?: string; grantId?: string; transactionId?: string; provider?: string; credentialIssuance?: boolean; newExecution?: boolean }): void { const result = this.freezes.isFrozen(input); if (result.frozen) throw new RootFabricError('state_conflict', 'root execution is frozen', { freezeIds: result.matches.map((record) => record.freezeId), scopes: result.matches.map((record) => record.scope) }); }
 }

@@ -37,7 +37,35 @@ export class RootFabricService {
   constructor(private readonly options: { stateRoot: string; sourceCommit: string; sourceTree: string; catalogVersion: string; catalogDigest: () => string; publicKey?: (keyId: string) => string | Buffer | undefined; trustDirectory?: string; artifacts?: { spill(name: string, value: JsonObject, metadata: JsonObject): Promise<{ artifactId: string }> }; credentialDeliveryRoot?: string; recoveryAuthority?: RecoveryAuthority; now?: () => string }) {
     this.transactions = new RootEffectTransactionService(options.stateRoot, { now: options.now });
     this.trust = new RootTrustService(options.stateRoot, options.publicKey ?? ((keyId) => keyFrom(options.trustDirectory ?? '/etc/baby-x/root-trust', keyId)), { now: options.now });
-    this.observations = new RootObservationService(options.stateRoot, options.artifacts, { now: options.now });
+    const observationAuthority = {
+      resolve: (input: { transactionId: string; stepId: string; principalId: string; principalDigest: string; occurredAt: string }) => {
+        const transaction = this.transactions.record(input.transactionId);
+        if (transaction.ownerPrincipal.principalDigest !== input.principalDigest || transaction.ownerPrincipal.principalId !== input.principalId) throw new RootFabricError('principal_mismatch', 'observation transaction owner mismatch');
+        if (!['EXECUTING', 'VALIDATING'].includes(transaction.lifecycle.persistedState) || transaction.lifecycle.terminal) throw new RootFabricError('transaction_state_conflict', 'transaction lifecycle does not permit observation');
+        const step = transaction.plan.steps.find((candidate) => candidate.stepId === input.stepId);
+        if (!step) throw new RootFabricError('unsupported_operation', 'observation step is not declared by the transaction');
+        const provider = transaction.routing.executionProvider;
+        if (provider === null || !step.providerRequirements.includes(provider)) throw new RootFabricError('unsupported_provider', 'observation step is not bound to the selected provider');
+        if (typeof transaction.policy.decisionDigest !== 'string' || typeof transaction.policy.expiresAt !== 'string' || Date.parse(transaction.policy.expiresAt) <= Date.parse(input.occurredAt)) throw new RootFabricError('policy_denied', 'transaction policy authorization is absent or expired');
+        const unitNames = Array.isArray(transaction.execution.unitNames) ? transaction.execution.unitNames as string[] : [];
+        const machineIds = Array.isArray(transaction.execution.allMachineIds) ? transaction.execution.allMachineIds as string[] : [];
+        const processIdentities = Array.isArray(transaction.execution.processIdentities) ? transaction.execution.processIdentities as JsonObject[] : [];
+        if (unitNames.length === 0 && machineIds.length === 0 && processIdentities.length === 0) throw new RootFabricError('observation_unavailable', 'transaction has no authoritative execution identity');
+        const operationDeadline = new Date(Math.min(Date.parse(transaction.lifecycle.deadline), Date.parse(transaction.policy.expiresAt), Date.parse(input.occurredAt) + step.timeoutMs)).toISOString();
+        const executionBindingDigest = sha256(canonicalize({ transactionId: transaction.transactionId, sequence: transaction.lifecycle.sequence, fencingToken: transaction.lease.fencingToken, provider, stepId: step.stepId, unitNames, machineIds, processIdentities }));
+        return { transactionId: transaction.transactionId, stepId: step.stepId, ownerPrincipalDigest: transaction.ownerPrincipal.principalDigest, provider, transactionSequence: transaction.lifecycle.sequence, fencingToken: transaction.lease.fencingToken, transactionDeadline: transaction.lifecycle.deadline, operationDeadline, executionBindingDigest, unitNames, machineIds, processIdentities };
+      },
+      assertEvent: (binding: JsonObject, eventIdentity: JsonObject) => {
+        const units = binding.unitNames as string[]; const machines = binding.machineIds as string[]; const identities = binding.processIdentities as JsonObject[];
+        if (eventIdentity.unitName !== null && !units.includes(String(eventIdentity.unitName))) throw new RootFabricError('unit_identity_conflict', 'observation unit is not bound to the transaction');
+        if (eventIdentity.machineId !== null && !machines.includes(String(eventIdentity.machineId))) throw new RootFabricError('machine_identity_conflict', 'observation machine is not bound to the transaction');
+        if (eventIdentity.processId !== null) {
+          const match = identities.some((identity) => Number(identity.processId ?? identity.pid) === Number(eventIdentity.processId) && (eventIdentity.processStartTime === null || identity.processStartTime === eventIdentity.processStartTime) && (eventIdentity.bootId === null || identity.bootId === eventIdentity.bootId) && (eventIdentity.cgroupId === null || identity.cgroupId === eventIdentity.cgroupId || identity.controlGroup === eventIdentity.cgroupId));
+          if (!match) throw new RootFabricError('process_identity_conflict', 'observation process identity is not bound to the transaction');
+        }
+      },
+    };
+    this.observations = new RootObservationService(options.stateRoot, options.artifacts, { now: options.now, authority: observationAuthority });
     this.credentials = new RootCredentialService(options.stateRoot, undefined, { deliveryRoot: options.credentialDeliveryRoot ?? join(options.stateRoot, 'root-fabric', 'credential-delivery'), now: options.now });
     this.freezes = new RootFreezeService(options.stateRoot, { now: options.now });
     const unavailable: RecoveryAuthority = {
@@ -54,7 +82,7 @@ export class RootFabricService {
     this.recovery = new RootRecoveryService({ stateRoot: options.stateRoot, transactions: this.transactions, observations: this.observations, credentials: this.credentials, freezes: this.freezes, authority: options.recoveryAuthority ?? unavailable, now: options.now });
     this.effects = new RootEffectRegistry({ storage: new RootStorageEffectAuthority({ datasetRoots: envList('BABYX_ROOT_DATASET_ROOTS'), mountRoots: envList('BABYX_ROOT_MOUNT_ROOTS') }), network: new RootNetworkEffectAuthority({ table: process.env.BABYX_ROOT_NFT_TABLE ?? 'babyx_root' }) });
   }
-  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.0.0', credential: '1.0.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
+  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.1.0', credential: '1.0.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
   async execute(operation: string, payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
     if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-J root fabric operation ${operation}`);
     if (operation === 'babyx.root.compatibility.get') return this.compatibility();
@@ -84,7 +112,7 @@ export class RootFabricService {
     if (operation === 'babyx.root.grant.list') return this.trust.grantList(payload);
     if (operation === 'babyx.root.grant.revoke') return this.trust.grantRevoke(payload, context);
     if (operation === 'babyx.root.observation.start') return this.observations.start(payload, context);
-    if (operation === 'babyx.root.observation.get') return this.observations.get(payload);
+    if (operation === 'babyx.root.observation.get') return this.observations.get(payload, context);
     if (operation === 'babyx.root.observation.record') return this.observations.record(payload, context);
     if (operation === 'babyx.root.observation.finalize') return this.observations.finalize(payload, context);
     if (operation === 'babyx.root.credential.lease') { this.assertCredentialAllowed(payload); return this.credentials.lease(payload, context); }

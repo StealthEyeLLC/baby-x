@@ -123,3 +123,31 @@ Workload identities use trust domain `babyx.stealtheye.internal`. Identity recor
 Secret leases require one active identity, one fresh verified attestation, exact transaction/Skill/grant bindings, and a target selector match. The provider reads only a bounded regular-file secret reference, zeroes the read buffer after hashing, and persists and returns metadata and digests only. Secret values and source paths are never stored in lease records or returned by metadata operations. Identity revocation cascades to active leases. Startup reconciliation expires stale challenges, attestations, identities, and leases; removes expired or revoked identity material; and deletes orphan provider-owned material.
 
 Catalog `8.0.0` preserves the original eleven Prompt-1 root operations unchanged. Focused tests cover live support truth, software-TPM quote verification, nonce replay, PCR mismatch, stale quote rejection, unavailable hardware and SPIRE paths, selector matching and mismatch, SVID rotation, lease allow and denial, restart readback, revocation, expiry, credential cleanup, and public runtime dispatch.
+
+## Checkpoint F
+
+Checkpoint F adds six compact public trust operations:
+
+- `babyx.root.bundle.resolve`
+- `babyx.root.bundle.verify`
+- `babyx.root.bundle.cache`
+- `babyx.root.provenance.verify`
+- `babyx.root.transparency.verify`
+- `babyx.root.transparency.status`
+
+OCI Skill execution identity is one exact `sha256` manifest digest. Mutable tags are accepted only for discovery and cannot be verified, cached, or executed as a trusted identity until the caller resolves and submits the exact digest. The OCI provider validates the manifest, Skill config, supported layers, declared sizes, and every available blob digest. Local OCI layouts are fully verified before use. Remote registry discovery and retrieval use bounded `skopeo` processes; an exact remote manifest is hash-checked and must be copied into the content-addressed cache before full blob verification. Cache publication is atomic. Startup reconciliation re-verifies cached content and marks altered or missing content failed.
+
+The offline Sigstore-compatible verifier supports keyed signatures and configured keyless certificates. Keyed verification binds a configured local public key to the exact manifest digest. Keyless verification validates the leaf and issuer chain against configured local roots, certificate validity, issuer and subject constraints, and signer revocation. Sigstore bundle media type `application/vnd.dev.sigstore.bundle+json;version=0.3` is pinned. Public keyless infrastructure and online Rekor access are not required for the sovereign path. `cosign`, ORAS, and Rekor CLI are absent on the live host; the platform does not claim those external clients are available.
+
+Provenance verification checks the DSSE signature and payload type, in-toto Statement v1, SLSA Provenance v1, source repository, source commit, source tree, builder identity, workflow identity, materials, dependencies, products, and the exact OCI manifest digest. Verification results are deterministic durable sidecar records and do not create a second proof authority.
+
+Transparency verification checks a signed checkpoint, entry inclusion, consistency with the prior durable checkpoint, freshness, and exact offline-entry binding used by signature policy. Tree regression, conflicting roots at one size, or invalid consistency produce a terminal critical-conflict record. Restart preserves verified, stale, and conflict truth. The sovereign offline verifier is live; the public transparency monitor is not enabled, so `transparency-monitor` is `DEGRADED`, not `SUPPORTED`.
+
+Live provider states are:
+
+- `oci-skill-bundle`: `SUPPORTED`
+- `sigstore-offline-verifier`: `SUPPORTED`
+- `slsa-in-toto-verifier`: `SUPPORTED`
+- `transparency-monitor`: `DEGRADED`
+
+Catalog `9.0.0` preserves all Prompt-1 operations. Focused tests cover mutable-tag rejection, exact digest resolution, media-type rejection, blob substitution, cache reconciliation, keyed and configured-keyless signatures, signature failure, signer revocation, certificate identity mismatch, source mismatch, builder mismatch, dependency mismatch, product mismatch, inclusion verification, missing monitor evidence, consistency failure, stale checkpoints, terminal conflicts, offline verification, public dispatch, and restart readback.

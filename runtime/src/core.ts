@@ -692,6 +692,14 @@ export class BabyXRuntime {
     }
     return this.rootMicrovmServiceInstance;
   }
+  private rootTrustServiceInstance?: import('./root-platform/trust/service.ts').RootTrustService;
+  private async rootTrustService(): Promise<import('./root-platform/trust/service.ts').RootTrustService> {
+    if (this.rootTrustServiceInstance === undefined) {
+      const { RootTrustService } = await import('./root-platform/trust/service.ts');
+      this.rootTrustServiceInstance = new RootTrustService({ stateRoot: this.stateRoot });
+    }
+    return this.rootTrustServiceInstance;
+  }
   private rootIdentityServiceInstance?: import('./root-platform/identity/service.ts').RootIdentityService;
   private async rootIdentityService(): Promise<import('./root-platform/identity/service.ts').RootIdentityService> {
     if (this.rootIdentityServiceInstance === undefined) {
@@ -764,6 +772,12 @@ export class BabyXRuntime {
       if (operation === 'babyx.root.identity.revoke') return (await this.rootIdentityService()).identityRevoke(payload, context);
       if (operation === 'babyx.root.secret.lease') return (await this.rootIdentityService()).secretLease(payload, context);
       if (operation === 'babyx.root.secret.revoke') return (await this.rootIdentityService()).secretRevoke(payload, context);
+      if (operation === 'babyx.root.bundle.resolve') return (await this.rootTrustService()).bundleResolve(payload, context);
+      if (operation === 'babyx.root.bundle.verify') return (await this.rootTrustService()).bundleVerify(payload, context);
+      if (operation === 'babyx.root.bundle.cache') return (await this.rootTrustService()).bundleCache(payload, context);
+      if (operation === 'babyx.root.provenance.verify') return (await this.rootTrustService()).provenanceVerify(payload, context);
+      if (operation === 'babyx.root.transparency.verify') return (await this.rootTrustService()).transparencyVerify(payload, context);
+      if (operation === 'babyx.root.transparency.status') return (await this.rootTrustService()).transparencyStatus(payload, context);
       const service = await this.rootAuthorityService();
       if (operation === 'babyx.root.describe') return service.describe();
       if (operation === 'babyx.root.transaction.create') return service.create(payload, context);

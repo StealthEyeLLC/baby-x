@@ -16,7 +16,7 @@ test('root platform public operations dispatch and reconciliation survives resta
     const platform = await first.execute('babyx.root.platform.describe', {});
     assert.equal(platform.protocol, 'QRT1/1.0.0');
     const listed = await first.execute('babyx.root.provider.list', {});
-    assert.deepEqual(listed.providers.map((entry) => entry.providerId), ['attestation-gated-secret-lease', 'bpf-lsm', 'firecracker-cold-boot', 'hardware-tpm', 'host-capability-probe', 'ima-measurement-evidence', 'landlock', 'measured-boot-evidence', 'prompt1-root-authority', 'seccomp-filter', 'seccomp-notify', 'software-tpm-fixture', 'sovereign-platform-core', 'sovereign-x509-svid', 'spire-workload-api']);
+    assert.deepEqual(listed.providers.map((entry) => entry.providerId), ['attestation-gated-secret-lease', 'bpf-lsm', 'firecracker-cold-boot', 'hardware-tpm', 'host-capability-probe', 'ima-measurement-evidence', 'landlock', 'measured-boot-evidence', 'oci-skill-bundle', 'prompt1-root-authority', 'seccomp-filter', 'seccomp-notify', 'sigstore-offline-verifier', 'slsa-in-toto-verifier', 'software-tpm-fixture', 'sovereign-platform-core', 'sovereign-x509-svid', 'spire-workload-api', 'transparency-monitor']);
     const fetched = await first.execute('babyx.root.provider.get', { providerId: 'sovereign-platform-core' });
     assert.equal(fetched.provider.supportState, 'SUPPORTED');
     const reconciled = await first.execute('babyx.root.provider.reconcile', { providerId: 'sovereign-platform-core' }, context('platform-reconcile-0001'));

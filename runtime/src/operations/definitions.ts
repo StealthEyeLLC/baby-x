@@ -51,6 +51,12 @@ babyx.root.identity.get
 babyx.root.identity.revoke
 babyx.root.secret.lease
 babyx.root.secret.revoke
+babyx.root.bundle.resolve
+babyx.root.bundle.verify
+babyx.root.bundle.cache
+babyx.root.provenance.verify
+babyx.root.transparency.verify
+babyx.root.transparency.status
 babyx.root.transaction.create
 babyx.root.transaction.get
 babyx.root.transaction.list
@@ -376,6 +382,54 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.identity.revoke') return objectSchema({ identityId: workloadIdentityId, expectedSequence, reasonDigest: digest }, ['identityId','expectedSequence','reasonDigest']);
   if (operation === 'babyx.root.secret.lease') return objectSchema({ identityId: workloadIdentityId, attestationId, transactionId: microvmTransactionId, skillBundleDigest: digest, grantDigest: digest, providerId: { const: 'local-secret-reference' }, secretReference: { type: 'string', minLength: 1, maxLength: 4096 }, target: objectSchema({ kind: { enum: ['SYSTEMD_UNIT','MICROVM','HOST_ENVELOPE','DISPOSABLE_MACHINE'] }, id: identifier }, ['kind','id']), ttlSeconds: { type: 'integer', minimum: 30, maximum: 3600 } }, ['identityId','attestationId','transactionId','skillBundleDigest','grantDigest','providerId','secretReference','target']);
   if (operation === 'babyx.root.secret.revoke') return objectSchema({ leaseId: secretLeaseId, expectedSequence, reasonDigest: digest }, ['leaseId','expectedSequence','reasonDigest']);
+  const bundleId = { type: 'string', pattern: '^bnd_[a-f0-9]{32}$' } as const;
+  const ociDigest = { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } as const;
+  const nullableOciDigest = { type: ['string','null'], pattern: '^sha256:[a-f0-9]{64}$' } as const;
+  const publicPem = { type: 'string', minLength: 1, maxLength: 65_536 } as const;
+  const nullablePem = { type: ['string','null'], maxLength: 65_536 } as const;
+  const base64Value = { type: 'string', minLength: 1, maxLength: 8 * 1024 * 1024, pattern: '^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$' } as const;
+  const digestDescriptor = objectSchema({ name: { type: 'string', minLength: 1, maxLength: 1_024 }, digest }, ['name','digest']);
+  const digestDescriptors = { type: 'array', maxItems: 256, items: digestDescriptor } as const;
+  if (operation === 'babyx.root.bundle.resolve') return objectSchema({ reference: { type: 'string', minLength: 1, maxLength: 4_096 }, expectedManifestDigest: nullableOciDigest, discoveryOnly: { type: 'boolean' } }, ['reference']);
+  if (operation === 'babyx.root.bundle.cache') return objectSchema({ bundleId }, ['bundleId']);
+  if (operation === 'babyx.root.bundle.verify') return objectSchema({
+    bundleId,
+    signatureBundle: objectSchema({
+      mediaType: { const: 'application/vnd.dev.sigstore.bundle+json;version=0.3' },
+      verificationMaterial: objectSchema({
+        kind: { enum: ['KEYED','KEYLESS'] },
+        publicKeyHint: nullableDigest,
+        certificatePem: nullablePem,
+        issuerCertificatePem: nullablePem,
+        tlogEntries: { type: 'array', maxItems: 16, items: objectSchema({ logId: identifier, entryDigest: digest, checkpointDigest: digest, integratedTime: stringValue }, ['logId','entryDigest','checkpointDigest','integratedTime']) },
+      }, ['kind','publicKeyHint','certificatePem','issuerCertificatePem','tlogEntries']),
+      messageSignature: objectSchema({ messageDigest: objectSchema({ algorithm: { const: 'SHA2_256' }, digest: base64Value }, ['algorithm','digest']), signature: base64Value }, ['messageDigest','signature']),
+    }, ['mediaType','verificationMaterial','messageSignature']),
+    trustPolicy: objectSchema({
+      trustedPublicKeys: { type: 'array', maxItems: 32, uniqueItems: true, items: publicPem },
+      trustedRootCertificates: { type: 'array', maxItems: 32, uniqueItems: true, items: publicPem },
+      expectedIssuer: { type: ['string','null'], maxLength: 1_024 },
+      expectedSubject: { type: ['string','null'], maxLength: 1_024 },
+      revokedSignerDigests: { type: 'array', maxItems: 256, uniqueItems: true, items: digest },
+      requireTransparency: { type: 'boolean' },
+    }, ['trustedPublicKeys','trustedRootCertificates','expectedIssuer','expectedSubject','revokedSignerDigests','requireTransparency']),
+  }, ['bundleId','signatureBundle','trustPolicy']);
+  if (operation === 'babyx.root.provenance.verify') return objectSchema({
+    bundleId,
+    envelope: objectSchema({ payloadType: { const: 'application/vnd.in-toto+json' }, payload: base64Value, signatures: { type: 'array', minItems: 1, maxItems: 16, items: objectSchema({ keyid: digest, sig: base64Value }, ['keyid','sig']) } }, ['payloadType','payload','signatures']),
+    verificationKeyPem: publicPem,
+    expected: objectSchema({ sourceRepository: { type: 'string', minLength: 1, maxLength: 2_048 }, sourceCommit: { type: 'string', pattern: '^[a-f0-9]{40}$' }, sourceTree: { type: 'string', pattern: '^[a-f0-9]{40}$' }, builderId: { type: 'string', minLength: 1, maxLength: 2_048 }, workflowId: { type: 'string', minLength: 1, maxLength: 2_048 }, materials: digestDescriptors, dependencies: digestDescriptors, products: digestDescriptors }, ['sourceRepository','sourceCommit','sourceTree','builderId','workflowId','materials','dependencies','products']),
+  }, ['bundleId','envelope','verificationKeyPem','expected']);
+  if (operation === 'babyx.root.transparency.verify') return objectSchema({
+    logId: identifier,
+    entryDigest: digest,
+    checkpoint: objectSchema({ logId: identifier, treeSize: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, rootHash: digest, issuedAt: stringValue, signerKeyId: digest, signature: base64Value }, ['logId','treeSize','rootHash','issuedAt','signerKeyId','signature']),
+    checkpointPublicKeyPem: publicPem,
+    inclusionProof: objectSchema({ leafIndex: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, treeSize: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, hashes: { type: 'array', maxItems: 256, items: digest } }, ['leafIndex','treeSize','hashes']),
+    consistencyProof: { anyOf: [{ type: 'null' }, objectSchema({ firstSize: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, secondSize: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, hashes: { type: 'array', maxItems: 256, items: digest } }, ['firstSize','secondSize','hashes'])] },
+    maximumCheckpointAgeSeconds: { type: 'integer', minimum: 1, maximum: 31_536_000 },
+  }, ['logId','entryDigest','checkpoint','checkpointPublicKeyPem','inclusionProof','consistencyProof']);
+  if (operation === 'babyx.root.transparency.status') return objectSchema({ logId: identifier }, ['logId']);
   if (operation === 'babyx.root.transaction.create') return objectSchema({
     source: objectSchema({ repository: stringValue, branch: stringValue, commit: gitIdentity, tree: gitIdentity }, ['repository', 'branch', 'commit', 'tree']),
     intent: objectSchema({ purpose: stringValue, mutationDigest: digest, targetDigest: digest, rollbackDigest: digest, requiredAuthorities: stringArray, requiredVerifications: stringArray }, ['purpose', 'mutationDigest', 'targetDigest', 'rollbackDigest', 'requiredAuthorities', 'requiredVerifications']),
@@ -484,13 +538,18 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   if (operation === 'babyx.root.attestation.verify') return ['attestation_verification_persisted', 'nonce_consumed', 'freshness_and_measurements_verified'];
   if (operation === 'babyx.root.identity.issue' || operation === 'babyx.root.identity.revoke') return ['workload_identity_record_persisted', 'selector_binding_verified', 'private_key_not_returned'];
   if (operation === 'babyx.root.secret.lease' || operation === 'babyx.root.secret.revoke') return ['secret_lease_record_persisted', 'attestation_and_identity_verified', 'secret_value_not_returned'];
+  if (operation === 'babyx.root.bundle.resolve') return ['oci_bundle_record_persisted', 'manifest_digest_bound', 'mutable_tags_discovery_only'];
+  if (operation === 'babyx.root.bundle.verify') return ['signature_verification_record_persisted', 'signer_and_manifest_digest_verified', 'revocation_policy_applied'];
+  if (operation === 'babyx.root.bundle.cache') return ['content_addressed_cache_verified', 'all_oci_blob_digests_verified', 'atomic_cache_state_persisted'];
+  if (operation === 'babyx.root.provenance.verify') return ['provenance_verification_record_persisted', 'dsse_signature_verified', 'source_builder_materials_and_products_verified'];
+  if (operation === 'babyx.root.transparency.verify') return ['transparency_monitor_record_persisted', 'signed_checkpoint_and_inclusion_verified', 'consistency_or_conflict_state_persisted'];
   if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '8.0.0';
+export const OPERATION_CATALOG_VERSION = '9.0.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

@@ -46,7 +46,7 @@ test('describe exposes only implemented operations without duplicate authority p
       assert.ok(Array.isArray(definition.errors));
       assert.ok(Array.isArray(definition.postconditions));
     }
-    assert.equal(description.operationCatalogVersion, '8.0.0');
+    assert.equal(description.operationCatalogVersion, '9.0.0');
     const snapshot = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.snapshot');
     const restore = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.restore');
     const pool = description.operations.find((definition) => definition.operation === 'babyx.root.microvm.pool.reconcile');

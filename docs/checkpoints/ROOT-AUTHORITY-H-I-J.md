@@ -127,3 +127,74 @@ The final pre-commit gate used the exact toolchain above and passed:
 ## Explicit stop boundary
 
 Checkpoint K is not implemented. No deployer expansion, release construction, release-pointer change, runtime activation, systemd installation, service restart, production mutation, merge, force-push, or history rewrite is part of this checkpoint.
+
+## Forward hardening addendum
+
+This addendum supersedes the earlier H, I, and J certification counts and implementation qualifications for the final branch tip. The earlier checkpoint identities remain historical ancestors and were not rewritten.
+
+### H repair checkpoints
+
+- Durable exact-result observation replay and interrupted-commit recovery:
+  - commit `c274db475fdc4be87d2bde709849552f13494c1a`
+  - tree `05b2754121dd4150c655dc1a8dfbf34c68a5a612`
+  - parent `0a81c71e00e89e57ca246dea5f65c252442c89d2`
+- Read-only observation lookup remains principal-authenticated but does not require a mutation idempotency key:
+  - commit `60a798823134bcf035ab4d7c5d3d96f4cc924cd5`
+  - tree `6636e81a88efa2ad2ed34ca8d1bd0b057edeab80`
+  - parent `c274db475fdc4be87d2bde709849552f13494c1a`
+
+### I repair checkpoint
+
+- Commit: `4b202138a6cc4e0960a31a4011d3f26302edbceb`
+- Tree: `36ec11bb1059f75e86c3c7dedf7cf85e43c9eda9`
+- Parent: `60a798823134bcf035ab4d7c5d3d96f4cc924cd5`
+- Commit message: `fix(root): derive credential authorization`
+
+The public credential lease request no longer accepts caller-asserted authorization, provider, bundle, grant, target, purpose, revocation behavior, or deadlines. Those bindings are derived from the durable transaction, current controller lease and fencing token, declared step, active grant, policy decision, selected provider, and one unambiguous authoritative execution target. Delivery, revocation, cleanup, expiry, and restart recovery use durable mutation claims and preserve digest-only records without secret material.
+
+### J hardening checkpoint
+
+The containing commit and tree are established by signed post-commit local and remote readback because a commit cannot embed its own identity.
+
+The final J implementation adds or verifies:
+
+- fail-closed handling for corrupt or digest-invalid freeze records;
+- historical freeze replay that cannot overwrite a newer unfreeze;
+- owner-, sequence-, and fencing-token-bound recovery reads and transitions;
+- ordinary terminal transaction immutability during recovery;
+- a durable, digest-sealed emergency-kill request and per-action state machine persisted before side effects;
+- exact idempotent replay that inspects durable action state and does not repeat already verified effects;
+- explicit transaction controls that must exactly match the authoritative nonterminal scope;
+- unit identity binding across unit name, transaction ID, request digest, PID, process start time, boot ID, cgroup, invocation ID, and executable path;
+- fail-closed refusal to signal a unit with incomplete or mismatched identity;
+- positive unit termination proof requiring the original process identity to be absent and the bound cgroup to be empty; systemd unit collection is reported separately and is not substituted for process/cgroup proof;
+- disposable-machine destruction through the existing Disposable Machine Service and positive `DESTROYED` plus observed `ABSENT` verification;
+- durable-job cancellation through the existing JobManager and terminal readback;
+- preservation of the declared truthful terminal result when cleanup has completed;
+- removal of the unused unfenced authoritative transaction overwrite API.
+
+The focused J hardening proof contains seven tests and passes `7/7`:
+
+1. historical freeze replay and corrupt-record fail-closed behavior;
+2. current sequence/fence enforcement and terminal immutability;
+3. durable, exact-replay-safe emergency kill with one dispatch per effect;
+4. identity-mismatch refusal and mandatory process/cgroup absence verification;
+5. incomplete-unit-identity refusal before dispatch;
+6. truthful terminal-result preservation after cleanup;
+7. catalog schema and postcondition agreement.
+
+### Final hardening validation
+
+Using Node `v24.18.0` and npm `11.16.0`, the final pre-commit hardening gate passed:
+
+- `npm run clean`
+- `npm run build`
+- `npm run lint`
+- `npm test` — `180` passed, `0` failed
+- focused J hardening tests — `7` passed, `0` failed
+- all tracked shell files parsed with `bash -n`
+- `git diff --check`
+- no stale `reconcileTransition` or unfenced `replaceRecord` authority remained
+- no checkpoint K, deployment, release, service-unit installation, activation, restart, or production-mutation path was changed
+
+The live recovery adapter was compiled and integration-wired but was not invoked against production units, machines, jobs, or services. Destructive behavior remains certified through bounded fake-authority tests and existing disposable authority integration contracts; this checkpoint does not claim a production mutation or deployment certification.

@@ -168,11 +168,19 @@ test('E: host envelopes constrain execution and preserve process, cgroup, boot, 
   const input = { executable: '/usr/bin/true', argv: ['--help'], workingDirectory: '/tmp', user: 'root', group: 'root', environment: ['LANG=C'], timeoutMs: 1_000, cpuQuota: '25%', memoryMax: '64M', ioWeight: '100', tasksMax: 16, readOnlyPaths: ['/usr'], readWritePaths: ['/tmp'], inaccessiblePaths: ['/home'], restrictAddressFamilies: ['AF_UNIX'], systemCallFilter: ['@system-service'], capabilityBoundingSet: [], credentialPaths: [] };
   const request = { transactionId: 'transaction-a', transactionSequence: 1, inputDigest: sha256(canonicalize(input)) };
   const execution = await provider.execute(input, request);
+  const rootRequestDigest = sha256(canonicalize(request));
   assert.equal(execution.executionIdentity.invocationId, 'inv-1');
   assert.equal(execution.executionIdentity.processStartTime, '42');
+  assert.equal(execution.executionIdentity.systemdStartTimestamp, '42');
   assert.equal(execution.executionIdentity.cgroup, '/baby-x-root.slice/u');
   assert.ok(execution.executionIdentity.bootId);
+  assert.equal(execution.executionIdentity.transactionId, 'transaction-a');
+  assert.equal(execution.executionIdentity.requestDigest, rootRequestDigest);
+  assert.equal(execution.executionIdentity.executablePath, '/usr/bin/true');
   const properties = calls.find(call => call[0] === 'run')[1].properties;
+  const environmentTokens = properties.Environment.split(' ');
+  assert.ok(environmentTokens.includes('BABYX_ROOT_TRANSACTION_ID=transaction-a'));
+  assert.ok(environmentTokens.includes(`BABYX_ROOT_REQUEST_DIGEST=${rootRequestDigest}`));
   for (const name of ['NoNewPrivileges', 'ProtectSystem', 'RestrictNamespaces', 'KillMode', 'CPUQuota', 'MemoryMax', 'IOWeight', 'TasksMax']) assert.ok(properties[name]);
   assert.equal((await provider.cancel('u.service')).complete, true);
   assert.equal(calls.filter(call => call[0] === 'kill').length, 2);
@@ -180,6 +188,8 @@ test('E: host envelopes constrain execution and preserve process, cgroup, boot, 
   await provider.freeze('u.service', false);
   assert.throws(() => provider.profile({ ...input, executable: 'true' }, request), error => error.code === 'invalid_request');
   assert.throws(() => provider.profile({ ...input, environment: ['bad'] }, request), error => error.code === 'invalid_request');
+  assert.throws(() => provider.profile({ ...input, environment: ['BABYX_ROOT_TRANSACTION_ID=forged'] }, request), error => error.code === 'invalid_request');
+  assert.throws(() => provider.profile({ ...input, environment: [`BABYX_ROOT_REQUEST_DIGEST=${'f'.repeat(64)}`] }, request), error => error.code === 'invalid_request');
   const source = readFileSync(join(process.cwd(), 'runtime/src/root-fabric/host-envelope.ts'), 'utf8');
   assert.match(source, /InvocationID/u);
   assert.match(source, /ExecMainStartTimestampMonotonic/u);

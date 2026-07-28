@@ -16,6 +16,28 @@ const ATOMICITY = new Set<RootAtomicityMode>(['ATOMIC_WITHIN_PROVIDER', 'SAGA', 
 const PROVIDERS = new Set<RootExecutionProvider>(['HOST_ENVELOPE', 'DISPOSABLE_MACHINE']);
 const RESTART = new Set(['READ_ONLY_RETRY', 'IDEMPOTENT_RETRY', 'READBACK_BEFORE_RETRY', 'ROLLBACK_BEFORE_RETRY', 'NEVER_AUTOMATICALLY_RETRY']);
 
+const RECOVERY_TRANSITIONS: Readonly<Record<RootEffectState, readonly RootEffectState[]>> = Object.freeze({
+  REQUESTED: ['EXPIRED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'CANCEL_REQUESTED'],
+  AUTHORIZING: ['EXPIRED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'CANCEL_REQUESTED'],
+  PREPARING: ['EXPIRED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'CANCEL_REQUESTED'],
+  READY: ['EXPIRED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'CANCEL_REQUESTED'],
+  EXECUTING: ['VALIDATING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  VALIDATING: ['COMMITTING', 'FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  COMMITTING: ['RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  COMMITTED: [],
+  CANCEL_REQUESTED: ['ROLLBACK_REQUESTED', 'CLEANING', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  ROLLBACK_REQUESTED: ['ROLLING_BACK', 'ROLLED_BACK', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  ROLLING_BACK: ['ROLLED_BACK', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  ROLLED_BACK: [],
+  COMPENSATING: ['COMPENSATED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  COMPENSATED: [],
+  CLEANING: ['FAILED', 'ROLLED_BACK', 'COMPENSATED', 'RECOVERY_REQUIRED', 'AMBIGUOUS'],
+  FAILED: [],
+  RECOVERY_REQUIRED: ['ROLLBACK_REQUESTED', 'CLEANING', 'FAILED', 'AMBIGUOUS'],
+  AMBIGUOUS: ['RECOVERY_REQUIRED', 'ROLLBACK_REQUESTED', 'CLEANING', 'FAILED'],
+  EXPIRED: [],
+});
+
 function requestDigest(operation: string, principalDigest: string, payload: JsonObject): string {
   return sha256(canonicalize({ operation, principalDigest, payload }));
 }
@@ -308,19 +330,34 @@ export class RootEffectTransactionService {
     return this.transition('babyx.root.effect.repair', payload, context, ['RECOVERY_REQUIRED', 'AMBIGUOUS', 'CLEANING'], nextState, 'repair', (record, inner, occurredAt) => ({ error: { code: 'administrative_repair', message: text(inner.reason, 'reason', 1_024), retryable: false, phase: 'repair', redactedDetails: { priorState: record.lifecycle.persistedState, repairedAt: occurredAt } } }), Object.keys(payload));
   }
 
-  reconcileTransition(transactionId: string, nextState: RootEffectState, reason: string, observations: JsonObject, actor = 'root-reconciler'): RootEffectTransaction {
-    const current = this.read(identifier(transactionId, 'transactionId'));
-    const occurredAt = this.now();
-    const request = sha256(canonicalize({ transactionId, priorState: current.lifecycle.persistedState, nextState, reason, observations, actor, sequence: current.lifecycle.sequence + 1 }));
-    const error = ['FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'EXPIRED'].includes(nextState)
-      ? { code: reason, message: reason, retryable: nextState === 'RECOVERY_REQUIRED', phase: 'reconciliation', redactedDetails: observations }
-      : current.error;
-    const next = appendEvent(current, 'babyx.root.reconcile', 'reconciliation', nextState, request, sha256(`reconcile:${transactionId}:${current.lifecycle.sequence + 1}`), occurredAt, { error }, { actor }, sha256(canonicalize(observations)));
-    this.records.put(transactionId, next);
-    return this.read(transactionId);
+  recoveryRecord(payloadValue: unknown, context: RuntimeExecutionContext): RootEffectTransaction {
+    const payload = strictObject(payloadValue, 'root recovery control payload', ['transactionId', 'expectedSequence', 'fencingToken']);
+    const transactionId = identifier(payload.transactionId, 'transactionId');
+    const current = this.read(transactionId);
+    const principal = contextPrincipal(context, this.now());
+    if (principal.principalDigest !== current.ownerPrincipal.principalDigest) throw new RootFabricError('principal_mismatch', 'root recovery transaction principal mismatch');
+    this.assertLease(current, payload, this.now());
+    return current;
   }
 
-  replaceRecord(record: RootEffectTransaction): void { assertTransaction(record); this.records.put(record.transactionId, record); }
+  recoveryTransition(payloadValue: unknown, context: RuntimeExecutionContext): JsonObject {
+    const payload = strictObject(payloadValue, 'root recovery transition payload', ['transactionId', 'expectedSequence', 'fencingToken', 'nextState', 'classification', 'observations']);
+    const nextState = text(payload.nextState, 'nextState', 32) as RootEffectState;
+    if (!ROOT_EFFECT_STATES.includes(nextState)) throw new RootFabricError('invalid_request', 'recovery next state is invalid');
+    const classification = text(payload.classification, 'classification', 64);
+    const observations = object(payload.observations, 'observations');
+    return this.mutate('babyx.root.reconcile.transition', payload, context, (record, occurredAt, request, idemDigest) => {
+      if (record.lifecycle.terminal || TERMINAL.has(record.lifecycle.persistedState)) throw new RootFabricError('transaction_state_conflict', 'ordinary terminal transactions are immutable during recovery');
+      if (nextState === record.lifecycle.persistedState) throw new RootFabricError('transaction_state_conflict', 'recovery may not append a no-op lifecycle transition');
+      const allowed = RECOVERY_TRANSITIONS[record.lifecycle.persistedState];
+      if (!allowed.includes(nextState)) throw new RootFabricError('transaction_state_conflict', `recovery transition ${record.lifecycle.persistedState} -> ${nextState} is not allowed`, { allowed });
+      this.assertLease(record, payload, occurredAt);
+      const adverse = ['FAILED', 'RECOVERY_REQUIRED', 'AMBIGUOUS', 'EXPIRED'].includes(nextState);
+      const error = adverse ? { code: classification, message: classification, retryable: nextState === 'RECOVERY_REQUIRED', phase: 'reconciliation', redactedDetails: observations } : record.error;
+      return appendEvent(record, 'babyx.root.reconcile.transition', 'reconciliation', nextState, request, idemDigest, occurredAt, { error }, { classification }, sha256(canonicalize(observations)));
+    });
+  }
+
   nonterminal(limit = 4096): RootEffectTransaction[] { return this.records.scan((record) => !record.lifecycle.terminal, 0, limit).records.filter((record) => { try { assertTransaction(record); return true; } catch { return false; } }); }
   record(transactionId: string): RootEffectTransaction { return this.read(identifier(transactionId, 'transactionId')); }
 

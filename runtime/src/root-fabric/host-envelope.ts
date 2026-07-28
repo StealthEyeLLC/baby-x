@@ -2,6 +2,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonicalize, sha256, type CommandResult, type JsonObject } from '../core.ts';
 import { SystemdManager } from '../systemd/manager.ts';
+import { processIdentity as readProcessIdentity } from '../process/identity.ts';
 import { RootFabricError, integer, strictObject, text } from './model.ts';
 import type { BrokerEffectResult, RootBrokerRequest } from './broker.ts';
 
@@ -28,7 +29,7 @@ export interface HostEnvelopeProfile extends JsonObject {
 
 const UNIT = /^[A-Za-z0-9_.@:-]+$/u;
 const SIGNAL = /^SIG[A-Z0-9]+$/u;
-const IDENTITY_PROPERTIES = ['Id', 'InvocationID', 'MainPID', 'ExecMainStartTimestampMonotonic', 'ControlGroup', 'ActiveState', 'SubState', 'Result'] as const;
+const IDENTITY_PROPERTIES = ['Id', 'InvocationID', 'MainPID', 'ExecMainStartTimestampMonotonic', 'ControlGroup', 'ActiveState', 'SubState', 'Result', 'Environment'] as const;
 
 function identifierLike(value: unknown, field: string): string {
   const result = text(value, field, 256);
@@ -73,7 +74,10 @@ export class HostEnvelopeProvider {
     const executable = absoluteExecutable(input.executable);
     if (!Array.isArray(input.argv) || input.argv.length > 256 || input.argv.some((entry) => typeof entry !== 'string' || entry.includes('\0'))) throw new RootFabricError('invalid_request', 'argv must be a bounded NUL-free string array');
     const environment = stringList(input.environment ?? [], 'environment', 256);
-    for (const entry of environment) if (!/^[A-Z_][A-Z0-9_]*=[^\0]*$/u.test(entry)) throw new RootFabricError('invalid_request', 'environment must be an explicit NAME=value allowlist');
+    for (const entry of environment) {
+      if (!/^[A-Z_][A-Z0-9_]*=[^\0]*$/u.test(entry)) throw new RootFabricError('invalid_request', 'environment must be an explicit NAME=value allowlist');
+      if (entry.startsWith('BABYX_ROOT_TRANSACTION_ID=') || entry.startsWith('BABYX_ROOT_REQUEST_DIGEST=')) throw new RootFabricError('invalid_request', 'reserved root authority environment markers may not be caller supplied');
+    }
     const suffix = sha256(`${request.transactionId}:${request.transactionSequence}:${request.inputDigest}`).slice(0, 16);
     return {
       unit: `babyx-root-${suffix}.service`, argv: [executable, ...(input.argv as string[])], workingDirectory: text(input.workingDirectory, 'workingDirectory', 4_096),
@@ -92,7 +96,7 @@ export class HostEnvelopeProvider {
       CPUQuota: profile.cpuQuota, MemoryMax: profile.memoryMax, IOWeight: profile.ioWeight, TasksMax: String(profile.tasksMax),
       NoNewPrivileges: 'yes', PrivateTmp: 'yes', ProtectSystem: 'strict', ProtectHome: 'yes', RestrictNamespaces: 'yes', LockPersonality: 'yes', MemoryDenyWriteExecute: 'yes',
       ProtectKernelTunables: 'yes', ProtectKernelModules: 'yes', ProtectControlGroups: 'yes', RestrictSUIDSGID: 'yes', RemoveIPC: 'yes', PrivateDevices: 'yes',
-      Environment: profile.environment.join(' '),
+      Environment: [...profile.environment, `BABYX_ROOT_TRANSACTION_ID=${request.transactionId}`, `BABYX_ROOT_REQUEST_DIGEST=${sha256(canonicalize(request))}`].join(' '),
     };
     if (profile.readOnlyPaths.length > 0) properties.ReadOnlyPaths = profile.readOnlyPaths.join(' ');
     if (profile.readWritePaths.length > 0) properties.ReadWritePaths = profile.readWritePaths.join(' ');
@@ -103,9 +107,14 @@ export class HostEnvelopeProvider {
     const propertyEntries = profile.credentialPaths.map((path, index) => `LoadCredential=credential-${index}:${path}`);
     const launched = await this.systemd.run({ argv: profile.argv, unit: profile.unit.replace(/\.service$/u, ''), properties, propertyEntries, timeoutMs: profile.timeoutMs });
     const readback = await this.readback(profile.unit);
+    const mainPid = Number(readback.MainPID ?? '0');
+    let processReadback: { processStartTime: string; executablePath: string; bootId: string } | null = null;
+    if (Number.isSafeInteger(mainPid) && mainPid > 0) {
+      try { processReadback = readProcessIdentity(mainPid); } catch { processReadback = null; }
+    }
     return {
       classification: launched.exitCode === 0 ? 'SUCCEEDED' : 'FAILED',
-      executionIdentity: { unit: profile.unit, invocationId: readback.InvocationID ?? '', mainPid: readback.MainPID ?? '0', processStartTime: readback.ExecMainStartTimestampMonotonic ?? '0', bootId: bootId(), cgroup: readback.ControlGroup ?? '', provider: 'systemd-transient', profileDigest: sha256(canonicalize(profile)) },
+      executionIdentity: { unit: profile.unit, unitName: profile.unit, transactionId: request.transactionId, requestDigest: sha256(canonicalize(request)), invocationId: readback.InvocationID ?? '', mainPid: readback.MainPID ?? '0', processId: mainPid, processStartTime: processReadback?.processStartTime ?? readback.ExecMainStartTimestampMonotonic ?? '0', systemdStartTimestamp: readback.ExecMainStartTimestampMonotonic ?? '0', bootId: processReadback?.bootId ?? bootId(), cgroup: readback.ControlGroup ?? '', cgroupId: readback.ControlGroup ?? '', executablePath: processReadback?.executablePath ?? profile.argv[0]!, provider: 'systemd-transient', profileDigest: sha256(canonicalize(profile)) },
       result: commandResult(launched), cleanupState: { readback, unitCollected: readback.ActiveState === 'inactive' || readback.ActiveState === 'failed', cgroupEmpty: readback.MainPID === '0' },
     };
   }

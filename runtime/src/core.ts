@@ -712,16 +712,52 @@ export class BabyXRuntime {
       const machines = await this.machineService();
       const recoveryContext = (key: string): RuntimeExecutionContext => ({ subject: 'baby-x-root-recovery', authorityClass: 'unrestricted-owner', idempotencyKey: key });
       const terminalJobStates = new Set<JobRecord['status']>(['completed', 'failed', 'cancelled', 'lost']);
+      const systemdEnvironmentValue = (environment: string, name: string): string | null => {
+        const match = new RegExp(`(?:^|\s)${name}=([^\s\"]+)`, 'u').exec(environment);
+        return match?.[1] ?? null;
+      };
       const inspectUnit = async (unitName: string, expectedIdentity: JsonObject): Promise<JsonObject> => {
-        const result = await this.executor.run({ argv: ['/usr/bin/systemctl', 'show', unitName, '--no-pager', '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup'], cwd: '/' });
+        const result = await this.executor.run({ argv: ['/usr/bin/systemctl', 'show', unitName, '--no-pager', '--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID,ExecMainStartTimestampMonotonic,Environment'], cwd: '/' });
         const output = Buffer.from(result.stdout, 'base64').toString('utf8');
         const properties = Object.fromEntries(output.split('\n').filter((line) => line.includes('=')).map((line) => { const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1)]; }));
         const exists = result.exitCode === 0 && properties.LoadState !== 'not-found';
         const active = exists && ['active', 'activating', 'deactivating', 'reloading'].includes(properties.ActiveState ?? '');
-        const expectedPid = Number(expectedIdentity.processId ?? expectedIdentity.pid ?? 0);
         const actualPid = Number(properties.MainPID ?? 0);
-        const matches = exists && (expectedPid <= 0 || expectedPid === actualPid);
-        const identity = { unitName, loadState: properties.LoadState ?? null, activeState: properties.ActiveState ?? null, subState: properties.SubState ?? null, mainPid: Number.isSafeInteger(actualPid) ? actualPid : 0, controlGroup: properties.ControlGroup ?? null };
+        let processReadback: ProcessIdentity | null = null;
+        if (Number.isSafeInteger(actualPid) && actualPid > 0) {
+          try { processReadback = readProcessIdentity(actualPid); } catch { processReadback = null; }
+        }
+        const environment = properties.Environment ?? '';
+        const transactionId = systemdEnvironmentValue(environment, 'BABYX_ROOT_TRANSACTION_ID');
+        const requestDigest = systemdEnvironmentValue(environment, 'BABYX_ROOT_REQUEST_DIGEST');
+        const identity = {
+          unitName,
+          loadState: properties.LoadState ?? null,
+          activeState: properties.ActiveState ?? null,
+          subState: properties.SubState ?? null,
+          transactionId,
+          requestDigest,
+          cgroupId: properties.ControlGroup ?? null,
+          processId: Number.isSafeInteger(actualPid) ? actualPid : 0,
+          processStartTime: processReadback?.processStartTime ?? null,
+          systemdStartTimestamp: properties.ExecMainStartTimestampMonotonic ?? null,
+          bootId: processReadback?.bootId ?? null,
+          invocationId: properties.InvocationID ?? null,
+          executablePath: processReadback?.executablePath ?? null,
+        };
+        const staticMatches = exists
+          && expectedIdentity.unitName === unitName
+          && expectedIdentity.transactionId === transactionId
+          && expectedIdentity.requestDigest === requestDigest
+          && expectedIdentity.cgroupId === identity.cgroupId
+          && expectedIdentity.systemdStartTimestamp === identity.systemdStartTimestamp
+          && expectedIdentity.invocationId === identity.invocationId;
+        const processMatches = !active || (processReadback !== null
+          && Number(expectedIdentity.processId) === actualPid
+          && expectedIdentity.processStartTime === processReadback.processStartTime
+          && expectedIdentity.bootId === processReadback.bootId
+          && expectedIdentity.executablePath === processReadback.executablePath);
+        const matches = staticMatches && processMatches;
         return { exists, matches, active, terminal: !active, identity, resultDigest: sha256(canonicalize({ identity, exitCode: result.exitCode, signal: result.signal })) };
       };
       const recoveryAuthority = {
@@ -766,7 +802,30 @@ export class BabyXRuntime {
           return machines.destroy({ machineId, expectedSequence, stopIfRunning: true, forceStop: true, stopTimeoutMs: 5_000, reason: 'root emergency kill' }, recoveryContext(`root-recovery-machine-destroy-${machineId}-${expectedSequence}`));
         },
         killJob: async (jobId: string, signal: string): Promise<JsonObject> => this.jobs.cancel(jobId, signal) as unknown as JsonObject,
-        verifyUnitAbsent: async (unitName: string): Promise<boolean> => !Boolean((await inspectUnit(unitName, { unitName })).active),
+        verifyUnitAbsent: async (unitName: string, expectedIdentity: JsonObject): Promise<JsonObject> => {
+          const readback = await inspectUnit(unitName, expectedIdentity);
+          const expectedPid = Number(expectedIdentity.processId);
+          let processAbsent = true;
+          if (Number.isSafeInteger(expectedPid) && expectedPid > 0) {
+            try {
+              const observed = readProcessIdentity(expectedPid);
+              processAbsent = observed.processStartTime !== expectedIdentity.processStartTime || observed.bootId !== expectedIdentity.bootId || observed.executablePath !== expectedIdentity.executablePath;
+            } catch { processAbsent = true; }
+          }
+          const cgroupId = String(expectedIdentity.cgroupId ?? '');
+          const cgroupPath = cgroupId.startsWith('/') ? `/sys/fs/cgroup${cgroupId}` : join('/sys/fs/cgroup', cgroupId);
+          let cgroupEmpty = true;
+          if (cgroupId.length > 0 && existsSync(cgroupPath)) {
+            try { cgroupEmpty = readFileSync(join(cgroupPath, 'cgroup.procs'), 'utf8').trim().length === 0; }
+            catch { cgroupEmpty = false; }
+          }
+          const unitCollected = readback.exists === false || (readback.identity as JsonObject).loadState === 'not-found';
+          const identitySafe = readback.exists === false || readback.matches === true;
+          const active = readback.active === true;
+          const terminal = !active && processAbsent && cgroupEmpty;
+          const identity = { ...(readback.identity as JsonObject), processAbsent, cgroupEmpty, unitCollected };
+          return { exists: readback.exists, matches: identitySafe, active, terminal, identity, resultDigest: sha256(canonicalize({ identity, sourceResultDigest: readback.resultDigest })) };
+        },
         verifyMachineAbsent: async (machineId: string): Promise<boolean> => {
           const readback = await recoveryAuthority.inspectMachine(machineId, { machineId });
           return readback.exists === false || readback.terminal === true;

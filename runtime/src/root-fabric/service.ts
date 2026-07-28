@@ -117,14 +117,14 @@ export class RootFabricService {
       async killUnit() { throw new RootFabricError('resource_unavailable', 'unit recovery authority is unavailable'); },
       async killMachine() { throw new RootFabricError('resource_unavailable', 'machine recovery authority is unavailable'); },
       async killJob() { throw new RootFabricError('resource_unavailable', 'job recovery authority is unavailable'); },
-      async verifyUnitAbsent() { return false; },
+      async verifyUnitAbsent() { return { exists: false, matches: true, active: false, terminal: true, identity: { processAbsent: true, cgroupEmpty: true, unitCollected: true }, resultDigest: null }; },
       async verifyMachineAbsent() { return false; },
       async verifyJobTerminal() { return false; },
     };
     this.recovery = new RootRecoveryService({ stateRoot: options.stateRoot, transactions: this.transactions, observations: this.observations, credentials: this.credentials, freezes: this.freezes, authority: options.recoveryAuthority ?? unavailable, now: options.now });
     this.effects = new RootEffectRegistry({ storage: new RootStorageEffectAuthority({ datasetRoots: envList('BABYX_ROOT_DATASET_ROOTS'), mountRoots: envList('BABYX_ROOT_MOUNT_ROOTS') }), network: new RootNetworkEffectAuthority({ table: process.env.BABYX_ROOT_NFT_TABLE ?? 'babyx_root' }) });
   }
-  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.1.0', credential: '1.1.0', recovery: '1.0.0' } }); return value as unknown as JsonObject; }
+  compatibility(): JsonObject { const value = createRootCompatibilityManifest({ sourceCommit: this.options.sourceCommit, sourceTree: this.options.sourceTree, catalogVersion: this.options.catalogVersion, catalogDigest: this.options.catalogDigest(), providerContractVersions: { rootFabric: ROOT_FABRIC_PROVIDER_VERSION, transaction: ROOT_FABRIC_SCHEMA_VERSION, broker: '1.0.0', observation: '1.1.0', credential: '1.1.0', recovery: '1.1.0' } }); return value as unknown as JsonObject; }
   async execute(operation: string, payload: JsonObject, context: RuntimeExecutionContext): Promise<JsonObject> {
     if (!ROOT_FABRIC_OPERATION_NAMES.includes(operation as typeof ROOT_FABRIC_OPERATION_NAMES[number])) throw new RootFabricError('unsupported_operation', `unsupported A-J root fabric operation ${operation}`);
     if (operation === 'babyx.root.compatibility.get') return this.compatibility();

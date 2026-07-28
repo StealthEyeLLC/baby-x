@@ -349,6 +349,7 @@ function rootSchema(operation: string): Record<string, unknown> {
   const leaseId = { type: 'string', pattern: '^crl_[a-f0-9]{32}$' } as const;
   const sessionId = { type: 'string', pattern: '^obs_[a-f0-9]{32}$' } as const;
   const fencingToken = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } as const;
+  const recoveryControl = objectSchema({ transactionId: effectTransactionId, expectedSequence, fencingToken }, ['transactionId', 'expectedSequence', 'fencingToken']);
   const effectPage = { offset: { type: 'integer', minimum: 0, maximum: 10_000_000 }, limit: { type: 'integer', minimum: 1, maximum: 200 } } as const;
   const strictJsonObject = { type: 'object', additionalProperties: true } as const;
   const boundedSmallStrings = { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 4_096 } } as const;
@@ -386,8 +387,8 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.credential.revoke' || operation === 'babyx.root.credential.clean') return objectSchema({ leaseId, reason: stringValue }, ['leaseId', 'reason']);
   if (operation === 'babyx.root.freeze.get') return objectSchema({ scope: stringValue, selector: stringValue, ...effectPage });
   if (operation === 'babyx.root.freeze.set') return objectSchema({ scope: { enum: ['GLOBAL', 'PRINCIPAL', 'SKILL', 'BUNDLE', 'GRANT', 'TRANSACTION', 'PROVIDER', 'CREDENTIAL_ISSUANCE', 'NEW_EXECUTION'] }, selector: stringValue, active: { type: 'boolean' }, reason: stringValue, expiresAt: { anyOf: [{ type: 'null' }, stringValue] } }, ['scope', 'selector', 'active', 'reason']);
-  if (operation === 'babyx.root.kill') return objectSchema({ scope: { enum: ['TRANSACTION', 'SKILL', 'ALL'] }, selector: stringValue, reason: stringValue }, ['scope', 'selector', 'reason']);
-  if (operation === 'babyx.root.reconcile') return objectSchema({ transactionId: effectTransactionId, limit: { type: 'integer', minimum: 1, maximum: 4_096 } });
+  if (operation === 'babyx.root.kill') return objectSchema({ scope: { enum: ['TRANSACTION', 'SKILL', 'ALL'] }, selector: stringValue, reason: stringValue, transactions: { type: 'array', minItems: 1, maxItems: 4_096, items: recoveryControl } }, ['scope', 'selector', 'reason', 'transactions']);
+  if (operation === 'babyx.root.reconcile') return recoveryControl;
   if (operation === 'babyx.root.grant.revoke') return objectSchema({ grantId: identifier, reason: stringValue }, ['grantId', 'reason']);
   throw new Error(`missing root operation schema: ${operation}`);
 }
@@ -475,7 +476,16 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   const family = familyOf(operation);
   if (family === 'machine') return ['authoritative_machine_record_persisted', 'observed_state_reported'];
   if (family === 'certification' || family === 'race') return ['durable_record_persisted', 'evidence_references_reported'];
-  if (family === 'root') return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
+  if (family === 'root') {
+    if (operation.startsWith('babyx.root.effect.')) return ['authoritative_transaction_record_persisted', 'digest_chained_event_appended'];
+    if (operation === 'babyx.root.observation.start' || operation === 'babyx.root.observation.record' || operation === 'babyx.root.observation.finalize') return ['transaction_bound_observation_record_persisted', 'observation_event_chain_verified'];
+    if (operation.startsWith('babyx.root.credential.')) return ['transaction_bound_credential_record_persisted', 'credential_event_chain_verified'];
+    if (operation === 'babyx.root.freeze.set') return ['freeze_record_persisted', 'freeze_event_head_verified'];
+    if (operation === 'babyx.root.kill') return ['durable_kill_record_persisted', 'fenced_transaction_transition_reported', 'positive_absence_verification_reported'];
+    if (operation === 'babyx.root.reconcile') return ['reconciliation_record_persisted', 'fenced_transaction_transition_reported'];
+    if (operation.startsWith('babyx.root.bundle.') || operation.startsWith('babyx.root.grant.')) return ['trust_record_persisted'];
+    return ['durable_root_record_persisted'];
+  }
   if (family === 'file') return ['resulting_file_metadata_reported'];
   if (family === 'artifact') return ['artifact_digest_and_metadata_reported'];
   return ['command_result_reported'];

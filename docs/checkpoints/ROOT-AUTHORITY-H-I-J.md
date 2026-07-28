@@ -128,6 +128,19 @@ The final pre-commit gate used the exact toolchain above and passed:
 
 Checkpoint K is not implemented. No deployer expansion, release construction, release-pointer change, runtime activation, systemd installation, service restart, production mutation, merge, force-push, or history rewrite is part of this checkpoint.
 
+## Independent audit disposition and forward repair
+
+The original H-I-J tip `0a81c71e00e89e57ca246dea5f65c252442c89d2` passed its existing repository gate and was structurally authentic, but an independent semantic audit found reachable authorization, recovery, replay, identity, redaction, cleanup-classification, and catalog-contract defects. Its correct historical disposition is:
+
+- `STRUCTURALLY_VERIFIED=yes`
+- `EXISTING_TEST_GATE_PASSED=yes`
+- `SEMANTICALLY_VERIFIED=no`
+- `READY_FOR_K=no`
+- `DEPLOYABLE=no`
+- `REPAIR_REQUIRED=yes`
+
+The defects were repaired only through forward commits on the same branch. No ancestor was amended, replaced, force-pushed, or removed. Checkpoint K remained out of scope throughout the repair.
+
 ## Forward hardening addendum
 
 This addendum supersedes the earlier H, I, and J certification counts and implementation qualifications for the final branch tip. The earlier checkpoint identities remain historical ancestors and were not rewritten.
@@ -158,14 +171,14 @@ The containing commit and tree are established by signed post-commit local and r
 
 The final J implementation adds or verifies:
 
-- fail-closed handling for corrupt or digest-invalid freeze records;
+- fail-closed handling for corrupt records and independently verified freeze event-head digests, including tampering hidden behind a recomputed record digest;
 - historical freeze replay that cannot overwrite a newer unfreeze;
 - owner-, sequence-, and fencing-token-bound recovery reads and transitions;
 - ordinary terminal transaction immutability during recovery;
 - a durable, digest-sealed emergency-kill request and per-action state machine persisted before side effects;
 - exact idempotent replay that inspects durable action state and does not repeat already verified effects;
 - explicit transaction controls that must exactly match the authoritative nonterminal scope;
-- unit identity binding across unit name, transaction ID, request digest, PID, process start time, boot ID, cgroup, invocation ID, and executable path;
+- unit identity binding across unit name, transaction ID, request digest, PID, `/proc` process start identity, systemd monotonic start timestamp, boot ID, cgroup, invocation ID, and executable path;
 - fail-closed refusal to signal a unit with incomplete or mismatched identity;
 - positive unit termination proof requiring the original process identity to be absent and the bound cgroup to be empty; systemd unit collection is reported separately and is not substituted for process/cgroup proof;
 - disposable-machine destruction through the existing Disposable Machine Service and positive `DESTROYED` plus observed `ABSENT` verification;
@@ -191,10 +204,19 @@ Using Node `v24.18.0` and npm `11.16.0`, the final pre-commit hardening gate pas
 - `npm run build`
 - `npm run lint`
 - `npm test` — `180` passed, `0` failed
+- focused H, I, and J repair tests — `15` passed, `0` failed
 - focused J hardening tests — `7` passed, `0` failed
 - all tracked shell files parsed with `bash -n`
 - `git diff --check`
 - no stale `reconcileTransition` or unfenced `replaceRecord` authority remained
 - no checkpoint K, deployment, release, service-unit installation, activation, restart, or production-mutation path was changed
+
+Durable final-gate evidence:
+
+- Baby job: `6fc02916-6a92-4c68-9b75-d9aead35f791`
+- signed wait receipt: `e9588bf5644f16c634123754ef5a4ce9`
+- signed stream-read receipt: `ad2f4bcac6b9b578125aed6484430e44`
+- catalog: `3.4.0`; definitions: `230`; root operations: `51`; root dispatcher operations: `40`; duplicates: `0`
+- repository tests: `180/180`; focused H-I-J repairs: `15/15`
 
 The live recovery adapter was compiled and integration-wired but was not invoked against production units, machines, jobs, or services. Destructive behavior remains certified through bounded fake-authority tests and existing disposable authority integration contracts; this checkpoint does not claim a production mutation or deployment certification.

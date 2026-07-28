@@ -716,6 +716,7 @@ export class BabyXRuntime {
         catalogVersion: OPERATION_CATALOG_VERSION,
         catalogDigest: () => sha256(canonicalize(OPERATION_DEFINITIONS)),
         artifacts: observationArtifacts,
+        credentialDeliveryRoot: process.env.BABYX_ROOT_CREDENTIAL_ROOT ?? '/run/baby-x/root-credentials',
       });
     }
     return this.rootFabricServiceInstance;

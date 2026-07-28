@@ -65,6 +65,12 @@ babyx.root.observation.start
 babyx.root.observation.get
 babyx.root.observation.record
 babyx.root.observation.finalize
+babyx.root.credential.lease
+babyx.root.credential.deliver
+babyx.root.credential.get
+babyx.root.credential.list
+babyx.root.credential.revoke
+babyx.root.credential.clean
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -369,6 +375,11 @@ function rootSchema(operation: string): Record<string, unknown> {
   if (operation === 'babyx.root.observation.get') return objectSchema({ sessionId, ...effectPage }, ['sessionId']);
   if (operation === 'babyx.root.observation.record') return objectSchema({ sessionId, transactionId: effectTransactionId, stepId: identifier, kind: identifier, source: identifier, occurredAt: stringValue, cgroupId: { anyOf: [{ type: 'null' }, stringValue] }, unitName: { anyOf: [{ type: 'null' }, identifier] }, machineId: { anyOf: [{ type: 'null' }, identifier] }, processId: { anyOf: [{ type: 'null' }, positiveInteger] }, processStartTime: { anyOf: [{ type: 'null' }, stringValue] }, bootId: { anyOf: [{ type: 'null' }, identifier] }, data: strictJsonObject }, ['sessionId', 'transactionId', 'stepId', 'kind', 'source', 'data']);
   if (operation === 'babyx.root.observation.finalize') return objectSchema({ sessionId, sourceStatus: strictJsonObject, spill: { type: 'boolean' } }, ['sessionId', 'sourceStatus']);
+  if (operation === 'babyx.root.credential.lease') return objectSchema({ credentialReference: stringValue, provider: { enum: ['HOST_ENVELOPE', 'DISPOSABLE_MACHINE'] }, skillBundleDigest: digest, grantDigest: digest, transactionId: effectTransactionId, stepId: identifier, targetType: { enum: ['UNIT', 'MACHINE'] }, targetId: identifier, purpose: stringValue, expiresAt: stringValue, maximumTtlMs: { type: 'integer', minimum: 1_000, maximum: 3_600_000 }, transactionDeadline: stringValue, operationDeadline: stringValue, revocationBehavior: { enum: ['FREEZE', 'CANCEL_AND_ROLLBACK', 'ALLOW_TO_FINISH'] }, authorized: { type: 'boolean' } }, ['credentialReference', 'provider', 'skillBundleDigest', 'grantDigest', 'transactionId', 'stepId', 'targetType', 'targetId', 'purpose', 'expiresAt', 'maximumTtlMs', 'transactionDeadline', 'operationDeadline', 'revocationBehavior', 'authorized']);
+  if (operation === 'babyx.root.credential.deliver') return objectSchema({ leaseId, transactionId: effectTransactionId, stepId: identifier, skillBundleDigest: digest, grantDigest: digest, targetType: { enum: ['UNIT', 'MACHINE'] }, targetId: identifier }, ['leaseId', 'transactionId', 'stepId', 'skillBundleDigest', 'grantDigest', 'targetType', 'targetId']);
+  if (operation === 'babyx.root.credential.get') return objectSchema({ leaseId }, ['leaseId']);
+  if (operation === 'babyx.root.credential.list') return objectSchema({ state: stringValue, transactionId: effectTransactionId, ...effectPage });
+  if (operation === 'babyx.root.credential.revoke' || operation === 'babyx.root.credential.clean') return objectSchema({ leaseId, reason: stringValue }, ['leaseId', 'reason']);
   if (operation === 'babyx.root.grant.revoke') return objectSchema({ grantId: identifier, reason: stringValue }, ['grantId', 'reason']);
   throw new Error(`missing root operation schema: ${operation}`);
 }
@@ -462,7 +473,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.2.0';
+export const OPERATION_CATALOG_VERSION = '3.3.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);

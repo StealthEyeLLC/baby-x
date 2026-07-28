@@ -10,6 +10,8 @@ import { RootMediationService } from '../../dist/runtime/root-platform/mediation
 const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
 const binary = join(process.cwd(), 'dist/runtime/native/mediation-supervisor/baby-x-mediation-supervisor');
 const context = (idempotencyKey) => ({ subject: 'owner:mediation-integration', authorityClass: 'unrestricted-owner', idempotencyKey });
+const getpidSyscallNumber = architecture === 'x86_64' ? 39 : 172;
+const rawGetpidCommand = ['/usr/bin/python3', '-c', `import ctypes; ctypes.CDLL(None).syscall(${getpidSyscallNumber})`];
 
 function run(args, expectedStatus = 0) {
   const result = spawnSync(binary, args, { encoding: 'utf8', timeout: 15_000, maxBuffer: 2_097_152 });

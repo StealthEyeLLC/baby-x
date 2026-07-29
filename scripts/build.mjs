@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, extname, join } from 'node:path';
+import { executableFromPath } from './executable-path.mjs';
 import { spawnSync } from 'node:child_process';
 import { stripTypeScriptTypes } from 'node:module';
 import process from 'node:process';
@@ -49,14 +50,10 @@ function walk(sourceRoot, destinationRoot) {
   }
 }
 
-function executableFromShell(name) {
-  return spawnSync('/usr/bin/env', ['bash', '-lc', `command -v ${name}`], { encoding: 'utf8' }).stdout.trim();
-}
-
 walk(join(root, 'runtime/src'), join(root, 'dist/runtime'));
 walk(join(root, 'gateway/src'), join(root, 'dist/gateway'));
 
-const compiler = executableFromShell('c++');
+const compiler = executableFromPath('c++');
 const includeCandidates = ['/opt/node-v24.18.0-linux-x64/include/node', '/usr/include/node'];
 const include = includeCandidates.find((candidate) => existsSync(join(candidate, 'node_api.h')));
 if (!compiler || !include) throw new Error('the peer credential native build toolchain is unavailable');
@@ -83,7 +80,7 @@ mkdirSync(join(root, 'dist/build/Release'), { recursive: true });
 copyFileSync(join(root, 'runtime/build/Release/peer_cred.node'), join(root, 'dist/build/Release/peer_cred.node'));
 report.peerCredentialAddon = 'built';
 
-const cargo = executableFromShell('cargo');
+const cargo = executableFromPath('cargo');
 if (cargo) {
   const seccompResult = spawnSync(cargo, ['build', '--release', '--manifest-path', 'runtime/native/seccomp-supervisor/Cargo.toml'], {
     cwd: root,

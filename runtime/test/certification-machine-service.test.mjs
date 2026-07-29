@@ -462,3 +462,25 @@ test('successful certification leaves every related durable job terminal', async
   assert.ok(result.certification.jobIds.length > 1);
   for (const jobId of result.certification.jobIds) assert.notEqual(f.jobs.reconcile(jobId).status, 'running');
 });
+
+
+test('cleanup without retention deadline skips machine expiration and destroys directly', async (t) => {
+  const f = fixture(t);
+  f.machine.failCommands.add('build');
+  f.machine.destroyFailure = true;
+  const first = await f.service.run(request(), { ...context, idempotencyKey: 'cert-no-retention-recovery-0001' });
+  assert.equal(first.certification.state, 'RECOVERY_REQUIRED');
+  assert.equal(first.certification.cleanup.absenceVerified, false);
+  f.machine.destroyFailure = false;
+  const expireBefore = operationNames(f.machine).filter((name) => name === 'expire').length;
+  const destroyBefore = operationNames(f.machine).filter((name) => name === 'destroy').length;
+  const cleaned = await f.service.cleanup(
+    { certificationId: first.certification.certificationId, reason: 'retry cleanup without retention' },
+    { ...context, idempotencyKey: 'cert-no-retention-recovery-cleanup-0001' },
+  );
+  assert.equal(cleaned.certification.state, 'FAILED');
+  assert.equal(cleaned.certification.cleanup.destroyStatus, 'succeeded');
+  assert.equal(cleaned.certification.cleanup.absenceVerified, true);
+  assert.equal(operationNames(f.machine).filter((name) => name === 'expire').length, expireBefore);
+  assert.equal(operationNames(f.machine).filter((name) => name === 'destroy').length, destroyBefore + 1);
+});

@@ -579,7 +579,7 @@ export class CertificationService {
     record = this.store.update(id, (current) => ({ ...current, state: 'CLEANING', cleanup: { ...current.cleanup, required: true } }));
     try {
       const currentMachine = this.machineRecord(record.machineId, context);
-      if (stateFrom(currentMachine) !== 'DESTROYED') {
+      if (expiresAt !== undefined && stateFrom(currentMachine) !== 'DESTROYED') {
         this.options.machine.expire({ machineId: record.machineId, expectedSequence: sequenceFrom(currentMachine), reason: 'certification retention expired' }, internalContext(context, id, 'expire'));
       }
       record = await this.cleanupMachine(this.store.get(id), context);

@@ -247,8 +247,8 @@ test('I repair: RootFabricService derives grant, policy, provider, target, fence
 });
 
 test('I repair: catalog exposes strict derived credential inputs without caller authorization or deadlines', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.5.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 231);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.6.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 243);
   const root = OPERATION_DEFINITIONS.filter((entry) => entry.operation.startsWith('babyx.root.'));
   assert.equal(root.length, 51);
   const expected = ['babyx.root.credential.lease', 'babyx.root.credential.deliver', 'babyx.root.credential.get', 'babyx.root.credential.list', 'babyx.root.credential.revoke', 'babyx.root.credential.clean'];

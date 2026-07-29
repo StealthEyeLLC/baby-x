@@ -25,6 +25,18 @@ const operations = `
 babyx.describe
 babyx.health
 babyx.core.compatibility
+babyx.transaction.create
+babyx.transaction.get
+babyx.transaction.list
+babyx.transaction.events
+babyx.transaction.status
+babyx.transaction.execute
+babyx.transaction.validate
+babyx.transaction.finalize
+babyx.transaction.rollback
+babyx.transaction.reconcile
+babyx.transaction.expire
+babyx.transaction.gc
 babyx.root.describe
 babyx.root.transaction.create
 babyx.root.transaction.get
@@ -76,18 +88,6 @@ babyx.root.freeze.get
 babyx.root.freeze.set
 babyx.root.kill
 babyx.root.reconcile
-babyx.transaction.create
-babyx.transaction.get
-babyx.transaction.list
-babyx.transaction.events
-babyx.transaction.status
-babyx.transaction.execute
-babyx.transaction.validate
-babyx.transaction.finalize
-babyx.transaction.rollback
-babyx.transaction.reconcile
-babyx.transaction.expire
-babyx.transaction.gc
 babyx.exec
 babyx.shell
 babyx.job.get
@@ -268,7 +268,7 @@ babyx.counterexample.remove
 `.trim().split(/\s+/u);
 
 const readSuffixes = new Set(['describe', 'health', 'get', 'list', 'read', 'events', 'status', 'inspect', 'logs', 'interfaces', 'statistics', 'compatibility', 'check', 'diff', 'validate', 'verify', 'registry', 'export', 'wait']);
-const durableFamilies = new Set(['machine', 'certification', 'race', 'root']);
+const durableFamilies = new Set(['machine', 'certification', 'race', 'root', 'transaction']);
 const highRiskFamilies = new Set(['systemd', 'machine', 'debug', 'checkpoint', 'syscall']);
 const conditionalFileSuffixes = new Set(['write', 'replace', 'patch', 'copy', 'move', 'remove']);
 
@@ -407,6 +407,11 @@ function rootSchema(operation: string): Record<string, unknown> {
 }
 
 function schemaFor(operation: string): Record<string, unknown> {
+  if (operation.startsWith('babyx.transaction.')) {
+    const schema = transactionInputSchemas[operation];
+    if (schema === undefined) throw new Error(`missing transaction operation schema: ${operation}`);
+    return schema;
+  }
   if (operation === 'babyx.core.compatibility') return objectSchema({});
   if (operation.startsWith('babyx.root.')) return rootSchema(operation);
   if (operation === 'babyx.describe' || operation === 'babyx.health' || operation.endsWith('.describe')) return objectSchema({});
@@ -504,6 +509,10 @@ function familyOf(operation: string): string {
 }
 
 function isMutation(operation: string): boolean {
+  if (operation.startsWith('babyx.transaction.')) {
+    const suffix = operation.split('.').at(-1) ?? operation;
+    return !['get', 'list', 'events', 'status'].includes(suffix);
+  }
   if (operation === 'babyx.execution.policy.decide' || operation === 'babyx.spec.export' || operation === 'babyx.counterexample.export') return false;
   const suffix = operation.split('.').at(-1) ?? operation;
   return !readSuffixes.has(suffix);
@@ -566,7 +575,7 @@ function postconditionsFor(operation: string, mutation: boolean): readonly strin
   return ['command_result_reported'];
 }
 
-export const OPERATION_CATALOG_VERSION = '3.5.0';
+export const OPERATION_CATALOG_VERSION = '3.6.0';
 
 export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.map((operation) => {
   const mutation = isMutation(operation);
@@ -588,11 +597,6 @@ export const OPERATION_DEFINITIONS: readonly OperationDefinition[] = operations.
     limits: { maxFrameBytes: 16_777_216, maxInlineResultBytes: 65_536 },
     authority: { class: 'unrestricted-owner', provider: 'baby-x-runtime' },
     input: schemaFor(operation),
-    description: `Baby-X unrestricted ${operation.slice('babyx.'.length)} operation.`,
-    mutation: operation.startsWith('babyx.transaction.') ? !['get', 'list', 'events', 'status'].includes(suffix) : !readSuffixes.has(suffix),
-    input: transactionInputSchemas[operation] ?? (operation === 'babyx.core.compatibility'
-      ? { type: 'object', additionalProperties: false, properties: {} }
-      : { type: 'object', additionalProperties: true }),
     output: { type: 'object', additionalProperties: true },
   };
 });

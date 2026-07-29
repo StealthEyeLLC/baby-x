@@ -613,10 +613,10 @@ export class BabyXRuntime {
   private artifactManagerInstance?: import('./artifacts/manager.ts').ArtifactManager;
   private certificationServiceInstance?: import('./certification/service.ts').CertificationService;
   private candidateRaceServiceInstance?: import('./racing/service.ts').CandidateRaceService;
-  private rootAuthorityServiceInstance?: import('./root-authority/service.ts').TransactionalRootAuthorityService;
-  private rootFabricServiceInstance?: import('./root-fabric/service.ts').RootFabricService;
   private transactionServiceInstance?: import('./transactions/service.ts').TransactionService;
   private transactionServiceInitializePromise?: Promise<JsonObject>;
+  private rootAuthorityServiceInstance?: import('./root-authority/service.ts').TransactionalRootAuthorityService;
+  private rootFabricServiceInstance?: import('./root-fabric/service.ts').RootFabricService;
   constructor(readonly options: RuntimeOptions = {}) {
     this.stateRoot = options.stateRoot ?? process.env.BABY_X_STATE_ROOT ?? '/var/lib/baby-x';
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 });
@@ -686,6 +686,26 @@ export class BabyXRuntime {
       this.candidateRaceServiceInstance = new CandidateRaceService({ stateRoot: this.stateRoot, certification: await this.certificationService(), artifacts: await this.artifactManager() });
     }
     return this.candidateRaceServiceInstance;
+  }
+  private async transactionService(): Promise<import('./transactions/service.ts').TransactionService> {
+    if (this.transactionServiceInstance === undefined) {
+      const { TransactionService } = await import('./transactions/service.ts');
+      this.transactionServiceInstance = new TransactionService({
+        stateRoot: this.stateRoot,
+        machine: await this.machineService(),
+        jobs: this.jobs,
+        artifacts: await this.artifactManager(),
+      });
+      this.transactionServiceInitializePromise = this.transactionServiceInstance.initialize().catch((error: unknown) => ({
+        operation: 'babyx.transaction.reconcile', startup: true, processed: 0, deferred: true,
+        error: {
+          code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'transaction_startup_reconcile_failed') : 'transaction_startup_reconcile_failed',
+          message: error instanceof Error ? error.message : 'transaction startup reconciliation failed',
+        },
+      }));
+    }
+    await this.transactionServiceInitializePromise;
+    return this.transactionServiceInstance;
   }
   private async rootAuthorityService(): Promise<import('./root-authority/service.ts').TransactionalRootAuthorityService> {
     if (this.rootAuthorityServiceInstance === undefined) {
@@ -849,22 +869,6 @@ export class BabyXRuntime {
       });
     }
     return this.rootFabricServiceInstance;
-  private async transactionService(): Promise<import('./transactions/service.ts').TransactionService> {
-    if (this.transactionServiceInstance === undefined) {
-      const { TransactionService } = await import('./transactions/service.ts');
-      this.transactionServiceInstance = new TransactionService({
-        stateRoot: this.stateRoot,
-        machine: await this.machineService(),
-        jobs: this.jobs,
-        artifacts: await this.artifactManager(),
-      });
-      this.transactionServiceInitializePromise = this.transactionServiceInstance.initialize().catch((error: unknown) => ({
-        operation: 'babyx.transaction.reconcile', startup: true, processed: 0, deferred: true,
-        error: { code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? 'transaction_startup_reconcile_failed') : 'transaction_startup_reconcile_failed', message: error instanceof Error ? error.message : 'transaction startup reconciliation failed' },
-      }));
-    }
-    await this.transactionServiceInitializePromise;
-    return this.transactionServiceInstance;
   }
   async execute(operation: string, payload: JsonObject = {}, context: RuntimeExecutionContext = {}): Promise<JsonObject> {
     if (!OPERATION_NAMES.has(operation)) throw new Error(`unknown operation: ${operation}`);
@@ -875,20 +879,6 @@ export class BabyXRuntime {
       return compatibility.describeCoreCompatibility({ currentSourceCommit: this.options.sourceCommit ?? process.env.BABY_X_SOURCE_COMMIT ?? null, currentSourceTree: this.options.sourceTree ?? process.env.BABY_X_SOURCE_TREE ?? null });
     }
     if (operation === 'babyx.health') return this.health();
-    if (operation.startsWith('babyx.root.')) {
-      const service = await this.rootAuthorityService();
-      if (operation === 'babyx.root.describe') return service.describe();
-      if (operation === 'babyx.root.transaction.create') return service.create(payload, context);
-      if (operation === 'babyx.root.transaction.get') return service.get(payload);
-      if (operation === 'babyx.root.transaction.list') return service.list(payload);
-      if (operation === 'babyx.root.transaction.authorize') return service.authorize(payload, context);
-      if (operation === 'babyx.root.transaction.begin') return service.begin(payload, context);
-      if (operation === 'babyx.root.transaction.observe') return service.observe(payload, context);
-      if (operation === 'babyx.root.transaction.commit') return service.commit(payload, context);
-      if (operation === 'babyx.root.transaction.rollback') return service.rollback(payload, context);
-      if (operation === 'babyx.root.transaction.events') return service.events(payload);
-      if (operation === 'babyx.root.transaction.verify') return service.verify(payload);
-      return (await this.rootFabricService()).execute(operation, payload, context);
     if (operation.startsWith('babyx.transaction.')) {
       const service = await this.transactionService();
       if (operation === 'babyx.transaction.create') return service.create(payload, context);
@@ -904,6 +894,21 @@ export class BabyXRuntime {
       if (operation === 'babyx.transaction.expire') return service.expire(payload, context);
       if (operation === 'babyx.transaction.gc') return service.gc(payload, context);
       throw new Error('unsupported transaction operation');
+    }
+    if (operation.startsWith('babyx.root.')) {
+      const service = await this.rootAuthorityService();
+      if (operation === 'babyx.root.describe') return service.describe();
+      if (operation === 'babyx.root.transaction.create') return service.create(payload, context);
+      if (operation === 'babyx.root.transaction.get') return service.get(payload);
+      if (operation === 'babyx.root.transaction.list') return service.list(payload);
+      if (operation === 'babyx.root.transaction.authorize') return service.authorize(payload, context);
+      if (operation === 'babyx.root.transaction.begin') return service.begin(payload, context);
+      if (operation === 'babyx.root.transaction.observe') return service.observe(payload, context);
+      if (operation === 'babyx.root.transaction.commit') return service.commit(payload, context);
+      if (operation === 'babyx.root.transaction.rollback') return service.rollback(payload, context);
+      if (operation === 'babyx.root.transaction.events') return service.events(payload);
+      if (operation === 'babyx.root.transaction.verify') return service.verify(payload);
+      return (await this.rootFabricService()).execute(operation, payload, context);
     }
     if (operation === 'babyx.exec') return this.executor.run(payload) as unknown as JsonObject;
     if (operation === 'babyx.shell') return this.executor.run({ ...payload, argv: [typeof payload.shell === 'string' ? payload.shell : '/usr/bin/bash', '-lc', typeof payload.script === 'string' ? payload.script : requiredString(payload, 'command')] }) as unknown as JsonObject;

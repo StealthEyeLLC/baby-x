@@ -265,8 +265,8 @@ test('G: finite process, service, mount, snapshot, storage and network effects r
 });
 
 test('A-G public surface is exact, dispatcher-backed, duplicate-free and contains no arbitrary root shell', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.5.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 231);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.6.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 243);
   const root = OPERATION_DEFINITIONS.filter(definition => definition.operation.startsWith('babyx.root.')).map(definition => definition.operation);
   const original = ['babyx.root.describe', 'babyx.root.transaction.create', 'babyx.root.transaction.get', 'babyx.root.transaction.list', 'babyx.root.transaction.authorize', 'babyx.root.transaction.begin', 'babyx.root.transaction.observe', 'babyx.root.transaction.commit', 'babyx.root.transaction.rollback', 'babyx.root.transaction.events', 'babyx.root.transaction.verify'];
   assert.equal(root.length, 51);

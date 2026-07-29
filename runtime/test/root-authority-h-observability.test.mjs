@@ -95,8 +95,8 @@ test('H repair: invented transactions and steps fail, metadata secrets never per
 });
 
 test('H: catalog exposes one schema-backed observation surface while preserving A-G', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.5.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 231);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.6.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 243);
   const root = OPERATION_DEFINITIONS.filter((entry) => entry.operation.startsWith('babyx.root.'));
   assert.equal(root.length, 51);
   const expected = ['babyx.root.observation.start', 'babyx.root.observation.get', 'babyx.root.observation.record', 'babyx.root.observation.finalize'];

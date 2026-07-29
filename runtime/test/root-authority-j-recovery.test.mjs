@@ -297,8 +297,8 @@ test('J repair: completed cleanup preserves the declared truthful terminal resul
 });
 
 test('J repair: catalog schemas and postconditions match the repaired implementation', () => {
-  assert.equal(OPERATION_CATALOG_VERSION, '3.4.0');
-  assert.equal(OPERATION_DEFINITIONS.length, 230);
+  assert.equal(OPERATION_CATALOG_VERSION, '3.5.0');
+  assert.equal(OPERATION_DEFINITIONS.length, 231);
   assert.equal(OPERATION_DEFINITIONS.filter((entry) => entry.operation.startsWith('babyx.root.')).length, 51);
   assert.equal(new Set(OPERATION_DEFINITIONS.map((entry) => entry.operation)).size, OPERATION_DEFINITIONS.length);
   for (const operation of ['babyx.root.freeze.get', 'babyx.root.freeze.set', 'babyx.root.kill', 'babyx.root.reconcile']) assert.equal(ROOT_FABRIC_OPERATION_NAMES.filter((name) => name === operation).length, 1);

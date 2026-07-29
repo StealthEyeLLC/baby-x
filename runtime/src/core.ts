@@ -209,9 +209,13 @@ export function machineWrapped(target: ExecutionTarget, argv: string[], cwd: str
     return wrapped;
   }
   const pid = String(target.processIdentity.pid);
-  const wrapped = ['/usr/bin/nsenter', '--target', pid, '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', `--root=/proc/${pid}/root`, `--wdns=${cwd}`, '--', '/usr/bin/env'];
+  // nsenter's default PID-namespace fork supervisor mirrors a stopped child by
+  // stopping itself. Detached durable jobs cannot receive that wrapper's exit
+  // event until an external SIGCONT, so use no-fork and create the actual
+  // workload as an explicit shell child after setns(CLONE_NEWPID).
+  const wrapped = ['/usr/bin/nsenter', '--target', pid, '--no-fork', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', `--root=/proc/${pid}/root`, `--wdns=${cwd}`, '--', '/usr/bin/env'];
   for (const [key, value] of Object.entries(environment)) wrapped.push(`${key}=${String(value)}`);
-  wrapped.push(...argv);
+  wrapped.push('/bin/sh', '-c', '"$@"; status=$?; exit "$status"', 'baby-x-machine-exec', ...argv);
   return wrapped;
 }
 

@@ -54,7 +54,7 @@ test('managed machine execution wrapper enters the exact leader namespaces', () 
     ['/usr/bin/printf', '%s', 'ok'],
     '/workspace',
     { MODE: 'test' },
-  ), ['/usr/bin/nsenter', '--target', '4242', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root=/proc/4242/root', '--wdns=/workspace', '--', '/usr/bin/env', 'MODE=test', '/usr/bin/printf', '%s', 'ok']);
+  ), ['/usr/bin/nsenter', '--target', '4242', '--no-fork', '--mount', '--uts', '--ipc', '--net', '--pid', '--cgroup', '--root=/proc/4242/root', '--wdns=/workspace', '--', '/usr/bin/env', 'MODE=test', '/bin/sh', '-c', '"$@"; status=$?; exit "$status"', 'baby-x-machine-exec', '/usr/bin/printf', '%s', 'ok']);
 });
 
 test('durable job reconciliation terminalizes absent and reused process identities without fabricating exit zero', async () => {
@@ -131,4 +131,17 @@ test('durable job authority rejects a reused machine leader PID before namespace
     }), /identity changed before execution/u);
     assert.equal(manager.list().length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('managed machine execution wrapper avoids nsenter stop propagation', () => {
+  const wrapped = machineWrapped(
+    { kind: 'machine-process', machine: 'machine-1', processIdentity: { pid: 4242, pgid: 4242, processStartTime: '100', executablePath: '/usr/lib/systemd/systemd', bootId: 'boot-1' } },
+    ['/usr/bin/true'],
+    '/workspace',
+    {},
+  );
+  assert.equal(wrapped.includes('--no-fork'), true);
+  assert.deepEqual(wrapped.slice(-5), ['/bin/sh', '-c', '"$@"; status=$?; exit "$status"', 'baby-x-machine-exec', '/usr/bin/true']);
+  assert.equal(wrapped.filter((value) => value === '--no-fork').length, 1);
 });

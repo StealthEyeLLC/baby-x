@@ -16,7 +16,7 @@ const DIGESTS = Object.freeze({
 
 export function createRequest(overrides = {}) {
   const request = {
-    schemaVersion: '1.1.0',
+    schemaVersion: '1.2.0',
     transactionKind: 'CODE_MUTATION',
     repository: 'StealthEyeLLC/baby-x',
     branch: 'build/baby-x-transactional-tool-fabric-v2',

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import { canonicalize, sha256, type JsonObject } from '../core.ts';
-import { TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION } from '../compatibility/manifest.ts';
+import { TRANSACTION_INTERMEDIATE_SCHEMA_VERSION, TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION } from '../compatibility/manifest.ts';
 import {
   assertCodeMutationPlan,
   codeMutationPlanDigest,
@@ -10,7 +10,7 @@ import {
   type CodePathChangeV1,
   type CodeValidationExecutionV1,
 } from './code-schemas.ts';
-export { TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION };
+export { TRANSACTION_INTERMEDIATE_SCHEMA_VERSION, TRANSACTION_LEGACY_SCHEMA_VERSION, TRANSACTION_SCHEMA_VERSION };
 
 export const TRANSACTION_EVENT_SCHEMA_VERSION = '1.0.0' as const;
 export const TRANSACTION_LEASE_SCHEMA_VERSION = '1.0.0' as const;
@@ -225,9 +225,17 @@ export interface TransactionCandidateBindingV1 extends JsonObject {
 export interface TransactionEvidenceBindingV1 extends JsonObject {
   artifactIds: string[];
   receiptReferences: string[];
+  proofReferences: string[];
+  certificationReferences: string[];
   eventTailDigest: string | null;
   finalEvidenceIndexArtifactId: string | null;
   finalEvidenceIndexDigest: string | null;
+}
+
+export interface TransactionAuthorityReferencesV1 extends JsonObject {
+  rootTransactionReferences: string[];
+  rootEffectPlanReferences: string[];
+  deploymentRecordReferences: string[];
 }
 
 export interface TransactionCleanupBindingV1 extends JsonObject {
@@ -239,6 +247,9 @@ export interface TransactionCleanupBindingV1 extends JsonObject {
   mountAbsenceVerified: boolean;
   rootPathAbsenceVerified: boolean;
   datasetAbsenceVerified: boolean;
+  socketAbsenceVerified: boolean;
+  controllerLeaseAbsenceVerified: boolean;
+  temporaryPathAbsenceVerified: boolean;
   sourcePreserved: boolean;
   completedAt: string | null;
 }
@@ -277,7 +288,7 @@ export interface TransactionLifecycleV1 extends JsonObject {
 }
 
 export interface DurableTransactionRecordV1 extends JsonObject {
-  schemaVersion: typeof TRANSACTION_SCHEMA_VERSION | typeof TRANSACTION_LEGACY_SCHEMA_VERSION;
+  schemaVersion: typeof TRANSACTION_SCHEMA_VERSION | typeof TRANSACTION_INTERMEDIATE_SCHEMA_VERSION | typeof TRANSACTION_LEGACY_SCHEMA_VERSION;
   transactionId: string;
   transactionKind: TransactionKind;
   ownerPrincipal: string;
@@ -289,6 +300,7 @@ export interface DurableTransactionRecordV1 extends JsonObject {
   execution: TransactionExecutionBindingV1;
   candidate: TransactionCandidateBindingV1;
   evidence: TransactionEvidenceBindingV1;
+  authorityReferences: TransactionAuthorityReferencesV1;
   cleanup: TransactionCleanupBindingV1;
   environment: TransactionEnvironmentBindingV1;
   code: TransactionCodeBindingV1 | null;
@@ -486,28 +498,49 @@ function validateCandidate(value: unknown, source: TransactionSourceBindingV1): 
   };
 }
 
-function validateEvidence(value: unknown): TransactionEvidenceBindingV1 {
+function validateEvidence(value: unknown, currentSchema: boolean): TransactionEvidenceBindingV1 {
   const item = object(value, 'evidence');
-  exactKeys(item, 'evidence', ['artifactIds', 'receiptReferences', 'eventTailDigest', 'finalEvidenceIndexArtifactId', 'finalEvidenceIndexDigest']);
+  exactKeys(item, 'evidence', currentSchema
+    ? ['artifactIds', 'receiptReferences', 'proofReferences', 'certificationReferences', 'eventTailDigest', 'finalEvidenceIndexArtifactId', 'finalEvidenceIndexDigest']
+    : ['artifactIds', 'receiptReferences', 'eventTailDigest', 'finalEvidenceIndexArtifactId', 'finalEvidenceIndexDigest']);
   return {
     artifactIds: stringArray(item.artifactIds, 'evidence.artifactIds'), receiptReferences: stringArray(item.receiptReferences, 'evidence.receiptReferences'),
+    proofReferences: currentSchema ? stringArray(item.proofReferences, 'evidence.proofReferences') : [],
+    certificationReferences: currentSchema ? stringArray(item.certificationReferences, 'evidence.certificationReferences') : [],
     eventTailDigest: nullableDigest(item.eventTailDigest, 'evidence.eventTailDigest'), finalEvidenceIndexArtifactId: nullableText(item.finalEvidenceIndexArtifactId, 'evidence.finalEvidenceIndexArtifactId', 256),
     finalEvidenceIndexDigest: nullableDigest(item.finalEvidenceIndexDigest, 'evidence.finalEvidenceIndexDigest'),
   };
 }
 
-function validateCleanup(value: unknown): TransactionCleanupBindingV1 {
-  const item = object(value, 'cleanup');
-  exactKeys(item, 'cleanup', ['required', 'requested', 'completed', 'machineAbsenceVerified', 'processAbsenceVerified', 'mountAbsenceVerified', 'rootPathAbsenceVerified', 'datasetAbsenceVerified', 'sourcePreserved', 'completedAt']);
-  const result = {
-    required: bool(item.required, 'cleanup.required'), requested: bool(item.requested, 'cleanup.requested'), completed: bool(item.completed, 'cleanup.completed'),
-    machineAbsenceVerified: bool(item.machineAbsenceVerified, 'cleanup.machineAbsenceVerified'), processAbsenceVerified: bool(item.processAbsenceVerified, 'cleanup.processAbsenceVerified'),
-    mountAbsenceVerified: bool(item.mountAbsenceVerified, 'cleanup.mountAbsenceVerified'), rootPathAbsenceVerified: bool(item.rootPathAbsenceVerified, 'cleanup.rootPathAbsenceVerified'),
-    datasetAbsenceVerified: bool(item.datasetAbsenceVerified, 'cleanup.datasetAbsenceVerified'), sourcePreserved: bool(item.sourcePreserved, 'cleanup.sourcePreserved'),
-    completedAt: nullableTimestamp(item.completedAt, 'cleanup.completedAt'),
+function validateAuthorityReferences(value: unknown): TransactionAuthorityReferencesV1 {
+  const item = object(value, 'authorityReferences');
+  exactKeys(item, 'authorityReferences', ['rootTransactionReferences', 'rootEffectPlanReferences', 'deploymentRecordReferences']);
+  return {
+    rootTransactionReferences: stringArray(item.rootTransactionReferences, 'authorityReferences.rootTransactionReferences'),
+    rootEffectPlanReferences: stringArray(item.rootEffectPlanReferences, 'authorityReferences.rootEffectPlanReferences'),
+    deploymentRecordReferences: stringArray(item.deploymentRecordReferences, 'authorityReferences.deploymentRecordReferences'),
   };
-  const allAbsence = result.machineAbsenceVerified && result.processAbsenceVerified && result.mountAbsenceVerified && result.rootPathAbsenceVerified && result.datasetAbsenceVerified;
-  if (result.completed && (!result.requested || !allAbsence || !result.sourcePreserved || result.completedAt === null)) invalid('completed cleanup requires requested cleanup, full positive absence, source preservation, and completion time');
+}
+
+function validateCleanup(value: unknown, currentSchema: boolean): TransactionCleanupBindingV1 {
+  const item = object(value, 'cleanup');
+  exactKeys(item, 'cleanup', currentSchema
+    ? ['required', 'requested', 'completed', 'machineAbsenceVerified', 'processAbsenceVerified', 'mountAbsenceVerified', 'rootPathAbsenceVerified', 'datasetAbsenceVerified', 'socketAbsenceVerified', 'controllerLeaseAbsenceVerified', 'temporaryPathAbsenceVerified', 'sourcePreserved', 'completedAt']
+    : ['required', 'requested', 'completed', 'machineAbsenceVerified', 'processAbsenceVerified', 'mountAbsenceVerified', 'rootPathAbsenceVerified', 'datasetAbsenceVerified', 'sourcePreserved', 'completedAt']);
+  const completed = bool(item.completed, 'cleanup.completed');
+  const rootPathAbsenceVerified = bool(item.rootPathAbsenceVerified, 'cleanup.rootPathAbsenceVerified');
+  const result = {
+    required: bool(item.required, 'cleanup.required'), requested: bool(item.requested, 'cleanup.requested'), completed,
+    machineAbsenceVerified: bool(item.machineAbsenceVerified, 'cleanup.machineAbsenceVerified'), processAbsenceVerified: bool(item.processAbsenceVerified, 'cleanup.processAbsenceVerified'),
+    mountAbsenceVerified: bool(item.mountAbsenceVerified, 'cleanup.mountAbsenceVerified'), rootPathAbsenceVerified,
+    datasetAbsenceVerified: bool(item.datasetAbsenceVerified, 'cleanup.datasetAbsenceVerified'),
+    socketAbsenceVerified: currentSchema ? bool(item.socketAbsenceVerified, 'cleanup.socketAbsenceVerified') : completed,
+    controllerLeaseAbsenceVerified: currentSchema ? bool(item.controllerLeaseAbsenceVerified, 'cleanup.controllerLeaseAbsenceVerified') : completed,
+    temporaryPathAbsenceVerified: currentSchema ? bool(item.temporaryPathAbsenceVerified, 'cleanup.temporaryPathAbsenceVerified') : rootPathAbsenceVerified,
+    sourcePreserved: bool(item.sourcePreserved, 'cleanup.sourcePreserved'), completedAt: nullableTimestamp(item.completedAt, 'cleanup.completedAt'),
+  };
+  const allAbsence = result.machineAbsenceVerified && result.processAbsenceVerified && result.mountAbsenceVerified && result.rootPathAbsenceVerified && result.datasetAbsenceVerified && result.socketAbsenceVerified && result.controllerLeaseAbsenceVerified && result.temporaryPathAbsenceVerified;
+  if (result.completed && (!result.requested || !allAbsence || !result.sourcePreserved || result.completedAt === null)) invalid('completed cleanup requires requested cleanup, full positive absence, source preservation, lease absence, and completion time');
   if (!result.completed && result.completedAt !== null) invalid('incomplete cleanup cannot have completedAt');
   return result;
 }
@@ -584,20 +617,25 @@ export function newTransactionId(): string {
 export function assertTransactionRecord(value: unknown): DurableTransactionRecordV1 {
   const item = object(value, 'transaction');
   const legacy = item.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION;
+  const intermediate = item.schemaVersion === TRANSACTION_INTERMEDIATE_SCHEMA_VERSION;
   const current = item.schemaVersion === TRANSACTION_SCHEMA_VERSION;
-  if (!legacy && !current) invalid('transaction schema version is unsupported', { schemaVersion: item.schemaVersion });
+  if (!legacy && !intermediate && !current) invalid('transaction schema version is unsupported', { schemaVersion: item.schemaVersion });
   exactKeys(item, 'transaction', legacy
     ? ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'error']
-    : ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'code', 'error']);
+    : intermediate
+      ? ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'cleanup', 'environment', 'code', 'error']
+      : ['schemaVersion', 'transactionId', 'transactionKind', 'ownerPrincipal', 'creationRequestDigest', 'idempotencyKey', 'lifecycle', 'source', 'policy', 'execution', 'candidate', 'evidence', 'authorityReferences', 'cleanup', 'environment', 'code', 'error']);
   const transactionKind = text(item.transactionKind, 'transactionKind') as TransactionKind;
   if (!TRANSACTION_KINDS.includes(transactionKind)) invalid('transaction kind is unsupported', { transactionKind });
   const source = validateSource(item.source);
   const record: DurableTransactionRecordV1 = {
-    schemaVersion: legacy ? TRANSACTION_LEGACY_SCHEMA_VERSION : TRANSACTION_SCHEMA_VERSION, transactionId: assertTransactionId(item.transactionId), transactionKind,
+    schemaVersion: legacy ? TRANSACTION_LEGACY_SCHEMA_VERSION : intermediate ? TRANSACTION_INTERMEDIATE_SCHEMA_VERSION : TRANSACTION_SCHEMA_VERSION, transactionId: assertTransactionId(item.transactionId), transactionKind,
     ownerPrincipal: text(item.ownerPrincipal, 'ownerPrincipal', 512), creationRequestDigest: digest(item.creationRequestDigest, 'creationRequestDigest'),
     idempotencyKey: text(item.idempotencyKey, 'idempotencyKey', 256), lifecycle: validateLifecycle(item.lifecycle), source,
     policy: validatePolicy(item.policy), execution: validateExecution(item.execution), candidate: legacy ? validateLegacyCandidate(item.candidate, source) : validateCandidate(item.candidate, source),
-    evidence: validateEvidence(item.evidence), cleanup: validateCleanup(item.cleanup), environment: validateEnvironment(item.environment),
+    evidence: validateEvidence(item.evidence, current),
+    authorityReferences: current ? validateAuthorityReferences(item.authorityReferences) : { rootTransactionReferences: [], rootEffectPlanReferences: [], deploymentRecordReferences: [] },
+    cleanup: validateCleanup(item.cleanup, current), environment: validateEnvironment(item.environment),
     code: legacy ? null : validateCode(item.code, assertTransactionId(item.transactionId), source), error: validateError(item.error),
   };
   assertTransactionStateInvariants(record);
@@ -623,17 +661,25 @@ export function assertTransactionTransition(prior: TransactionState, next: Trans
 }
 
 export function transactionRecordDigest(record: DurableTransactionRecordV1): string {
-  if (record.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION) {
-    const { code: _code, candidate, ...rest } = record;
-    const legacyCandidate = {
-      candidateId: candidate.candidateId, baseCommit: candidate.baseCommit, baseTree: candidate.baseTree,
-      candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, patchArtifactId: candidate.patchArtifactId,
-      candidateArchiveArtifactId: candidate.candidateArchiveArtifactId, candidateManifestArtifactId: candidate.candidateManifestArtifactId,
-      validationDigest: candidate.validationDigest, validationPassed: candidate.validationPassed,
-    };
-    const legacy = { ...rest, candidate: legacyCandidate };
-    assertTransactionRecord(legacy);
-    return sha256(canonicalize(legacy));
+  if (record.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION || record.schemaVersion === TRANSACTION_INTERMEDIATE_SCHEMA_VERSION) {
+    const { authorityReferences: _authorityReferences, evidence, cleanup, ...withoutAuthority } = record;
+    const { proofReferences: _proofReferences, certificationReferences: _certificationReferences, ...priorEvidence } = evidence;
+    const { socketAbsenceVerified: _socketAbsenceVerified, controllerLeaseAbsenceVerified: _controllerLeaseAbsenceVerified, temporaryPathAbsenceVerified: _temporaryPathAbsenceVerified, ...priorCleanup } = cleanup;
+    if (record.schemaVersion === TRANSACTION_LEGACY_SCHEMA_VERSION) {
+      const { code: _code, candidate, ...rest } = withoutAuthority;
+      const legacyCandidate = {
+        candidateId: candidate.candidateId, baseCommit: candidate.baseCommit, baseTree: candidate.baseTree,
+        candidateTree: candidate.candidateTree, changedPaths: candidate.changedPaths, patchArtifactId: candidate.patchArtifactId,
+        candidateArchiveArtifactId: candidate.candidateArchiveArtifactId, candidateManifestArtifactId: candidate.candidateManifestArtifactId,
+        validationDigest: candidate.validationDigest, validationPassed: candidate.validationPassed,
+      };
+      const legacy = { ...rest, candidate: legacyCandidate, evidence: priorEvidence, cleanup: priorCleanup };
+      assertTransactionRecord(legacy);
+      return sha256(canonicalize(legacy));
+    }
+    const intermediate = { ...withoutAuthority, evidence: priorEvidence, cleanup: priorCleanup };
+    assertTransactionRecord(intermediate);
+    return sha256(canonicalize(intermediate));
   }
   return sha256(canonicalize(assertTransactionRecord(record)));
 }
@@ -703,8 +749,9 @@ export function initialTransactionRecord(request: TransactionCreateRequestV1, ow
     },
     execution: { machineIds: [], activeJobIds: [], allRelatedJobIds: [], mutationJobIds: [], validationJobIds: [], jobTerminalityStatus: 'not-observed', mutationSubmitted: false, validationSubmitted: false },
     candidate: { candidateId: null, baseCommit: request.commit, baseTree: request.tree, candidateTree: null, changedPaths: [], addedFiles: [], deletedFiles: [], modifiedFiles: [], fileModeChanges: [], symlinkChanges: [], pathChanges: [], patchArtifactId: null, candidateArchiveArtifactId: null, candidateManifestArtifactId: null, validationDigest: null, mutationPlanDigest: '0'.repeat(64), validationPassed: false },
-    evidence: { artifactIds: [], receiptReferences: [], eventTailDigest: null, finalEvidenceIndexArtifactId: null, finalEvidenceIndexDigest: null },
-    cleanup: { required: false, requested: false, completed: false, machineAbsenceVerified: false, processAbsenceVerified: false, mountAbsenceVerified: false, rootPathAbsenceVerified: false, datasetAbsenceVerified: false, sourcePreserved: false, completedAt: null },
+    evidence: { artifactIds: [], receiptReferences: [], proofReferences: [], certificationReferences: [], eventTailDigest: null, finalEvidenceIndexArtifactId: null, finalEvidenceIndexDigest: null },
+    authorityReferences: { rootTransactionReferences: [], rootEffectPlanReferences: [], deploymentRecordReferences: [] },
+    cleanup: { required: false, requested: false, completed: false, machineAbsenceVerified: false, processAbsenceVerified: false, mountAbsenceVerified: false, rootPathAbsenceVerified: false, datasetAbsenceVerified: false, socketAbsenceVerified: false, controllerLeaseAbsenceVerified: false, temporaryPathAbsenceVerified: false, sourcePreserved: false, completedAt: null },
     environment: { normalizedValues, normalizedDigest: sha256(canonicalize(normalizedValues)), credentialReferenceIds: request.credentialReferenceIds ?? [], credentialPresence: request.credentialPresence ?? false },
     code: (() => {
       const mutationPlan = normalizeCodeMutationPlan(request.mutationPlan, transactionId, request.commit, request.tree);

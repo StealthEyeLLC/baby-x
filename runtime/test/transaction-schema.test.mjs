@@ -52,6 +52,8 @@ function committedRecord() {
     evidence: {
       artifactIds: ['archive-1', 'evidence-1', 'manifest-1', 'patch-1'],
       receiptReferences: ['receipt-1'],
+      proofReferences: ['proof-1'],
+      certificationReferences: ['certification-1'],
       eventTailDigest: '8'.repeat(64),
       finalEvidenceIndexArtifactId: 'evidence-1',
       finalEvidenceIndexDigest: '9'.repeat(64),
@@ -65,6 +67,9 @@ function committedRecord() {
       mountAbsenceVerified: true,
       rootPathAbsenceVerified: true,
       datasetAbsenceVerified: true,
+      socketAbsenceVerified: true,
+      controllerLeaseAbsenceVerified: true,
+      temporaryPathAbsenceVerified: true,
       sourcePreserved: true,
       completedAt: '2026-07-25T12:19:00.000Z',
     },
@@ -111,7 +116,11 @@ test('COMMITTED requires candidate tree, validation, terminal jobs, cleanup, and
   assert.throws(() => assertTransactionRecord({ ...valid, candidate: { ...valid.candidate, candidateTree: null } }), /durable validated candidate/u);
   assert.throws(() => assertTransactionRecord({ ...valid, execution: { ...valid.execution, activeJobIds: ['job-1'], jobTerminalityStatus: 'active' } }), /all related jobs terminal/u);
   assert.throws(() => assertTransactionRecord({ ...valid, cleanup: { ...valid.cleanup, completed: false, completedAt: null } }), /completed positive cleanup/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, cleanup: { ...valid.cleanup, controllerLeaseAbsenceVerified: false } }), /full positive absence|completed cleanup/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, cleanup: { ...valid.cleanup, socketAbsenceVerified: false } }), /full positive absence|completed cleanup/u);
+  assert.throws(() => assertTransactionRecord({ ...valid, cleanup: { ...valid.cleanup, temporaryPathAbsenceVerified: false } }), /full positive absence|completed cleanup/u);
   assert.throws(() => assertTransactionRecord({ ...valid, evidence: { ...valid.evidence, finalEvidenceIndexArtifactId: null } }), /complete evidence/u);
+  assert.deepEqual(valid.authorityReferences, { rootTransactionReferences: [], rootEffectPlanReferences: [], deploymentRecordReferences: [] });
 });
 
 test('FAILED, ROLLED_BACK, and EXPIRED cannot hide unresolved cleanup', () => {
@@ -175,9 +184,28 @@ test('structured error details are bounded and redact secret-bearing keys', () =
 });
 
 
-test('existing strict V2-B records remain readable without durable rewrite', () => {
+test('existing strict V2-B and V2-C records remain readable without durable rewrite', () => {
   const current = makeRecord();
-  const { code: _code, candidate, ...rest } = current;
+  const {
+    code,
+    authorityReferences: _authorityReferences,
+    candidate,
+    evidence,
+    cleanup,
+    ...rest
+  } = current;
+  const {
+    proofReferences: _proofReferences,
+    certificationReferences: _certificationReferences,
+    ...priorEvidence
+  } = evidence;
+  const {
+    socketAbsenceVerified: _socketAbsenceVerified,
+    controllerLeaseAbsenceVerified: _controllerLeaseAbsenceVerified,
+    temporaryPathAbsenceVerified: _temporaryPathAbsenceVerified,
+    ...priorCleanup
+  } = cleanup;
+
   const legacy = {
     ...rest,
     schemaVersion: '1.0.0',
@@ -193,12 +221,35 @@ test('existing strict V2-B records remain readable without durable rewrite', () 
       validationDigest: candidate.validationDigest,
       validationPassed: candidate.validationPassed,
     },
+    evidence: priorEvidence,
+    cleanup: priorCleanup,
   };
-  const before = JSON.stringify(legacy);
-  const readable = assertTransactionRecord(legacy);
-  assert.equal(readable.schemaVersion, '1.0.0');
-  assert.equal(readable.code, null);
-  assert.equal(JSON.stringify(legacy), before);
-  assert.match(transactionRecordDigest(readable), /^[a-f0-9]{64}$/u);
+  const legacyBefore = JSON.stringify(legacy);
+  const readableLegacy = assertTransactionRecord(legacy);
+  assert.equal(readableLegacy.schemaVersion, '1.0.0');
+  assert.equal(readableLegacy.code, null);
+  assert.deepEqual(readableLegacy.authorityReferences, { rootTransactionReferences: [], rootEffectPlanReferences: [], deploymentRecordReferences: [] });
+  assert.deepEqual(readableLegacy.evidence.proofReferences, []);
+  assert.deepEqual(readableLegacy.evidence.certificationReferences, []);
+  assert.equal(JSON.stringify(legacy), legacyBefore);
+  assert.match(transactionRecordDigest(readableLegacy), /^[a-f0-9]{64}$/u);
   assert.throws(() => assertTransactionRecord({ ...legacy, code: null }), /incompatible schema/u);
+
+  const intermediate = {
+    ...rest,
+    schemaVersion: '1.1.0',
+    candidate,
+    evidence: priorEvidence,
+    cleanup: priorCleanup,
+    code,
+  };
+  const intermediateBefore = JSON.stringify(intermediate);
+  const readableIntermediate = assertTransactionRecord(intermediate);
+  assert.equal(readableIntermediate.schemaVersion, '1.1.0');
+  assert.deepEqual(readableIntermediate.authorityReferences, { rootTransactionReferences: [], rootEffectPlanReferences: [], deploymentRecordReferences: [] });
+  assert.deepEqual(readableIntermediate.evidence.proofReferences, []);
+  assert.deepEqual(readableIntermediate.evidence.certificationReferences, []);
+  assert.equal(JSON.stringify(intermediate), intermediateBefore);
+  assert.match(transactionRecordDigest(readableIntermediate), /^[a-f0-9]{64}$/u);
+  assert.throws(() => assertTransactionRecord({ ...intermediate, authorityReferences: current.authorityReferences }), /incompatible schema/u);
 });

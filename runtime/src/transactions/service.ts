@@ -90,6 +90,11 @@ export interface TransactionEvidenceResult {
   finalEvidenceIndexDigest: string;
   artifactIds: string[];
   receiptReferences: string[];
+  proofReferences?: string[];
+  certificationReferences?: string[];
+  rootTransactionReferences?: string[];
+  rootEffectPlanReferences?: string[];
+  deploymentRecordReferences?: string[];
 }
 
 export interface TransactionCodeDriver {
@@ -402,7 +407,20 @@ export class TransactionService {
   }
 
   private releaseLease(record: DurableTransactionRecordV1, lease: TransactionControllerLeaseV1): void {
+    const active = this.store.activeLease(record.transactionId);
+    if (active === null) return;
+    if (active.leaseId !== lease.leaseId || active.ownerPrincipal !== record.ownerPrincipal || active.controllerId !== this.controllerId) {
+      throw serviceError('transaction_lease_conflict', 'controller lease changed before release', { transactionId: record.transactionId, expectedLeaseId: lease.leaseId, observedLeaseId: active.leaseId });
+    }
     this.store.releaseLease(record.transactionId, lease.leaseId, record.ownerPrincipal, this.controllerId);
+  }
+
+  private completeCleanupAfterLeaseRelease(record: DurableTransactionRecordV1, lease: TransactionControllerLeaseV1, requestDigest: string, context: TransactionOperationContext, operation: string): DurableTransactionRecordV1 {
+    this.releaseLease(record, lease);
+    if (this.store.activeLease(record.transactionId) !== null) throw serviceError('transaction_lease_absence_unverified', 'controller lease absence could not be verified', { transactionId: record.transactionId });
+    return this.store.update(record.transactionId, record.lifecycle.stateSequence, this.details(operation, 'cleanup-lease-absent', requestDigest, context), {
+      cleanup: { completed: true, controllerLeaseAbsenceVerified: true, completedAt: this.now() },
+    });
   }
 
   private details(operation: string, phase: string, requestDigest: string, context: TransactionOperationContext, extra: Partial<TransactionMutationDetails> = {}): TransactionMutationDetails {
@@ -535,7 +553,7 @@ export class TransactionService {
       try { candidate = await this.options.codeDriver.finalize(current, context); }
       catch (error) {
         const rollback = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.finalize', 'candidate-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, error: errorBinding('transaction_candidate_failed', error instanceof Error ? error.message : String(error), false, 'candidate', error) });
-        return this.cleanupToTerminal(rollback, prelude.requestDigest, context, false);
+        return this.cleanupToTerminal(rollback, prelude.requestDigest, context, false, lease);
       }
       const artifactIds = stringList(candidate.artifactIds, 'artifactIds');
       for (const requiredId of [candidate.patchArtifactId, candidate.candidateArchiveArtifactId, candidate.candidateManifestArtifactId]) {
@@ -575,7 +593,21 @@ export class TransactionService {
         const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
         if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'evidence artifact is not finalized and digest-verified', { artifactId });
       }
-      current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.finalize', 'evidence-durable', prelude.requestDigest, context), { evidence: { artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]), receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]), finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest } });
+      current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.finalize', 'evidence-durable', prelude.requestDigest, context), {
+        evidence: {
+          artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]),
+          receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]),
+          proofReferences: unique([...current.evidence.proofReferences, ...stringList(evidence.proofReferences ?? [], 'evidence.proofReferences')]),
+          certificationReferences: unique([...current.evidence.certificationReferences, ...stringList(evidence.certificationReferences ?? [], 'evidence.certificationReferences')]),
+          finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest,
+        },
+        authorityReferences: {
+          rootTransactionReferences: unique([...current.authorityReferences.rootTransactionReferences, ...stringList(evidence.rootTransactionReferences ?? [], 'evidence.rootTransactionReferences')]),
+          rootEffectPlanReferences: unique([...current.authorityReferences.rootEffectPlanReferences, ...stringList(evidence.rootEffectPlanReferences ?? [], 'evidence.rootEffectPlanReferences')]),
+          deploymentRecordReferences: unique([...current.authorityReferences.deploymentRecordReferences, ...stringList(evidence.deploymentRecordReferences ?? [], 'evidence.deploymentRecordReferences')]),
+        },
+      });
+      current = this.completeCleanupAfterLeaseRelease(current, lease, prelude.requestDigest, context, 'babyx.transaction.finalize');
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'COMMITTED', this.details('babyx.transaction.finalize', 'transaction-committed', prelude.requestDigest, context, { candidateId: current.candidate.candidateId, candidateTree: current.candidate.candidateTree }));
       return { operation: 'babyx.transaction.finalize', transaction: publicRecord(current), replayed: false };
     } finally { this.releaseLease(prelude.record, lease); }
@@ -594,16 +626,17 @@ export class TransactionService {
 
   private async cleanupWithLease(record: DurableTransactionRecordV1, requestDigest: string, context: TransactionOperationContext, expired: boolean, operation: string): Promise<JsonObject> {
     const lease = this.acquireLease(record, operation);
-    try { return await this.cleanupToTerminal(record, requestDigest, context, expired); }
+    try { return await this.cleanupToTerminal(record, requestDigest, context, expired, lease); }
     finally { this.releaseLease(record, lease); }
   }
 
-  private async cleanupToTerminal(record: DurableTransactionRecordV1, requestDigest: string, context: TransactionOperationContext, expired: boolean): Promise<JsonObject> {
+  private async cleanupToTerminal(record: DurableTransactionRecordV1, requestDigest: string, context: TransactionOperationContext, expired: boolean, lease: TransactionControllerLeaseV1): Promise<JsonObject> {
     let current = record;
     if (current.lifecycle.persistedState === 'ROLLBACK_REQUESTED') current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLING_BACK', this.details(expired ? 'babyx.transaction.expire' : 'babyx.transaction.rollback', 'rollback-cleanup', requestDigest, context), { cleanup: { requested: true } });
     const cleaned = await this.cleanupResources(current, requestDigest, context);
     current = cleaned.record;
     if (!cleaned.complete) return { operation: expired ? 'babyx.transaction.expire' : 'babyx.transaction.rollback', transaction: publicRecord(current), replayed: false };
+    current = this.completeCleanupAfterLeaseRelease(current, lease, requestDigest, context, expired ? 'babyx.transaction.expire' : 'babyx.transaction.rollback');
     current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, expired ? 'EXPIRED' : 'ROLLED_BACK', this.details(expired ? 'babyx.transaction.expire' : 'babyx.transaction.rollback', expired ? 'expired' : 'rolled-back', requestDigest, context));
     return { operation: expired ? 'babyx.transaction.expire' : 'babyx.transaction.rollback', transaction: publicRecord(current), replayed: false };
   }
@@ -630,7 +663,7 @@ export class TransactionService {
     }
     current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'cleanup-jobs-terminal', requestDigest, context), { execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' } });
     if (current.execution.machineIds.length === 0) {
-      current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'cleanup-no-machine-bound', requestDigest, context), { cleanup: { required: false, requested: true, completed: true, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, sourcePreserved: true, completedAt: this.now() } });
+      current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'cleanup-no-machine-bound', requestDigest, context), { cleanup: { required: false, requested: true, completed: false, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, socketAbsenceVerified: true, controllerLeaseAbsenceVerified: false, temporaryPathAbsenceVerified: true, sourcePreserved: true, completedAt: null } });
       return { record: current, complete: true };
     }
     let fullAbsence = true;
@@ -668,7 +701,7 @@ export class TransactionService {
       current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'RECOVERY_REQUIRED', this.details('babyx.transaction.reconcile', 'cleanup-readback-incomplete', requestDigest, context), { error: errorBinding('transaction_cleanup_incomplete', 'machine cleanup lacks complete positive absence or source preservation proof', true, 'cleanup') });
       return { record: current, complete: false };
     }
-    current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'cleanup-complete', requestDigest, context), { cleanup: { requested: true, completed: true, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, sourcePreserved: true, completedAt: this.now() } });
+    current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'cleanup-complete', requestDigest, context), { cleanup: { requested: true, completed: false, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, socketAbsenceVerified: true, controllerLeaseAbsenceVerified: false, temporaryPathAbsenceVerified: true, sourcePreserved: true, completedAt: null } });
     return { record: current, complete: true };
   }
 
@@ -704,7 +737,7 @@ export class TransactionService {
       if (['ROLLBACK_REQUESTED', 'ROLLING_BACK'].includes(current.lifecycle.persistedState) || current.lifecycle.persistedState === 'RECOVERY_REQUIRED' && ['ROLLED_BACK', 'EXPIRED'].includes(current.lifecycle.desiredState)) {
         return this.cleanupToTerminal(current.lifecycle.persistedState === 'RECOVERY_REQUIRED'
           ? this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLING_BACK', this.details('babyx.transaction.reconcile', 'resume-rollback', prelude.requestDigest, context))
-          : current, prelude.requestDigest, context, current.lifecycle.desiredState === 'EXPIRED');
+          : current, prelude.requestDigest, context, current.lifecycle.desiredState === 'EXPIRED', lease);
       }
 
       if (current.lifecycle.persistedState === 'EXECUTING') {
@@ -716,7 +749,7 @@ export class TransactionService {
         if (!mutationTruth.allTerminal) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false, deferred: true };
         if (!mutationTruth.allSuccessful) {
           current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'mutation-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' }, error: errorBinding('transaction_mutation_failed', 'mutation job failed or was lost', false, 'execution', { jobs: mutationTruth.records.map((job) => ({ id: job.id, status: job.status, exitCode: job.exitCode ?? null, signal: job.signal ?? null })) }) });
-          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false, lease);
         }
         const driver = this.options.codeDriver;
         if (driver === undefined) {
@@ -750,7 +783,7 @@ export class TransactionService {
         if (!validationTruth.allTerminal) return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false, deferred: true };
         if (!validationTruth.allSuccessful) {
           current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'validation-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' }, error: errorBinding('transaction_validation_failed', 'required validation failed or was lost', false, 'validation', { jobs: validationTruth.records.map((job) => ({ id: job.id, status: job.status, exitCode: job.exitCode ?? null, signal: job.signal ?? null })) }) });
-          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false, lease);
         }
         current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'PREPARING_CANDIDATE', this.details('babyx.transaction.reconcile', 'resume-candidate-intent', prelude.requestDigest, context), { execution: { activeJobIds: [], jobTerminalityStatus: 'all-terminal' } });
       }
@@ -765,7 +798,7 @@ export class TransactionService {
         try { candidate = await driver.finalize(current, context); }
         catch (error) {
           current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.reconcile', 'candidate-failed', prelude.requestDigest, context), { lifecycle: { desiredState: 'ROLLED_BACK' }, error: errorBinding('transaction_candidate_failed', error instanceof Error ? error.message : String(error), false, 'candidate', error) });
-          return this.cleanupToTerminal(current, prelude.requestDigest, context, false);
+          return this.cleanupToTerminal(current, prelude.requestDigest, context, false, lease);
         }
         const artifactIds = stringList(candidate.artifactIds, 'artifactIds');
         for (const requiredId of [candidate.patchArtifactId, candidate.candidateArchiveArtifactId, candidate.candidateManifestArtifactId]) {
@@ -820,8 +853,12 @@ export class TransactionService {
             const artifact = this.options.artifacts.verify?.(artifactId) ?? this.options.artifacts.get(artifactId);
             if (artifact.state !== 'finalized' || typeof artifact.sha256 !== 'string') throw serviceError('transaction_artifact_incomplete', 'evidence artifact is not finalized and digest-verified', { artifactId });
           }
-          current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'evidence-durable', prelude.requestDigest, context), { evidence: { artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]), receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]), finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest } });
+          current = this.store.update(current.transactionId, current.lifecycle.stateSequence, this.details('babyx.transaction.reconcile', 'evidence-durable', prelude.requestDigest, context), {
+            evidence: { artifactIds: unique([...current.evidence.artifactIds, ...evidenceArtifacts]), receiptReferences: unique([...current.evidence.receiptReferences, ...evidence.receiptReferences]), proofReferences: unique([...current.evidence.proofReferences, ...stringList(evidence.proofReferences ?? [], 'evidence.proofReferences')]), certificationReferences: unique([...current.evidence.certificationReferences, ...stringList(evidence.certificationReferences ?? [], 'evidence.certificationReferences')]), finalEvidenceIndexArtifactId: evidence.finalEvidenceIndexArtifactId, finalEvidenceIndexDigest: evidence.finalEvidenceIndexDigest },
+            authorityReferences: { rootTransactionReferences: unique([...current.authorityReferences.rootTransactionReferences, ...stringList(evidence.rootTransactionReferences ?? [], 'evidence.rootTransactionReferences')]), rootEffectPlanReferences: unique([...current.authorityReferences.rootEffectPlanReferences, ...stringList(evidence.rootEffectPlanReferences ?? [], 'evidence.rootEffectPlanReferences')]), deploymentRecordReferences: unique([...current.authorityReferences.deploymentRecordReferences, ...stringList(evidence.deploymentRecordReferences ?? [], 'evidence.deploymentRecordReferences')]) },
+          });
         }
+        current = this.completeCleanupAfterLeaseRelease(current, lease, prelude.requestDigest, context, 'babyx.transaction.reconcile');
         current = this.store.transition(current.transactionId, current.lifecycle.stateSequence, 'COMMITTED', this.details('babyx.transaction.reconcile', 'transaction-committed', prelude.requestDigest, context, { candidateId: current.candidate.candidateId, candidateTree: current.candidate.candidateTree }));
       }
       return { operation: 'babyx.transaction.reconcile', transaction: publicRecord(current), replayed: false };
@@ -834,7 +871,8 @@ export class TransactionService {
     if (prelude.record.lifecycle.terminal) throw serviceError('transaction_terminal', 'terminal transaction cannot be expired');
     if (prelude.record.lifecycle.persistedState === 'AMBIGUOUS') throw serviceError('transaction_identity_ambiguous', 'ambiguous transaction cannot be expired destructively');
     if (!prelude.record.cleanup.required && prelude.record.execution.allRelatedJobIds.length === 0) {
-      const expired = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'EXPIRED', this.details('babyx.transaction.expire', 'expired-without-resources', prelude.requestDigest, context), { lifecycle: { desiredState: 'EXPIRED' }, cleanup: { requested: true, completed: true, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, sourcePreserved: true, completedAt: this.now() } });
+      if (this.store.activeLease(prelude.record.transactionId) !== null) throw serviceError('transaction_lease_conflict', 'resource-free expiration requires controller lease absence');
+      const expired = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'EXPIRED', this.details('babyx.transaction.expire', 'expired-without-resources', prelude.requestDigest, context), { lifecycle: { desiredState: 'EXPIRED' }, cleanup: { requested: true, completed: true, machineAbsenceVerified: true, processAbsenceVerified: true, mountAbsenceVerified: true, rootPathAbsenceVerified: true, datasetAbsenceVerified: true, socketAbsenceVerified: true, controllerLeaseAbsenceVerified: true, temporaryPathAbsenceVerified: true, sourcePreserved: true, completedAt: this.now() } });
       return { operation: 'babyx.transaction.expire', transaction: publicRecord(expired), replayed: false };
     }
     const rollback = this.store.transition(prelude.record.transactionId, prelude.record.lifecycle.stateSequence, 'ROLLBACK_REQUESTED', this.details('babyx.transaction.expire', 'expiration-cleanup-requested', prelude.requestDigest, context), { lifecycle: { desiredState: 'EXPIRED' }, cleanup: { requested: true } });
